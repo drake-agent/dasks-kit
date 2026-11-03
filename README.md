@@ -23,7 +23,7 @@ Nothing listens beyond `127.0.0.1` unless you put the board on your own network 
 
 ## Install
 
-Needs macOS, Node 22.18+, git and python3. `gitleaks` is needed to push (the installer offers `brew install gitleaks`).
+Needs macOS, a Node release with its security fixes (22.23.4+, 24.22.1+ or 26.12.1+), git and python3. `gitleaks` is needed to push (the installer offers `brew install gitleaks`).
 
 **Path 1: let your agent do it.** Paste this into Claude Code (or Codex):
 

@@ -22,7 +22,7 @@ Markdown 파일로 된 평범한 git 저장소라서, 모든 변경이 읽고 �
 
 ## 설치
 
-macOS, Node 22.18 이상, git, python3가 필요해요. 푸시하려면 `gitleaks`도 있어야 해요. 없으면 설치할 때
+macOS, 보안 수정이 들어간 Node(22.23.4+, 24.22.1+ 또는 26.12.1+), git, python3가 필요해요. 푸시하려면 `gitleaks`도 있어야 해요. 없으면 설치할 때
 `brew install gitleaks`를 권해 드려요.
 
 **방법 1: 에이전트에게 맡기기.** Claude Code(또는 Codex)에 이 문장을 붙여 넣으세요.

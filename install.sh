@@ -78,6 +78,10 @@ NODE=$(command -v node || true)
 NODE_V=$("$NODE" -p 'process.versions.node')
 "$NODE" -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>22||(a===22&&b>=18)?0:1)' \
   || fail "node $NODE_V is too old (need 22.18+). Fix: brew upgrade node"
+if ! "$NODE" "$KIT/src/lib/node-floor.ts"; then
+  [ "${DASKS_ALLOW_UNPATCHED_NODE:-}" = 1 ] || fail "update node first, then run the installer again (DASKS_ALLOW_UNPATCHED_NODE=1 installs anyway)"
+  say "installing on a node without its security fixes (DASKS_ALLOW_UNPATCHED_NODE=1)"
+fi
 command -v npm >/dev/null || fail "npm is missing (it comes with node). Fix: brew reinstall node"
 MACHINE=$(hostname -s 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-' | cut -c1-16); MACHINE=${MACHINE:-local}
 [ -n "$MACHINE_IN" ] && MACHINE=$MACHINE_IN

@@ -7,7 +7,7 @@ and tell the user if a step fails; do not work around it.
 
 ```bash
 uname -s                       # must print Darwin
-node -p process.versions.node  # 22.18 or newer
+node -p process.versions.node  # 22.23.4+, 24.22.1+ or 26.12.1+ (the installer refuses older ones)
 git --version && python3 --version
 command -v gitleaks || echo "gitleaks missing"
 lsof -nP -iTCP:4747 -sTCP:LISTEN || echo "4747 free"
