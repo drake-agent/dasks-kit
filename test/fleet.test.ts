@@ -221,7 +221,7 @@ test('install.sh --join: a second HOME gets the clients pointing at the board, n
     fs.writeFileSync(tokFile, b.token(['machine', 'add', 'mini']) + '\n', { mode: 0o600 });
     const localFile = path.join(home, 'local.token');
     fs.writeFileSync(localFile, b.token(['issue', '*']) + '\n', { mode: 0o600 });
-    const env = { ...clean(), HOME: home, PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin` };
+    const env = { ...clean(), HOME: home, PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`, DASKS_ALLOW_UNPATCHED_NODE: '1' };
     const sh = (...a: string[]) => spawnSync('bash', [path.join(ROOT, 'install.sh'), '--no-launchd', '--no-claude-mcp', '--no-codex-mcp', ...a], { env, encoding: 'utf8' });
     assert.equal(sh('--join', b.net).status, 2, 'a join needs its token file');
     const local = sh('--join', b.net, '--token-file', localFile);

@@ -58,9 +58,12 @@ import { askLines, askText, askTitle, conflictsSection, pickAsk, validateAsk } f
 import { itemsProgress, itemsView, reportItem, seedItems } from './lib/items.ts';
 import { assertTouchesFree, repoKey } from './lib/claim-guard.ts';
 import { migrateBoard, SchemaTooNew, SCHEMA_VERSION } from './lib/migrate.ts';
+import { nodeProblem } from './lib/node-floor.ts';
 import { type Body, parseAnswer, parseCardAction, parseChat, parseLease, parseLeaseCheck, parseNodePatch, parseOutcomeOrFail, parseResetAttempts, parseTaskPatch, versionOf } from './lib/bodies.ts';
 
 const ROOT = boardRoot();
+const NODE_PROBLEM = nodeProblem(process.versions.node);
+if (NODE_PROBLEM) console.error(`warning: ${NODE_PROBLEM}`);
 const cfg = loadConfig(ROOT);
 {
   const i = process.argv.indexOf('--listen');
@@ -443,7 +446,8 @@ function health(res: http.ServerResponse) {
   const ready = Object.values(parts).every((x) => x.ok);
   // The backup is not a part: a failing push is a warning, never a reason to stop serving.
   const b = backupNow();
-  return send(res, ready ? 200 : 503, { ok: ready, ready, version, ...parts, backup: { state: b.state }, warnings: b.warning ? [b.warning] : [], reload: { ...reloadStats, task_parses: loadStats.task_parses } });
+  const warnings = [b.warning, NODE_PROBLEM].filter((w): w is string => !!w);
+  return send(res, ready ? 200 : 503, { ok: ready, ready, version, ...parts, backup: { state: b.state }, warnings, reload: { ...reloadStats, task_parses: loadStats.task_parses } });
 }
 
 function setWarningHeader(warnings: string[], res: http.ServerResponse) {

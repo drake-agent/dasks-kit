@@ -12,3 +12,5 @@ if (ms > 0) {
 // Server times carry this machine's offset; the suite runs in UTC so stamps agree on every machine (a test that is about
 // another zone sets its own).
 process.env.TZ = 'UTC';
+// The installer refuses a Node without its security fixes; the suite must also run on one (node-floor.test.ts tests that).
+process.env.DASKS_ALLOW_UNPATCHED_NODE = '1';
