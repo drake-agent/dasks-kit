@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0B0C0F">
+  <title>Dasks</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/ds/fonts.css">
+  <link rel="stylesheet" href="/ds/tokens.css">
+  <link rel="stylesheet" href="/ds/components.css">
+  <link rel="stylesheet" href="/fleet.css">
+  <link rel="stylesheet" href="/chrome.css">
+  <script src="/i18n.js" defer></script>
+  <script src="/chrome.js" defer></script>
+  <script src="/fleet.js" defer></script>
+</head>
+<!-- Agents: GET /api/fleet, /api/captain and /api/captain/chat. -->
+<body data-theme="dasks" data-variant="metal">
+  <script src="/theme-boot.js"></script>
+  <header class="fleet-head"><h1 id="fleet-title"></h1></header>
+  <main id="fleet" tabindex="-1">
+    <section aria-labelledby="cap-h"><h2 id="cap-h" data-k="fleet.captain"></h2><p id="captain" class="fleet-line"></p></section>
+    <section aria-labelledby="m-h"><h2 id="m-h" data-k="fleet.machines"></h2><ul id="machines" class="fleet-list"></ul><p id="quiet-note" class="fleet-note"></p></section>
+    <section aria-labelledby="c-h">
+      <h2 id="c-h" data-k="fleet.chat"></h2>
+      <p class="fleet-note" data-k="fleet.chat.note"></p>
+      <ol id="chat" class="fleet-chat" aria-live="polite"></ol>
+      <form id="chat-form" class="fleet-form">
+        <textarea class="ds-input" name="text" rows="2" maxlength="2000" required></textarea>
+        <button type="submit" class="ds-button" data-variant="primary" data-k="fleet.chat.send"></button>
+      </form>
+      <form id="login-form" class="fleet-form" hidden>
+        <input class="ds-input" type="password" name="passphrase" autocomplete="current-password" required>
+        <button type="submit" class="ds-button" data-variant="secondary" data-k="fleet.chat.login"></button>
+      </form>
+      <p id="chat-err" class="fleet-err" role="alert" hidden></p>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-label="Dasks: a local task board for you and your coding agents">
+  <rect width="1280" height="320" rx="24" fill="#fafaf9"/>
+  <g transform="translate(96 76)">
+    <rect x="0" y="0" width="52" height="168" rx="10" fill="#e7e5e4"/>
+    <rect x="62" y="0" width="52" height="168" rx="10" fill="#e7e5e4"/>
+    <rect x="124" y="0" width="52" height="168" rx="10" fill="#e7e5e4"/>
+    <rect x="7" y="10" width="38" height="30" rx="6" fill="#ffffff" stroke="#d6d3d1"/>
+    <rect x="7" y="48" width="38" height="30" rx="6" fill="#ffffff" stroke="#d6d3d1"/>
+    <rect x="7" y="86" width="38" height="30" rx="6" fill="#ffffff" stroke="#d6d3d1"/>
+    <rect x="69" y="10" width="38" height="30" rx="6" fill="#2563eb"/>
+    <rect x="69" y="48" width="38" height="30" rx="6" fill="#ffffff" stroke="#d6d3d1"/>
+    <rect x="131" y="10" width="38" height="30" rx="6" fill="#ffffff" stroke="#d6d3d1"/>
+  </g>
+  <text x="332" y="168" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="88" font-weight="700" letter-spacing="-2" fill="#1c1917">Dasks</text>
+  <text x="336" y="222" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="30" fill="#57534e">A local task board for you and your coding agents</text>
+</svg>

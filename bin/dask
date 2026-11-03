@@ -1,0 +1,809 @@
+#!/usr/bin/env python3
+"""dask — Dasks card CLI for your own Claude Code / Codex sessions on this Mac.
+Board and token: $DASKS_URL / $DASKS_TOKEN, else ~/.dasks/client.json (written by install.sh). Cards: the board's spec store (GET/PUT /api/tasks/<id>/spec), else the
+board body while a card has no spec yet. Needs only python3 (and git + gh for begin/submit).
+  dask ready [--app A] [--all]            launchable cards: open, unclaimed, deps done; spec ready (--all: every todo card); your pushes, then bug fixes, first
+  dask card <card>                        print the card spec (board spec, else the board body)
+  dask status <card>                      board status, claim, PR, spec state, now line, handoff summary
+  dask start <card> [--tool T] [--no-copy]   paste-ready prompt for an agent session (also copied to the clipboard)
+  dask claim <card> [--tool T] [--force]  card -> doing, lock "claim: #human-<tool>-<stamp> open"
+  dask begin <card> [--tool T] [--worktree] [--force] [--no-copy]   claim + branch human/<card> from the default branch
+                                          (a worktree under .dask/worktrees when --worktree or the checkout is dirty) + prompt
+  dask now <card> "<line>"                what you are doing right now, one line ≤120 characters; "" clears it
+  dask submit <card> --summary S [--tool T] [--dry-run] [--handoff TEXT]   secret scan (gitleaks, required), push
+                                          human/<card>, open a DRAFT PR with gh, card -> review with the PR. Never merges.
+  dask review <card> --pr URL [--note T] [--handoff TEXT]   card -> review with the PR (context filled in)
+  dask done <card> (--pr URL | --result TEXT) [--note T] [--handoff TEXT]   card -> done
+  dask release <card> [--note T] [--handoff TEXT]   give the card back (lock closed)
+  dask block <card> --note T [--handoff TEXT]   Spec block on the board (the spec needs work), then release
+  dask unblock <card> --note T            lift the board's Spec block (only with the user's OK)
+  dask card-write <card> --file F --expected-version N [--note T]   store F as the next spec version (PUT /spec);
+                                          N = the version F started from (`dask card` shows it; 0 = no spec): newer -> 409
+  dask spec <card> [--tool T] [--file F] [--repo PATH|owner/name]   write the card's spec: this tool drafts (or stores F,
+                                          your own draft), the other tool reviews it adversarially from a read-only view of
+                                          the project's default branch; revised on P0/P1: two full passes, one narrow.
+                                          Ends ready, or draft with the findings as a card note (exit 3). Never builds.
+  dask verify <card> --evidence "<what you checked, where>" --commit SHA   a done_at: live card in review (lane live-check)
+                                          -> done, with the check line "checked: <evidence> @ <sha>"
+  dask lesson add <app> "<text>" [--task <card>] [--files a,b]   record a lesson for the next card on <app> (a proposal;
+                                          only the user confirms it on the board)
+  dask runner status                      the card runner on this machine: on/off, current card, today's count, backoff, last 5
+  dask secrets <card> [--agent A]         are the card's secrets stored and allowed for this agent (dasks-secret check,
+                                          no prompt)? Prints what is missing and the exact commands for the human
+  dask review-record <card> --head SHA --impl claude|codex --reviewer "<family> [model]" --verdict clean|open
+                 [--open N] [--noted N] [--base B] --answer-file F   record a cross-model review of that head on the board
+                                          (the board takes the reviewer from who sends it, run it from the reviewing session)
+  dask captain-merge <card> [--method squash|merge|rebase] [--dry-run]   merge the card's PR only when CI is green on its
+                                          head, a clean cross-model review is recorded for that exact head and no changed
+                                          file matches the repo's risk-paths.txt; otherwise the card stays with the human.
+                                          Only in the captain's session: needs its DASKS_CAPTAIN_LEASE
+  --handoff: ≤5 lines for the next agent; the board stamps who/when; 6+ lines refused ("" clears the card's summary)
+Card messages (information only: never an approval, a status change or an instruction from the user; no secrets, ≤2 KB):
+  dask who <card>                         who is on the card: claim, owner, message writers
+  dask msg <card> [--to A|role|*] [--kind question|answer|fyi|blocked-on|heads-up] [--reply-to SEQ] "<text>"   ("-" = stdin)
+  dask inbox <card> [--since SEQ] [--to-me] [--json]   messages after SEQ; never blocks
+  dask wait <card> --since SEQ [--to-me] [--kind K] [--timeout S≤600] [--json]   long-poll: exit 0 = messages, 124 = timeout
+Board writes go out as human-<tool>[-<session>]@<machine> (session = $DASK_SESSION, else a short hash of the Claude Code /
+Codex session id), so two sessions on one machine are two identities. $DASKS_ACTOR overrides the name for messages."""
+import hashlib, json, os, re, signal, socket, subprocess, sys, time, urllib.parse, urllib.request, urllib.error, uuid
+from datetime import datetime
+
+def _client():
+    """~/.dasks/client.json (or $DASKS_HOME/client.json): the connection install.sh stored; {} when there is none."""
+    home = os.environ.get("DASKS_HOME") or os.path.expanduser("~/.dasks")
+    try:
+        with open(os.path.join(home, "client.json")) as f: j = json.load(f)
+        return j if isinstance(j, dict) else {}
+    except Exception: return {}
+CLIENT = _client()
+BOARD = (os.environ.get("DASKS_URL") or CLIENT.get("url") or "http://127.0.0.1:4747").rstrip("/")
+# An https board signed by its own CA: $DASKS_CA_FILE, else client.json "ca" (install.sh --ca-file).
+CA = os.environ.get("DASKS_CA_FILE") or CLIENT.get("ca") or ""
+if CA:
+    import ssl
+    urllib.request.install_opener(urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=CA))))
+STATE = os.path.join(os.environ.get("DASKS_HOME") or os.path.expanduser("~/.dasks"), "claims")
+ID_RE = re.compile(r"^[a-z][a-z0-9]{0,23}\.t-[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+def _machine():
+    clean = lambda s: re.sub(r"[^a-z0-9-]", "", str(s or "").lower())[:16]
+    return clean(os.environ.get("DASKS_MACHINE")) or clean(CLIENT.get("machine")) or clean(socket.gethostname().split(".")[0]) or "local"
+MACHINE = _machine()
+
+# session label: two sessions on one machine are two board identities ([A-Za-z0-9._@-]{1,40}; the label rides after "-", before "@")
+def _session():
+    v = os.environ.get("DASK_SESSION", "").strip()
+    if v: return re.sub(r"[^a-z0-9]", "", v.lower())[:8]
+    for k in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID"):
+        v = os.environ.get(k, "").strip()
+        if v: return hashlib.sha256(v.encode()).hexdigest()[:6]
+    return ""
+SESSION = _session()
+
+def die(m, code=1):
+    print("dask: " + m, file=sys.stderr); sys.exit(code)
+
+def tool_default():
+    if os.environ.get("DASK_TOOL"): return os.environ["DASK_TOOL"]
+    if os.environ.get("CLAUDECODE"): return "claude"
+    if any(k.startswith("CODEX_") for k in os.environ): return "codex"
+    return "human"
+
+def base_actor(tool): return ("human-%s@%s" % (tool, MACHINE) if tool != "human" else "human@%s" % MACHINE)[:40]
+
+def actor(tool):
+    """The board identity of this session: base_actor with -<session label> before the @ when there is one (≤40 chars);
+    the part after the @ stays exactly the machine, which is all a fleet machine token accepts."""
+    b = base_actor(tool)
+    if not SESSION: return b
+    pre, host = b.rsplit("@", 1)
+    return "%s-%s@%s" % (pre[:40 - 2 - len(SESSION) - len(host)], SESSION, host)
+
+def board_token():
+    """The agent token: $DASKS_TOKEN, else the stored one (docs/auth.md). Malformed exits 1 without showing it."""
+    value = str(os.environ.get("DASKS_TOKEN") or CLIENT.get("token") or "").strip()
+    if value and not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", value):
+        die("the Dasks token is malformed (letters, digits, _ and - only, at most 200); nothing was sent")
+    return value
+
+def headers(who, data):
+    t = board_token()
+    return {"X-Dasks-Actor": who, **({"Authorization": "Bearer " + t} if t else {}), **({"Content-Type": "application/json"} if data else {})}
+
+def hide_token(raw):
+    t = board_token()
+    return raw.replace(t.encode(), b"<redacted>") if t else raw
+
+def call(method, path, body=None, who="dask", timeout=20, missing_ok=True):
+    """Board call: None for a GET 404, exit 1 on a refusal (with the board's reason), 69 when the board is unreachable."""
+    data = json.dumps(body, ensure_ascii=False).encode() if body is not None else None
+    req = urllib.request.Request(BOARD + path, data=data, method=method, headers=headers(who, data))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r: return json.loads(hide_token(r.read()) or b"null")
+    except urllib.error.HTTPError as e:
+        raw = hide_token(e.read())
+        if method == "GET" and e.code == 404 and missing_ok: return None
+        try: j = json.loads(raw or b"{}"); why = j.get("error") or ""
+        except Exception: j, why = {}, raw[:300].decode("utf-8", "ignore")
+        if j.get("reasons"): why += ": " + "; ".join(map(str, j["reasons"]))[:1500]
+        die("board %s %s -> %s %s" % (method, path, e.code, why or "no reason given"))
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        die("board unreachable at %s (%s). Is the server running? (launchctl print gui/$(id -u)/dev.dasks.server)" % (BOARD, getattr(e, "reason", e)), 69)
+
+def api(method, path, body=None, tool="human"): return call(method, path, body, actor(tool))
+
+def one_line(s, n):
+    s = re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f\x7f]+", " ", str(s or ""))).strip()
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+# ---------- cards ----------
+def check_id(cid):
+    if not ID_RE.match(cid or ""): die("not a card id: %r (want <project>.t-<slug>)" % cid, 2)
+    return cid
+
+def task(cid): return api("GET", "/api/tasks/" + cid)
+
+def holder(t):
+    m = re.findall(r"claim: #([\w.-]+) (open|closed)", (t or {}).get("body") or "")
+    return m[-1][0] if m and m[-1][1] == "open" else None
+
+def board_spec(cid):
+    """The board's current spec {text, metadata: {version, by, ...}}, None without one."""
+    sp = api("GET", "/api/tasks/%s/spec" % cid)
+    return sp if isinstance(sp, dict) and isinstance(sp.get("text"), str) else None
+
+def spec_version(sp): return int(((sp or {}).get("metadata") or {}).get("version") or 0)
+
+def is_blocked(t): return (t or {}).get("spec_state") == "blocked"
+
+def load_card(cid):
+    t = task(cid) or die("no card %s on the board" % cid)
+    sp = board_spec(cid)
+    if sp: return sp["text"], t, "board spec v%d (by %s)" % (spec_version(sp), (sp.get("metadata") or {}).get("by", "?"))
+    return t.get("body") or "", t, "board body (no spec yet)"
+
+def save_state(cid, d):
+    os.makedirs(STATE, exist_ok=True)
+    with open(os.path.join(STATE, cid + ".json"), "w") as f: json.dump(d, f)
+
+def get_state(cid):
+    try:
+        with open(os.path.join(STATE, cid + ".json")) as f: return json.load(f)
+    except Exception: return {}
+
+def close_lock(cid, tool, what):
+    t = task(cid) or {}; h = holder(t)
+    if h and h.startswith("human-"):
+        api("POST", "/api/tasks/" + cid, {"note": "claim: #%s closed (%s; human)" % (h, what)}, tool)
+
+def cmd_card(a):
+    cid = check_id(a[0]); card, t, src = load_card(cid)
+    print("# source: " + src + ("  [BLOCKED for Spec on the board: %s]" % one_line(t.get("block_note"), 200) if is_blocked(t) else ""))
+    print(card)
+
+def cmd_status(a):
+    cid = check_id(a[0]); t = task(cid) or die("no card %s on the board" % cid)
+    print("%s  %s  [%s]  %s" % (cid, t.get("status"), t.get("priority"), t.get("title")))
+    print("  claim: %s%s" % (t.get("claimed_by") or "-", (" (#%s)" % holder(t)) if holder(t) else ""))
+    print("  spec: %s   lane: %s   owner: %s" % (t.get("spec_state") or "none", t.get("lane") or "none", t.get("owner") or "-"))
+    if t.get("pr"): print("  PR: " + t["pr"])
+    if t.get("now"): print("  now: " + one_line(t["now"], 120))
+    if t.get("summary"): print("  handoff:\n" + "\n".join("    " + l for l in t["summary"].splitlines()))
+    if t.get("needs_user"): print("  needs you: " + one_line(t["needs_user"], 300))
+
+def cmd_ready(app, show_all):
+    r = api("GET", "/api/ready" + ("?all=1" if show_all else "") + (("&" if show_all else "?") + "goal=" + urllib.parse.quote(app, safe=",") if app else "")) or {}
+    rows = r.get("ready", [])
+    print("Ready Dasks cards (%s): open, unclaimed, deps done%s." % (time.strftime("%F %H:%M"), "" if show_all else ", spec ready"))
+    for x in rows: print("  %-3s %-46s spec:%-6s %s%s" % (x.get("priority", ""), x["id"], x.get("spec_state") or "none", "[bug] " if x.get("kind") == "bug" else "", (x.get("title") or "")[:60]))
+    if not rows: print("  (none)" + ("" if show_all else "  — `dask ready --all` also lists cards whose spec is not ready"))
+    print("Start one with: dask begin <card>  (or dask start <card> for the prompt only)")
+
+def cmd_claim(a, tool, force):
+    cid = check_id(a[0]); t = task(cid) or die("no card %s on the board" % cid)
+    if t.get("status") in ("done", "cancelled"): die("card %s is %s" % (cid, t["status"]))
+    h = holder(t); cb = t.get("claimed_by") or ""
+    if h and h.startswith("human-") and cb == actor(tool):
+        save_state(cid, {**get_state(cid), "job": h, "tool": tool, "at": time.strftime("%F %T")})
+        print("dask: you already hold %s (#%s); local claim renewed" % (cid, h)); return
+    if cb and cb != actor(tool) and not force and not is_blocked(t):
+        die("card %s is claimed by %s, not this session (%s); `--force` takes it over" % (cid, cb, actor(tool)))
+    job = "human-%s-%s" % (tool, time.strftime("%Y%m%d%H%M"))
+    body = {"who": actor(tool), "note": "claim: #%s open (human, %s, %s)" % (job, MACHINE, tool)}
+    if force or (t.get("status") == "doing" and (not cb or cb.startswith("human"))): body["force"] = True
+    sv = spec_version(board_spec(cid))
+    api("POST", "/api/tasks/%s/claim" % cid, body, tool)
+    save_state(cid, {"job": job, "tool": tool, "at": time.strftime("%F %T"), "spec_seen": sv})
+    print("claimed %s as #%s (status doing)" % (cid, job))
+
+def cmd_now(a, tool):
+    if len(a) != 2: die('usage: dask now <card-id> "<line>"', 2)
+    cid = check_id(a[0])
+    if len(a[1]) > 120 or "\n" in a[1]: die("now is one line of at most 120 characters", 2)
+    api("POST", "/api/tasks/" + cid, {"now": a[1]}, tool)
+    print("now set on %s: %s" % (cid, a[1]) if a[1].strip() else "now cleared on %s" % cid)
+
+def review_context(t, tool, cid):
+    title = t.get("title") or cid
+    who = {"claude": "Claude Code", "codex": "Codex"}.get(tool, "a person")
+    return {"what": "A PR for this card is open: %s" % title, "why": "%s worked the card; the review and the merge decision are left" % who,
+            "do": "Read the PR and its checks; merge it or ask for changes", "rec": "Merge when the review is clean and CI is green",
+            "after": "After the merge, mark the card done (dask done <card> --pr <url>)",
+            "pr_summary": "The PR for %s, made with %s. Details are in the PR body." % (title, who)}
+
+def cmd_finish(a, tool, status, pr, note, result=None, handoff=None):
+    cid = check_id(a[0]); t = task(cid) or die("no card %s" % cid)
+    if status == "done" and not pr and not result: die("done needs --pr <url> or --result <text or path>", 2)
+    if status == "review" and not pr: die("review needs --pr <url>", 2)
+    body = {"status": status, "result": "human (%s): %s%s" % (tool, ("PR " + pr) if pr else (result or "done"), ("; " + note) if note else "")}
+    if pr: body["pr"] = pr
+    if handoff is not None: body["summary"] = handoff
+    if status == "review": body.update(review_context(t, tool, cid))
+    out = api("POST", "/api/tasks/%s/finish" % cid, body, tool) or {}
+    close_lock(cid, tool, status)
+    now = out.get("status") or status
+    print("%s -> %s%s" % (cid, now, (" (" + pr + ")") if pr else ""))
+    if status == "done" and now != "done":
+        print("its spec says done_at: live: it waits in review (lane live-check) until someone checks the end state after the merge: dask verify %s --evidence \"...\" --commit <sha>" % cid)
+
+def cmd_spec(a, tool, path, repo):
+    cid = check_id(a[0])
+    if tool not in ("claude", "codex"): die("run it from a Claude Code or Codex session, or pass --tool claude|codex", 2)
+    node = os.environ.get("DASKS_NODE") or "node"
+    kit = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    args = [node, "--disable-warning=ExperimentalWarning", os.path.join(kit, "src", "cli", "spec.ts"), cid, "--tool", tool, "--author", actor(tool)]
+    if path: args += ["--file", path]
+    if repo: args += ["--repo", repo]
+    env = {**os.environ, "DASKS_URL": BOARD}
+    try: os.execvpe(node, args, env)
+    except OSError as e: die("could not start node (%s)" % e)
+
+def cmd_verify(a, tool, evidence, commit):
+    cid = check_id(a[0])
+    evidence = one_line(evidence, 300)
+    if not evidence: die("verify needs --evidence \"<what you checked, where>\"", 2)
+    if not re.fullmatch(r"[0-9a-f]{7,40}", commit or ""): die("verify needs --commit <the commit you checked, 7-40 hex>", 2)
+    t = task(cid) or die("no card %s" % cid)
+    line = "checked: %s @ %s" % (evidence, commit)
+    result = line + ("\n" + t["pr"] if t.get("pr") else "")
+    out = api("POST", "/api/tasks/" + cid, {"status": "done", "result": result, "note": "%s (%s)" % (line, actor(tool))}, tool) or {}
+    print("%s -> %s (%s)" % (cid, out.get("status", "?"), line))
+
+def cmd_release(a, tool, note, handoff=None):
+    cid = check_id(a[0])
+    close_lock(cid, tool, "released" + ("; " + note if note else ""))
+    body = {"note": "human released" + (": " + note if note else "")}
+    if handoff is not None: body["summary"] = handoff
+    api("POST", "/api/tasks/%s/release" % cid, body, tool)
+    save_state(cid, {**get_state(cid), "closed": "released"})
+    print("released " + cid)
+
+def cmd_block(a, tool, note, handoff=None):
+    cid = check_id(a[0])
+    if not note.strip(): die('block needs --note "<what the spec must settle>"', 2)
+    note = re.sub(r"claim:\s*#", "claim #", note)   # free text must never look like a lock record (holder())
+    t = task(cid) or die("no card %s on the board" % cid)
+    line = "NEEDS-SPEC (%s, %s): %s" % (actor(tool), time.strftime("%F %H:%M"), note)
+    api("POST", "/api/tasks/%s/spec/block" % cid, {"expected_version": int(t.get("version") or 0),
+        "expected_spec_version": spec_version(board_spec(cid)), "block_note": one_line(line, 1000)}, tool)
+    close_lock(cid, tool, "blocked for Spec")
+    body = {"note": "human blocked for Spec: " + note}
+    if handoff is not None: body["summary"] = handoff
+    api("POST", "/api/tasks/%s/release" % cid, body, tool)
+    print("blocked %s for Spec on the board and released it" % cid)
+
+def cmd_unblock(a, tool, note):
+    cid = check_id(a[0])
+    if not note.strip(): die('unblock needs --note "<reason the user approved>"', 2)
+    t = task(cid) or die("no card %s on the board" % cid)
+    if not is_blocked(t): die("card %s has no Spec block on the board; nothing to lift" % cid)
+    api("POST", "/api/tasks/%s/spec/unblock" % cid, {"expected_version": int(t.get("version") or 0), "expected_spec_version": spec_version(board_spec(cid))}, tool)
+    api("POST", "/api/tasks/" + cid, {"note": "block lifted by %s: %s" % (actor(tool), re.sub(r"claim:\s*#", "claim #", note))}, tool)
+    print("unblocked %s (board Spec block lifted)" % cid)
+
+def cmd_card_write(a, tool, path, note, base):
+    cid = check_id(a[0])
+    if not path or base is None: die("usage: dask card-write <card> --file F --expected-version N [--note T]", 2)
+    try: text = open(path, encoding="utf-8").read()
+    except OSError as e: die("cannot read %s: %s" % (path, e), 2)
+    body = {"text": text, "expected_spec_version": int(base)}
+    if note: body["note"] = note
+    r = api("PUT", "/api/tasks/%s/spec" % cid, body, tool)
+    m = (r or {}).get("metadata") or {}
+    print("%s spec v%s stored by %s" % (cid, m.get("version", "?"), m.get("by") or actor(tool)))
+    for w in (r or {}).get("warnings") or []: print("  warning: %s" % one_line(w, 300))
+
+def cmd_lesson(rest, tool, task_id, files):
+    if len(rest) < 3 or rest[0] != "add": die('usage: dask lesson add <app> "<text>" [--task <card>] [--files a,b]', 2)
+    body = {"text": " ".join(rest[2:])}
+    if task_id: body["task"] = check_id(task_id)
+    if files: body["files"] = [f.strip() for f in files.split(",") if f.strip()]
+    r = api("POST", "/api/lessons/%s" % urllib.parse.quote(rest[1]), body, tool)
+    print("lesson %s proposed on %s (the user confirms it on the board)" % ((r or {}).get("id", "?"), rest[1]))
+
+# ---------- prompts ----------
+SECRET_AGENTS = {"claude": "claude-code", "codex": "codex"}
+
+def cmd_secrets(a, tool, agent):
+    """The card's secrets (names only) against dasks-secret check for this agent: exit 0 ready, 1 not (docs/secrets.md)."""
+    cid = check_id(a[0])
+    t = task(cid) or die("no card %s" % cid)
+    labels = [l for l in re.split(r"[\s,]+", str(t.get("secrets") or "")) if l]
+    if not labels: print("%s needs no secrets" % cid); return
+    agent = agent or SECRET_AGENTS.get(tool)
+    import shutil
+    exe = shutil.which("dasks-secret")
+    if not exe:
+        print("%s needs: %s" % (cid, ", ".join(labels)))
+        die("dasks-secret is not installed on this Mac: the human runs ./install.sh --with-secrets, then dasks-secret store / allow for each label")
+    args = [exe, "check", "--labels", ",".join(labels), "--json"] + (["--agent", agent] if agent else [])
+    try: r = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e: die("dasks-secret check failed: %s" % e)
+    if r.returncode not in (0, 10): die("dasks-secret check failed: %s" % (r.stderr.strip()[:300] or "exit %d" % r.returncode))
+    try: j = json.loads(r.stdout); rows = j["labels"]
+    except Exception: die("dasks-secret check gave no JSON")
+    print("%s needs %d secret(s)%s:" % (cid, len(labels), " for " + agent if agent else ""))
+    missing, blocked = [], []
+    for x in rows:
+        state = "missing (not stored)" if not x.get("stored") else ("not allowed for %s" % agent if agent and x.get("allowed") is not True else "ok")
+        if not x.get("stored"): missing.append(x["label"])
+        elif agent and x.get("allowed") is not True: blocked.append(x["label"])
+        print("  %-40s %s" % (x["label"], state))
+    if not missing and not blocked: print("ready: use them with  dasks-secret run --labels %s -- <command>" % ",".join(labels)); return
+    print("Not ready. The human runs these in their own terminal (an agent never runs allow and never asks for a value in chat):")
+    for l in missing: print("  dasks-secret store --label %s" % l)
+    if agent:
+        for l in missing + blocked: print("  dasks-secret allow --label %s --agent %s" % (l, agent))
+    sys.exit(1)
+
+def prompt_text(cid, tool, branch=None):
+    card, t, src = load_card(cid)
+    out = ["Work Dasks card %s (%s). You act on the board as %s." % (cid, t.get("title") or "", actor(tool)),
+           "Follow the dasks skill (the card protocol). The card below is the spec; do only what it asks.",
+           "Board: %s  ·  card status: %s  ·  spec: %s" % (BOARD, t.get("status"), src)]
+    if branch: out.append("Branch: %s (already checked out). When done: `dask submit %s --summary \"…\"` opens a draft PR; never merge." % (branch, cid))
+    else: out.append("Claim it first (`dask begin %s` or `dask claim %s`), work on branch human/%s, then `dask submit %s --summary \"…\"`." % (cid, cid, cid, cid))
+    if t.get("summary"): out += ["", "Handoff summary from the last agent:"] + ["  " + l for l in t["summary"].splitlines()]
+    if t.get("lessons"): out += ["", "Lessons from earlier cards on this project:"] + ["  - " + one_line(l.get("text"), 300) for l in t["lessons"] if isinstance(l, dict)]
+    out += ["", "----- card -----", card.rstrip(), "----- end card -----"]
+    return "\n".join(out)
+
+def copy_out(text, copy):
+    print(text)
+    if copy:
+        try: subprocess.run(["pbcopy"], input=text.encode(), check=True, timeout=5); print("\n(dask: prompt copied to the clipboard)", file=sys.stderr)
+        except Exception: pass
+
+def cmd_start(a, tool, copy): copy_out(prompt_text(check_id(a[0]), tool), copy)
+
+# ---------- git: begin / submit ----------
+def git(*args, cwd=None, check=True):
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    if check and r.returncode != 0: die("git %s failed: %s" % (" ".join(args), (r.stderr or r.stdout).strip()[:400]))
+    return r.stdout.strip()
+
+def repo_root():
+    r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+def default_branch(root):
+    ref = subprocess.run(["git", "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+    if ref: return ref
+    for b in ("main", "master"):
+        if subprocess.run(["git", "rev-parse", "-q", "--verify", b], cwd=root, capture_output=True).returncode == 0: return b
+    return "HEAD"
+
+def cmd_begin(a, tool, worktree, force, copy):
+    cid = check_id(a[0]); root = repo_root() or die("run dask begin inside the git repo the card is for", 2)
+    t = task(cid) or die("no card %s on the board" % cid)
+    if is_blocked(t): die("card %s is blocked for Spec: %s" % (cid, one_line(t.get("block_note"), 200)))
+    cmd_claim([cid], tool, force)
+    branch = "human/" + cid
+    subprocess.run(["git", "fetch", "-q", "origin"], cwd=root, capture_output=True)
+    base = default_branch(root)
+    exists = subprocess.run(["git", "rev-parse", "-q", "--verify", branch], cwd=root, capture_output=True).returncode == 0
+    dirty = bool(git("status", "--porcelain", cwd=root))
+    where = root
+    exclude_dask(root)
+    if worktree or dirty:
+        where = os.path.join(root, ".dask", "worktrees", cid)
+        if not os.path.isdir(where):
+            git("worktree", "add", *(["-b", branch, where, base] if not exists else [where, branch]), cwd=root)
+        print("worktree: %s%s" % (where, " (the checkout has local changes)" if dirty and not worktree else ""))
+    else:
+        git("checkout", *(["-b", branch, base] if not exists else [branch]), cwd=root)
+    save_state(cid, {**get_state(cid), "branch": branch, "repo": where})
+    copy_out(prompt_text(cid, tool, branch), copy)
+
+def exclude_dask(root):
+    """Keep .dask/ (worktrees, logs) out of the repo: append it to the local info/exclude once, keeping what is there."""
+    path = git("rev-parse", "--git-path", "info/exclude", cwd=root)
+    path = path if os.path.isabs(path) else os.path.join(root, path)
+    try:
+        with open(path) as f: old = f.read()
+    except FileNotFoundError: old = ""
+    if any(l.strip() in (".dask/", "/.dask/", ".dask", "/.dask") for l in old.splitlines()): return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as f: f.write(("" if not old or old.endswith("\n") else "\n") + ".dask/\n")
+
+def secret_scan(where, base):
+    """gitleaks over the commits on this branch not on base. Required: without it nothing is pushed."""
+    gl = next((p for p in [os.path.join(d, "gitleaks") for d in os.environ.get("PATH", "").split(":") if d] if os.access(p, os.X_OK)), None)
+    if not gl: die("gitleaks is not installed, so nothing was pushed (the scan is required). Fix: brew install gitleaks")
+    try: r = subprocess.run([gl, "git", "--no-banner", "--redact", "--log-opts", "%s..HEAD" % base, where], capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired: die("secret scan timed out; nothing pushed")
+    if r.returncode != 0: die("gitleaks found something (or failed) in the commits to push; nothing pushed. Run: gitleaks git --log-opts %s..HEAD ." % base)
+
+def cmd_submit(a, tool, summary, dry, handoff=None):
+    cid = check_id(a[0])
+    if not summary or not summary.strip(): die('submit needs --summary "<what the PR does>"', 2)
+    st = get_state(cid); where = st.get("repo") or repo_root() or die("run dask submit inside the repo", 2)
+    branch = git("rev-parse", "--abbrev-ref", "HEAD", cwd=where)
+    if branch != "human/" + cid: die("you are on %s, not human/%s" % (branch, cid))
+    base = default_branch(where)
+    ahead = git("rev-list", "--count", "%s..HEAD" % base, cwd=where)
+    if ahead == "0": die("no commits on %s beyond %s; nothing to submit" % (branch, base))
+    t = task(cid) or die("no card %s on the board" % cid)
+    title = "%s: %s" % (cid, t.get("title") or "")
+    body = "%s\n\nCard: %s (Dasks)\n\nOpened by `dask submit` as a draft. Merging is the user's call." % (summary.strip(), cid)
+    if dry:
+        print("would scan, push %s and open a draft PR into %s:\n  title: %s\n%s" % (branch, base.replace("origin/", ""), title, body)); return
+    secret_scan(where, base)
+    git("push", "-u", "origin", branch, cwd=where)
+    have = subprocess.run(["gh", "pr", "view", branch, "--json", "url", "-q", ".url"], cwd=where, capture_output=True, text=True)
+    url = have.stdout.strip() if have.returncode == 0 else ""
+    if not url:
+        r = subprocess.run(["gh", "pr", "create", "--draft", "--base", base.replace("origin/", ""), "--head", branch, "--title", title, "--body", body], cwd=where, capture_output=True, text=True)
+        if r.returncode != 0: die("gh pr create failed: %s" % (r.stderr or r.stdout).strip()[:400])
+        url = r.stdout.strip().splitlines()[-1]
+    print("draft PR: " + url)
+    cmd_finish([cid], tool, "review", url, summary.strip(), handoff=handoff)
+
+# ---------- card messages ----------
+MSG_KINDS = ("question", "answer", "fyi", "blocked-on", "heads-up")
+ACTOR_OK = re.compile(r"^[A-Za-z0-9._@-]{1,40}$")
+
+def msg_actor(tool):
+    v = os.environ.get("DASKS_ACTOR", "").strip()
+    return v if v and ACTOR_OK.match(v) and v != "user" else base_actor(tool)
+
+# One interactive session writes under two names: <mcp>@M (dasks MCP, DASKS_ACTOR) and human-<tool>@M (dask). Both are "me".
+SESSION_NAMES = (("human-claude", "claude-code"), ("human-codex", "codex"))
+def my_names(me):
+    name, at, mach = me.partition("@")
+    for pair in SESSION_NAMES:
+        if at and name in pair: return [me] + [("%s@%s" % (n, mach))[:40] for n in pair if n != name]
+    return [me]
+
+def msg_query(since, to_me, me, kind=None, reply_to=None, timeout=None):
+    q = {"since": str(since)}
+    if to_me: q["to"] = ",".join(dict.fromkeys(my_names(me) + ["*", "human"])); q["not_from"] = me
+    if kind: q["kind"] = kind
+    if reply_to is not None: q["reply_to"] = str(reply_to)
+    if timeout is not None: q["timeout"] = str(timeout)
+    return "?" + urllib.parse.urlencode(q)
+
+def show_msgs(msgs, as_json):
+    if as_json: print(json.dumps(msgs, ensure_ascii=False, indent=1)); return
+    for m in msgs:
+        try: ts = datetime.fromisoformat(m["ts"].replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d %H:%M")
+        except Exception: ts = m["ts"][:16]
+        print("#%d %s %s -> %s [%s]%s" % (m["seq"], ts, m["from"], m["to"], m["kind"], (" re #%d" % m["reply_to"]) if m.get("reply_to") else ""))
+        for line in m["text"].splitlines() or [""]: print("    " + line)
+
+def drop_mine(msgs, me, to_me): return [m for m in msgs if m.get("from") not in my_names(me)] if to_me else msgs
+
+def cmd_who(a, tool):
+    cid = check_id(a[0]); r = call("GET", "/api/tasks/%s/participants" % cid, who=msg_actor(tool), missing_ok=False)
+    for p in r.get("participants", []) or []:
+        print("  %-34s %-7s %-8s %s" % (p["actor"][:34], p["role"], p["state"], (p.get("last_seen") or "-")[:16]))
+    print("  (names are labels, not identities)")
+
+def cmd_msg(a, tool, to, kind, reply_to):
+    cid = check_id(a[0]); text = " ".join(a[1:])
+    if text == "-": text = sys.stdin.read()
+    if not text.strip(): die('usage: dask msg <card> [--to …] [--kind …] "<text>"', 2)
+    if kind and kind not in MSG_KINDS: die("--kind must be %s (messages never approve anything)" % " | ".join(MSG_KINDS), 2)
+    if len(text.encode()) > 2048: die("message is %d bytes; at most 2048. Send a path or URL for long material" % len(text.encode()), 2)
+    body = {"text": text, "request_id": "dask-%s" % uuid.uuid4(), **({"to": to} if to else {}), **({"kind": kind} if kind else {}), **({"reply_to": reply_to} if reply_to is not None else {})}
+    me = msg_actor(tool); m = call("POST", "/api/tasks/%s/messages" % cid, body, me)
+    print("%s #%d on %s as %s" % ("already sent:" if m.get("duplicate") else "sent", m["seq"], cid, me))
+
+def cmd_inbox(a, tool, since, to_me, as_json):
+    cid = check_id(a[0]); me = msg_actor(tool)
+    r = call("GET", "/api/tasks/%s/messages%s" % (cid, msg_query(since or 0, to_me, me)), who=me, missing_ok=False)
+    msgs = drop_mine(r["messages"], me, to_me)
+    if not msgs and not as_json: print("no messages on %s after #%d (last #%d)" % (cid, since or 0, r["last_seq"])); return
+    show_msgs(msgs, as_json)
+
+def cmd_wait(a, tool, since, to_me, kind, reply_to, timeout, as_json):
+    cid = check_id(a[0]); me = msg_actor(tool)
+    if since is None: die("dask wait needs --since <seq> (the last message you have seen; `dask inbox` shows it)", 2)
+    end = time.time() + (55 if timeout is None else timeout)
+    while True:
+        left = max(0, int(round(end - time.time()))); slice_s = min(55, left)
+        r = call("GET", "/api/tasks/%s/messages/wait%s" % (cid, msg_query(since, to_me, me, kind, reply_to, slice_s)), who=me, timeout=slice_s + 20, missing_ok=False)
+        got = drop_mine(r["messages"], me, to_me)
+        if got: show_msgs(got, as_json); return
+        if r["messages"]: since = max(m["seq"] for m in r["messages"])
+        if time.time() >= end or left <= slice_s and not r["messages"]:
+            print("dask: no matching message on %s after #%d" % (cid, since), file=sys.stderr); sys.exit(124)
+
+# ---------- cross-model review records and the captain's merge (docs/captain.md) ----------
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+LEASE_MIN_LEFT = 120
+PR_RE = re.compile(r"^https://github\.com/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/pull/(\d+)$")
+FAMILIES = ("claude", "codex")
+def captain_actor(): return ("captain@%s" % MACHINE)[:40]
+
+def family(reviewer):
+    w = (str(reviewer or "").strip().split() or [""])[0].lower()
+    return w if w in FAMILIES else None
+
+def cmd_review_record(a, head, impl, reviewer, verdict, open_n, noted, base, answer_file, tool):
+    cid = check_id(a[0])
+    if not head or not SHA_RE.match(head): die("--head must be the 40-character sha the review read", 2)
+    if impl not in FAMILIES: die("--impl must be claude or codex (who wrote the code)", 2)
+    if family(reviewer) is None: die('--reviewer must start with claude or codex (e.g. "codex" or "claude <model>")', 2)
+    if family(reviewer) == impl: die("the reviewer must be the other model family (%s wrote it)" % impl, 2)
+    if verdict not in ("clean", "open"): die("--verdict must be clean or open", 2)
+    if not answer_file: die("--answer-file is required (the review text)", 2)
+    with open(answer_file, encoding="utf-8") as f: answer = f.read()
+    passes = (call("GET", "/api/tasks/%s/review-runs" % cid, who=actor(tool), missing_ok=False) or {}).get("passes") or []
+    used = {x.get("pass") for x in passes}
+    n = next((k for k in (1, 2, 3) if k not in used and all(j in used for j in range(1, k))), None)
+    if n is None: die("%s already has review passes 1-3" % cid)
+    mb = ""
+    if base:
+        r = subprocess.run(["git", "merge-base", base, head], capture_output=True, text=True)
+        mb = r.stdout.strip() if r.returncode == 0 and SHA_RE.match(r.stdout.strip()) else ""
+    row = {"pass": n, "head": head, "base": base or "main", "merge_base": mb, "tier": "normal", "mode": "narrow" if n == 3 else "simple",
+           "reviewer": reviewer.strip(), "impl": impl, "verdict": verdict, "open": 0 if verdict == "clean" else max(1, open_n or 0), "noted": noted or 0,
+           "at": datetime.now().astimezone().isoformat(timespec="seconds"), "log_sha256": hashlib.sha256(answer.encode("utf-8")).hexdigest(), "answer": answer}
+    call("POST", "/api/tasks/%s/review-runs" % cid, row, actor(tool))
+    print("recorded review pass %d of %s at %s: %s" % (n, cid, head[:12], verdict))
+
+class Refused(Exception): pass
+class ReadyForHuman(Refused):
+    """Every check passed but captain.auto_merge is off: the human's merge OK at this head decides."""
+    def __init__(self, sha): super().__init__("ready to merge: CI green, review clean at %s, no risk paths" % sha[:12]); self.sha = sha
+
+def gh_run(*args):
+    try: r = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e: raise Refused("gh failed (%s)" % e)
+    return r
+
+def gh_ok(*args):
+    r = gh_run(*args)
+    if r.returncode != 0: raise Refused("gh %s failed: %s" % (" ".join(args[:2]), one_line(r.stderr or r.stdout, 200)))
+    return r.stdout
+
+def ci_problem(rollup, sha):
+    """Why CI is not green on the head ('' = green). No checks at all is not green."""
+    if not rollup: return "no CI checks ran on the head %s" % sha[:12]
+    waiting, failed = [], []
+    for c in rollup:
+        name = c.get("name") or c.get("context") or "check"
+        if c.get("__typename") == "StatusContext" or "state" in c and "conclusion" not in c:
+            st = str(c.get("state") or "").upper()
+            if st in ("PENDING", "EXPECTED"): waiting.append(name)
+            elif st != "SUCCESS": failed.append("%s (%s)" % (name, st.lower()))
+        elif str(c.get("status") or "").upper() != "COMPLETED": waiting.append(name)
+        elif str(c.get("conclusion") or "").upper() not in ("SUCCESS", "NEUTRAL", "SKIPPED"): failed.append("%s (%s)" % (name, str(c.get("conclusion") or "none").lower()))
+    if failed: return "CI failed on the head: " + ", ".join(failed[:5])
+    if waiting: return "CI has not finished on the head: " + ", ".join(waiting[:5])
+    return ""
+
+def review_problem(rows, sha, other_machine=False):
+    """Why the recorded review does not clear this head ('' = it does). Only what the board recorded itself counts: the
+    last row for the head not sent by a captain, its sender (actor) is the reviewer, of a known model family
+    (reviewer_family), never one of the card's builders (builders, from the claim history) and of no builder's family.
+    A builder without a family must be the runner, which claims beside its build tool's name. Declared reviewer/impl
+    fields are ignored. other_machine: the row must also come from a fleet machine token of no builder's machine (one OS
+    account can write as any of its models, so a review from a builder's machine proves nothing about the model)."""
+    mine = [r for r in rows if r.get("head") == sha and not str(r.get("actor") or "").startswith("captain@")]
+    if not mine: return "no cross-model review is recorded for the head %s (a fix after the review needs a new one)" % sha[:12]
+    last = mine[-1]
+    who, fam, builders, fams = last.get("actor") or "", last.get("reviewer_family") or "", last.get("builders"), last.get("builder_families")
+    if not isinstance(builders, list) or not isinstance(fams, list) or len(builders) != len(fams):
+        return "the review at the head has no board record of its builders (record it again)"
+    if not fam: return "the reviewer at the head (%s) has no known model family" % who
+    if who in builders: return "the review at the head was sent by %s, who also built the card" % who
+    unknown = [b for b, f in zip(builders, fams) if not f and not str(b).startswith("runner@")]
+    if unknown: return "a builder of the card has no known model family: %s" % ", ".join(unknown[:3])
+    known = sorted({f for f in fams if f})
+    if not known: return "no builder of the card with a known model family is on record"
+    if fam in known: return "the review at the head is by the same model family that built it (%s)" % fam
+    if other_machine:
+        m = last.get("reviewer_machine") or ""
+        if not m: return "the review at the head was not sent with a fleet machine token, so its machine is unknown (captain.same_machine_review)"
+        if m in {str(b).rsplit("@", 1)[-1] for b in builders if "@" in str(b)}:
+            return "the review at the head was sent from %s, the machine that built it (captain.same_machine_review)" % m
+    if last.get("verdict") != "clean" or last.get("open"): return "the review at the head is not clean (%s open)" % last.get("open")
+    return ""
+
+def glob_re(pat):
+    """A risk-paths.txt line as a regex over repo paths: * within a name, ** across folders, a trailing / = the whole
+    folder, a pattern without / matches that name in any folder."""
+    p = pat.strip()
+    anywhere = "/" not in p.rstrip("/")
+    folder = p.endswith("/")
+    p = p.strip("/")
+    out, i = "", 0
+    while i < len(p):
+        if p.startswith("**/", i): out += "(?:.*/)?"; i += 3; continue
+        if p.startswith("**", i): out += ".*"; i += 2; continue
+        c = p[i]
+        out += "[^/]*" if c == "*" else "[^/]" if c == "?" else re.escape(c); i += 1
+    return re.compile("^" + ("(?:.*/)?" if anywhere else "") + out + ("/.*" if folder else "(?:/.*)?") + "$")
+
+def risk_hits(files, text):
+    pats = [l.strip() for l in (text or "").splitlines() if l.strip() and not l.strip().startswith("#")]
+    return sorted({f for f in files for p in pats if glob_re(p).match(f)})
+
+def pr_files(owner, repo, n, expected):
+    """Every path the PR touches, from GitHub's structured file list (plain decoded names, never git's quoted ones): each
+    file's name and, for a rename, its old name too. A list shorter than the PR's file count is refused."""
+    out = gh_ok("api", "repos/%s/%s/pulls/%s/files" % (owner, repo, n), "--paginate", "--jq", ".[] | [.filename, (.previous_filename // \"\")]")
+    files, count = set(), 0
+    for line in out.splitlines():
+        if not line.strip(): continue
+        try: name, old = json.loads(line)
+        except (ValueError, TypeError): raise Refused("gh gave a file list that does not parse")
+        count += 1
+        files.update(f for f in (name, old) if isinstance(f, str) and f)
+    if not isinstance(expected, int) or count < expected:
+        raise Refused("GitHub listed %d of the PR's %s changed files; the risk paths cannot be checked" % (count, expected))
+    return sorted(files)
+
+def board_post(me, path, body):
+    """A board POST that hands back (status, json) instead of exiting; status 0 when the board is unreachable."""
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(BOARD + path, data=data, method="POST", headers=headers(me, data))
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r: return r.status, json.loads(hide_token(r.read()) or b"{}")
+    except urllib.error.HTTPError as e:
+        try: return e.code, json.loads(hide_token(e.read()) or b"{}")
+        except Exception: return e.code, {}
+    except (urllib.error.URLError, OSError) as e: return 0, {"error": str(e)}
+
+def lease_problem(me, lease_id):
+    """Why this session may not merge as the captain ('' = it may): the board must confirm it holds the live lease
+    under this id."""
+    if not lease_id: return "no captain lease: run captain-merge inside the dasks-captain session (DASKS_CAPTAIN_LEASE)"
+    code, r = board_post(me, "/api/captain/lease/check", {"lease_id": lease_id})
+    if code == 0: return "the board could not confirm the captain lease (%s)" % r.get("error")
+    if code != 200: return "the board refused the captain lease (%s %s)" % (code, one_line(r.get("error") or "", 200))
+    return "" if r.get("ok") is True else "the board did not confirm the captain lease"
+
+def lease_renew_problem(me, lease_id, ttl):
+    """Renew the lease right before the merge call; why not ('' = renewed with at least LEASE_MIN_LEFT s left on the
+    board's clock, more than the merge call may take)."""
+    code, r = board_post(me, "/api/captain/lease", {"ttl_sec": ttl, "lease_id": lease_id})
+    if code != 200: return "the captain lease could not be renewed (%s %s)" % (code, one_line(r.get("error") or "", 200))
+    try:
+        left = (datetime.fromisoformat(r["expires_at"].replace("Z", "+00:00")) - datetime.fromisoformat(r["now"].replace("Z", "+00:00"))).total_seconds()
+    except (KeyError, TypeError, ValueError, AttributeError): return "the board gave no lease expiry"
+    return "" if left >= LEASE_MIN_LEFT else "the captain lease has only %d s left" % left
+
+def gh_merge(pr, method, sha, timeout):
+    """gh pr merge, at most `timeout` seconds: past it the whole call is killed and reported (it may have merged)."""
+    p = subprocess.Popen(["gh", "pr", "merge", pr, "--" + method, "--match-head-commit", sha], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try: out, err = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try: os.killpg(p.pid, signal.SIGKILL)
+        except OSError: pass
+        p.communicate()
+        raise Refused("the merge call did not finish in %d s and was stopped; check the PR on GitHub before anything else, it may have merged" % timeout)
+    if p.returncode != 0: raise Refused("gh pr merge failed: %s" % one_line(err or out, 200))
+
+def merge_checks(cid, t, cap):
+    if t.get("status") != "review": raise Refused("the card is %s, not review" % t.get("status"))
+    pr = str(t.get("pr") or "").strip()
+    m = PR_RE.match(pr)
+    if not m: raise Refused("the card has no GitHub PR URL")
+    owner, repo, pr_n = m.groups()
+    info = json.loads(gh_ok("pr", "view", pr, "--json", "url,state,isDraft,headRefOid,baseRefName,statusCheckRollup,changedFiles"))
+    sha = info.get("headRefOid") or ""
+    if info.get("state") != "OPEN": raise Refused("the PR is %s" % str(info.get("state")).lower())
+    if not SHA_RE.match(sha): raise Refused("gh gave no head sha")
+    why = ci_problem(info.get("statusCheckRollup") or [], sha)
+    if why: raise Refused(why)
+    ok = call("GET", "/api/merge-ok?" + urllib.parse.urlencode({"card": cid, "sha": sha}), who=captain_actor(), missing_ok=False) or {}
+    if ok.get("ok") is True: return pr, sha, info, "the human approved this head on the board"
+    auto = cap.get("auto_merge") is True
+    why = review_problem((call("GET", "/api/tasks/%s/review-runs" % cid, who=captain_actor(), missing_ok=False) or {}).get("passes") or [], sha,
+                         other_machine=auto and cap.get("same_machine_review") is not True)
+    if why: raise Refused(why)
+    files = pr_files(owner, repo, pr_n, info.get("changedFiles"))
+    r = gh_run("api", "-H", "Accept: application/vnd.github.raw", "repos/%s/%s/contents/risk-paths.txt?ref=%s" % (owner, repo, urllib.parse.quote(info.get("baseRefName") or "", safe="")))
+    if r.returncode != 0 and "404" not in (r.stderr + r.stdout): raise Refused("could not read risk-paths.txt from %s (%s)" % (info.get("baseRefName"), one_line(r.stderr, 160)))
+    hits = risk_hits(files, r.stdout if r.returncode == 0 else "")
+    if hits: raise Refused("the diff touches risk paths: %s" % ", ".join(hits[:8]))
+    if not auto: raise ReadyForHuman(sha)
+    return pr, sha, info, "CI green, clean cross-model review at the head, no risk paths"
+
+def cmd_captain_merge(a, method, dry):
+    cid = check_id(a[0])
+    if method not in ("squash", "merge", "rebase"): die("--method must be squash, merge or rebase", 2)
+    me = captain_actor()
+    lease_id = os.environ.get("DASKS_CAPTAIN_LEASE", "").strip()
+    # Only the session holding the captain lease merges: the board confirms it first and again right before the merge.
+    held = lease_problem(me, lease_id)
+    if held: die("not merged: %s" % held, 3)
+    t = call("GET", "/api/tasks/" + cid, who=me) or die("no card %s on the board" % cid)
+    cap = call("GET", "/api/captain", who=me) or {}
+    try:
+        pr, sha, info, why = merge_checks(cid, t, cap)
+        if dry: print("would merge %s at %s: %s" % (pr, sha[:12], why)); return
+        if info.get("isDraft"): gh_ok("pr", "ready", pr)
+        # The lease must outlast the merge call: renewed now with room to spare, and the call is cut off well before.
+        held = lease_renew_problem(me, lease_id, max(int(cap.get("lease_sec") or 0), 180))
+        if held: die("not merged: %s" % held, 3)
+        gh_merge(pr, method, sha, min(int(os.environ.get("DASKS_MERGE_TIMEOUT_SEC") or 60), 60))
+    except ReadyForHuman as e:
+        print("dask: %s; it waits for your merge OK on the board for this exact head" % e, file=sys.stderr)
+        if dry or t.get("status") != "review": sys.exit(3)
+        ask = "head %s Merge this PR? If approved, the captain merges exactly this head: CI is green, the cross-model review is clean, no risk path changed." % e.sha
+        call("POST", "/api/tasks/" + cid, {"needs_user": ask, "note": "captain-merge: %s. captain.auto_merge is off, so the merge waits for your OK on this head." % e}, me)
+        call("POST", "/api/tasks/%s/messages" % cid, {"text": "Captain: %s. Approve the merge on the card (this exact head) and the captain merges it." % e, "to": "user", "kind": "heads-up", "request_id": "dask-%s" % uuid.uuid4()}, me)
+        sys.exit(3)
+    except Refused as e:
+        reason = str(e)
+        if not dry and t.get("status") == "review":
+            call("POST", "/api/tasks/" + cid, {"note": "captain-merge refused: %s. The merge stays with the human." % reason}, me)
+            call("POST", "/api/tasks/%s/messages" % cid, {"text": "Not merged by the captain: %s. This one is yours to decide." % reason, "to": "user", "kind": "heads-up", "request_id": "dask-%s" % uuid.uuid4()}, me)
+        print("dask: not merged: %s" % reason, file=sys.stderr); sys.exit(3)
+    call("POST", "/api/tasks/" + cid, {"status": "done", "result": pr, "note": "merged by the captain at %s (%s)" % (sha[:12], why)}, me)
+    print("merged %s at %s (%s); card done" % (pr, sha[:12], why))
+
+# ---------- main ----------
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"): print(__doc__); return
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "runner":
+        if rest != ["status"]: die("usage: dask runner status", 2)
+        runner = os.path.join(os.path.dirname(os.path.realpath(__file__)), "dasks-runner")
+        os.execv(runner, [runner, "--status"])
+    opts, pos, flags = {}, [], ("--force", "--all", "--no-copy", "--worktree", "--dry-run", "--to-me", "--json")
+    i = 0
+    while i < len(rest):
+        x = rest[i]
+        if x in flags: opts[x] = True; i += 1
+        elif x.startswith("--"):
+            if i + 1 >= len(rest): die("missing value for %s" % x, 2)
+            opts[x] = rest[i + 1]; i += 2
+        else: pos.append(x); i += 1
+    tool = opts.get("--tool") or tool_default()
+    if tool not in ("claude", "codex", "human"): die("--tool must be claude, codex or human", 2)
+    num = lambda k, lo=0, hi=None: None if opts.get(k) is None else (int(opts[k]) if re.fullmatch(r"\d+", str(opts[k])) and int(opts[k]) >= lo and (hi is None or int(opts[k]) <= hi) else die("%s must be a whole number" % k, 2))
+    need = lambda n: pos if len(pos) >= n else die("usage: see `dask --help` (%s)" % cmd, 2)
+    copy = not opts.get("--no-copy")
+    if cmd == "ready": cmd_ready(opts.get("--app"), bool(opts.get("--all")))
+    elif cmd == "card": cmd_card(need(1))
+    elif cmd == "status": cmd_status(need(1))
+    elif cmd == "start": cmd_start(need(1), tool, copy)
+    elif cmd == "claim": cmd_claim(need(1), tool, bool(opts.get("--force")))
+    elif cmd == "begin": cmd_begin(need(1), tool, bool(opts.get("--worktree")), bool(opts.get("--force")), copy)
+    elif cmd == "now": cmd_now(pos, tool)
+    elif cmd == "submit": cmd_submit(need(1), tool, opts.get("--summary"), bool(opts.get("--dry-run")), opts.get("--handoff"))
+    elif cmd == "review": cmd_finish(need(1), tool, "review", opts.get("--pr"), opts.get("--note"), handoff=opts.get("--handoff"))
+    elif cmd == "done": cmd_finish(need(1), tool, "done", opts.get("--pr"), opts.get("--note"), opts.get("--result"), opts.get("--handoff"))
+    elif cmd == "release": cmd_release(need(1), tool, opts.get("--note"), opts.get("--handoff"))
+    elif cmd == "block": cmd_block(need(1), tool, opts.get("--note") or "", opts.get("--handoff"))
+    elif cmd == "unblock": cmd_unblock(need(1), tool, opts.get("--note") or "")
+    elif cmd == "card-write": cmd_card_write(need(1), tool, opts.get("--file"), opts.get("--note"), num("--expected-version"))
+    elif cmd == "spec": cmd_spec(need(1), tool, opts.get("--file"), opts.get("--repo"))
+    elif cmd == "verify": cmd_verify(need(1), tool, opts.get("--evidence"), opts.get("--commit"))
+    elif cmd == "lesson": cmd_lesson(pos, tool, opts.get("--task"), opts.get("--files"))
+    elif cmd == "secrets": cmd_secrets(need(1), tool, opts.get("--agent"))
+    elif cmd == "who": cmd_who(need(1), tool)
+    elif cmd == "msg": cmd_msg(need(2), tool, opts.get("--to"), opts.get("--kind"), num("--reply-to", 1))
+    elif cmd == "inbox": cmd_inbox(need(1), tool, num("--since"), bool(opts.get("--to-me")), bool(opts.get("--json")))
+    elif cmd == "review-record": cmd_review_record(need(1), opts.get("--head"), opts.get("--impl"), opts.get("--reviewer"), opts.get("--verdict"), num("--open"), num("--noted"), opts.get("--base"), opts.get("--answer-file"), tool)
+    elif cmd == "captain-merge": cmd_captain_merge(need(1), opts.get("--method") or "squash", bool(opts.get("--dry-run")))
+    elif cmd == "wait": cmd_wait(need(1), tool, num("--since"), bool(opts.get("--to-me")), opts.get("--kind"), num("--reply-to", 1), num("--timeout", 1, 600), bool(opts.get("--json")))
+    else: die("unknown command %r (dask --help)" % cmd, 2)
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

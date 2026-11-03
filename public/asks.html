@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0B0C0F">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Dasks">
+  <title>Dasks</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="alternate" type="application/json" href="/api/asks">
+  <link rel="alternate" type="text/markdown" href="/asks.md">
+  <link rel="stylesheet" href="/ds/fonts.css">
+  <link rel="stylesheet" href="/ds/tokens.css">
+  <link rel="stylesheet" href="/ds/components.css">
+  <link rel="stylesheet" href="/asks.css">
+  <link rel="stylesheet" href="/chrome.css">
+  <script src="/i18n.js" defer></script>
+  <script src="/chrome.js" defer></script>
+  <script type="module" src="/asks.js"></script>
+</head>
+<!-- Agents: GET /api/asks (the open user decisions) or /asks.md; the shape comes from /user-ask.js. -->
+<body data-theme="dasks" data-variant="metal">
+  <script src="/theme-boot.js"></script>
+  <header class="ask-head">
+    <h1 id="asks-title"></h1>
+  </header>
+  <main id="asks" data-state="loading" tabindex="-1"></main>
+  <noscript><p class="ask-note">Agents: <a href="/asks.md">/asks.md</a> · <a href="/api/asks">/api/asks</a></p></noscript>
+</body>
+</html>

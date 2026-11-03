@@ -1,0 +1,44 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import { authHeader, client } from '../mcp/board-client.mjs';
+import { boardUrl } from '../src/lib/connection.mjs';
+
+const [command, card, ...rest] = process.argv.slice(2);
+const usage = 'dasks-outcome stuck [--json]\ndasks-outcome outcome <card> <state> --note "one line" --evidence <path-or-PR> [--job <id>] [--run-id <id>] [--attempt <N>] [--handoff-file F] [--cause quota|rate-limit]\ndasks-outcome outcome-or-fail <card> --job <id> --log <path> [--cause quota|rate-limit]';
+async function main() {
+  if (command === '--help' || command === '-h') { process.stdout.write(usage + '\n'); return; }
+  if (command === 'stuck') {
+    const report = await client().stuck();
+    process.stdout.write(card === '--json' ? JSON.stringify(report, null, 2) + '\n'
+      : `Stuck: ${report.total}\n` + report.items.map((t) => `${t.reason}  ${t.age_hours.toFixed(1)}h  ${t.id}  ${t.title}\n`).join(''));
+    return;
+  }
+  if (!['outcome', 'outcome-or-fail'].includes(command) || !card) throw new Error(usage);
+  const state = command === 'outcome' ? rest.shift() : undefined;
+  const body = { ...(state ? { state } : {}), evidence: [], ...(process.env.DASKS_RUN_ID ? { run_id: process.env.DASKS_RUN_ID } : {}), ...(process.env.DASKS_ATTEMPT ? { attempt: Number(process.env.DASKS_ATTEMPT) } : {}) };
+  for (let i = 0; i < rest.length; i += 2) {
+    const option = rest[i]; const value = rest[i + 1];
+    if (value === undefined || value.startsWith('--')) throw new Error(`missing value for ${option}`);
+    if (option === '--evidence' && command === 'outcome') body.evidence.push(value);
+    else if (option === '--note' && command === 'outcome') body.note = value;
+    else if (option === '--run-id') body.run_id = value;
+    else if (option === '--attempt') body.attempt = Number(value);
+    else if (option === '--job') body.job = value;
+    else if (option === '--cause') body.cause = value;
+    else if (option === '--log' && command === 'outcome-or-fail') body.log = value;
+    else if (option === '--handoff-file' && command === 'outcome') body.handoff = fs.readFileSync(value, 'utf8');
+    else throw new Error(`unknown option ${option}`);
+  }
+  if (command === 'outcome' && (!state || !body.note)) throw new Error(usage);
+  if (command === 'outcome-or-fail' && (!body.job || !body.log)) throw new Error(usage);
+  if (body.attempt !== undefined && (!Number.isSafeInteger(body.attempt) || body.attempt < 1)) throw new Error('--attempt must be a positive integer');
+  const base = boardUrl();
+  const auth = authHeader();
+  let response;
+  try { response = await fetch(`${base}/api/tasks/${encodeURIComponent(card)}/${command}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Dasks-Actor': process.env.DASKS_ACTOR || 'dasks-cli', ...auth }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) }); }
+  catch { throw new Error('Dasks API request failed'); }
+  const text = await response.text();
+  if (!response.ok) throw new Error(`HTTP ${response.status}: ${text}`);
+  process.stdout.write(text + '\n');
+}
+main().catch((error) => { process.stderr.write(error.message + '\n'); process.exitCode = 1; });

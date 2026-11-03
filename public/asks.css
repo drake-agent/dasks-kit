@@ -1,0 +1,114 @@
+/* The user decision queue (/asks). Design system tokens only (metal, dark).
+   Phone first: one column, choices stacked full width, 48px tap targets; no horizontal scroll at 390px. */
+body {
+  margin: 0; min-height: 100vh; -webkit-text-size-adjust: 100%;
+  font-family: var(--ds-font-sans); font-size: var(--ds-type-body-size); line-height: var(--ds-type-body-line);
+  background: var(--ds-color-bg-canvas); color: var(--ds-color-text-primary);
+}
+html { color-scheme: dark; }
+* { box-sizing: border-box; }
+button, input { font: inherit; color: inherit; }
+a { color: var(--ds-color-text-link); }
+:focus-visible { outline: 2px solid var(--ds-color-focus-ring); outline-offset: 2px; border-radius: var(--ds-radius-sm); }
+[hidden] { display: none !important; }
+h1, h2, h3, p, dl, dd { margin: 0; }
+
+/* The view heading under the shared top bar (chrome.css). */
+.ask-head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--ds-space-3); max-width: 720px; margin: 0 auto; padding: var(--ds-space-5) var(--ds-space-4) 0; }
+.ask-head h1 { font-family: var(--ds-font-display); font-size: var(--ds-type-title-2-size); letter-spacing: -0.01em; }
+
+main { padding: var(--ds-space-4) var(--ds-space-4) calc(var(--ds-space-12) + env(safe-area-inset-bottom)); max-width: 720px; margin: 0 auto;
+  display: flex; flex-direction: column; gap: var(--ds-space-4); }
+main:focus { outline: none; }
+.ask-count, .ask-note, .ask-age, .ask-app { font-size: var(--ds-type-caption-size); color: var(--ds-color-text-tertiary); }
+.ask-item { background: var(--ds-color-bg-surface-raised); border: 1px solid var(--ds-color-border-strong); border-radius: var(--ds-radius-lg);
+  padding: var(--ds-space-4); display: flex; flex-direction: column; gap: var(--ds-space-3); min-width: 0; box-shadow: var(--ds-shadow-md); }
+.ask-item.skeleton { min-height: 320px; opacity: 0.5; }
+.ask-meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--ds-space-2); }
+.ask-title { font-size: var(--ds-type-body-large-size); line-height: var(--ds-type-body-large-line); font-weight: var(--ds-weight-semibold); overflow-wrap: anywhere; }
+
+.ask-lines { display: flex; flex-direction: column; gap: var(--ds-space-2); padding: var(--ds-space-3); border-radius: var(--ds-radius-md);
+  background: var(--ds-color-bg-surface); border: 1px solid var(--ds-color-border-subtle); }
+.ask-line { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ask-line dt { font-size: var(--ds-type-caption-size); font-weight: var(--ds-weight-semibold); color: var(--ds-color-text-secondary); }
+.ask-line dd { overflow-wrap: anywhere; }
+.ask-line.rec dd { font-weight: var(--ds-weight-semibold); }
+
+.ask-choices { display: flex; flex-direction: column; gap: var(--ds-space-2); }
+/* Choices stack at every width and grow with their text, so a long option is never clipped. */
+.ask-choice { min-height: 48px; height: auto; width: 100%; justify-content: flex-start; text-align: left; gap: var(--ds-space-2); white-space: normal;
+  padding: var(--ds-space-3) var(--ds-space-4); line-height: 1.45; font-size: var(--ds-type-body-size); border-radius: var(--ds-radius-md); }
+.ask-choice.quiet { min-height: 44px; color: var(--ds-color-text-secondary); border: 1px solid var(--ds-color-border-subtle); background: none; } /* "neither" is a choice too */
+.ask-recbadge { margin-left: auto; }
+.ask-memo { width: 100%; min-height: 44px; }
+.ask-send { min-height: 48px; width: 100%; justify-content: center; }
+.ask-err { color: var(--ds-color-text-danger, var(--ds-color-text-primary)); font-size: var(--ds-type-label-size); }
+.ask-done { font-size: var(--ds-type-label-size); color: var(--ds-color-text-secondary); }
+.ask-empty { display: flex; flex-direction: column; gap: var(--ds-space-2); align-items: flex-start; padding: var(--ds-space-8) 0; }
+.ask-clear { font-family: var(--ds-font-display); font-size: var(--ds-type-title-2-size); }
+
+dialog.login { border: 1px solid var(--ds-color-border-strong); background: var(--ds-color-bg-surface-raised); color: inherit; padding: var(--ds-space-5); max-width: min(92vw, 360px); }
+dialog.login form { display: flex; flex-direction: column; gap: var(--ds-space-3); }
+dialog.login .actions { display: flex; justify-content: flex-end; gap: var(--ds-space-2); }
+dialog::backdrop { background: rgb(0 0 0 / 0.55); }
+
+@media (min-width: 768px) {
+  .ask-send { width: auto; align-self: flex-end; padding: 0 var(--ds-space-6); }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* Flat cards; compact controls on a pointer (48px stays on touch). */
+.ask-item { border-radius: 10px; box-shadow: none; border-color: var(--ds-color-border-subtle); }
+@media (hover: hover) and (pointer: fine) {
+  .ask-choice { min-height: 40px; }
+  .ask-send { min-height: 36px; border-radius: 8px; }
+}
+.ask-eff { flex: none; font-size: var(--ds-type-caption-size); color: var(--ds-color-text-secondary); white-space: nowrap; }
+
+/* An option reads as a choice, not a field: a round mark at its start, filled when picked. */
+.ask-choice { position: relative; padding-left: calc(var(--ds-space-4) + 22px); }
+.ask-choice::before { content: ""; position: absolute; left: var(--ds-space-4); top: 50%; width: 14px; height: 14px; margin-top: -8px; border-radius: 50%; border: 1.5px solid var(--ds-color-border-strong); box-sizing: content-box; }
+.ask-choice[aria-pressed="true"]::before { --m: var(--ds-color-action-accent, currentColor); border-color: var(--m); background: radial-gradient(circle, var(--m) 0 4px, transparent 5px); }
+
+/* The decision question leads its card. */
+.ask-title { font-size: 18px; line-height: 26px; font-weight: var(--ds-weight-semibold); }
+
+/* The card's context is one panel, not a card in a card: a quiet left rule. */
+[data-theme] .ask-lines { background: none; border: 0; border-left: 2px solid var(--ds-color-border-default); border-radius: 0; padding: 0 0 0 var(--ds-space-3); }
+
+.ask-bg > summary { cursor: pointer; min-height: 36px; display: inline-flex; align-items: center; font-size: var(--ds-type-label-size); color: var(--ds-color-text-secondary); }
+.ask-bg[open] > summary { margin-bottom: var(--ds-space-2); }
+.ask-bg > summary { list-style: none; gap: 4px; }
+.ask-bg > summary::-webkit-details-marker { display: none; }
+.ask-bg > summary::after { content: ""; width: 12px; height: 12px; background: currentColor; -webkit-mask: var(--chev) center / contain no-repeat; mask: var(--chev) center / contain no-repeat;
+  --chev: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); }
+.ask-bg[open] > summary::after { transform: rotate(180deg); }
+.ask-bg > summary:hover { color: var(--ds-color-text-primary); }
+
+/* Option anatomy: mark, text column (min-width 0, wraps inside), one right slot (the recommended badge over the effect, right-aligned).
+   The picked option (the recommendation until the user taps another) has the filled mark and an accent edge. */
+.ask-choice { display: flex; align-items: center; gap: 10px; }
+.ask-opt { flex: 1; min-width: 0; font-weight: var(--ds-weight-medium); }
+.ask-side { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; min-width: 0; text-align: right; }
+.ask-side .ask-recbadge { margin-left: 0; }
+.ask-side .ask-eff { font-size: var(--ds-type-caption-size); color: var(--ds-color-text-tertiary); }
+[data-theme] .ask-choice[aria-pressed="true"]:not(:focus-visible) { outline: 0; }
+[data-theme] .ask-choice[aria-pressed="true"] { box-shadow: inset 0 0 0 1px var(--ds-color-action-accent, var(--ds-color-focus-ring)); }
+@media (max-width: 480px) { .ask-choice { flex-wrap: wrap; } .ask-side { flex-direction: row; align-items: center; gap: var(--ds-space-2); } }
+.ask-head h1 { font-size: 24px; line-height: 30px; font-weight: var(--ds-weight-semibold); letter-spacing: -0.02em; }
+
+.ask-head { max-width: 1440px; min-height: 0; padding: var(--ds-space-5) var(--ds-space-4) 0; }
+main { max-width: 1440px; }
+.ask-item { max-width: 880px; }
+@media (max-width: 767px) { main { padding-left: var(--ds-space-3); padding-right: var(--ds-space-3); } }
+.ask-split { display: grid; gap: var(--ds-space-2); }
+.ask-aside .ask-line dd { font-size: var(--ds-type-label-size); line-height: 1.55; color: var(--ds-color-text-secondary); }
+.ask-aside .ask-bg > summary { margin: 0; }
+.ask-aside .ask-bg[open] > summary { margin-bottom: var(--ds-space-2); }
+@media (min-width: 1100px) {
+  .ask-split { grid-template-columns: minmax(0, 1fr) minmax(320px, 420px); gap: var(--ds-space-5); align-items: start; max-width: 1392px; }
+  .ask-split > .ask-item { max-width: none; }
+  .ask-aside { position: sticky; top: 80px; padding: var(--ds-space-4) var(--ds-space-5); border: 1px solid var(--ds-color-border-subtle); border-radius: 10px; background: var(--ds-color-bg-surface); }
+}
+@media (max-width: 1099.98px) { .ask-aside { padding: 0 var(--ds-space-1); } }
+[data-theme] .ask-head { box-sizing: content-box; min-height: 44px; }

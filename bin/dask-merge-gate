@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""dask-merge-gate — optional Claude Code PreToolUse hook (Bash): an agent's `gh pr merge` runs only when the board holds
+the human user's signed merge OK for that PR's card at exactly the PR's head.
+
+  dask-merge-gate        reads the hook JSON on stdin; exit 0 = allow (silent), exit 2 = refuse (reason on stderr)
+  DASK_MERGE_GATE=0      turns it off
+
+What counts as a merge: `gh pr merge …` and `gh api …/pulls/<n>/merge`. Commands with no merge pass with no gh call.
+Fail closed: a merge command must be one plain command. Indirection (eval, source, `sh -c`, xargs, a variable as the
+command word) and compound commands (`;`, `&&`, `||`, `|`, `&`, subshells, newlines) are refused, since the gate checks
+exactly one PR and could not see what else would run. The PR is looked up in the repo the command names (`-R`/`--repo`,
+or the `repos/<owner>/<repo>/` of a `gh api` path), else the current one.
+How the user approves: the agent moves the card to blocked-on-user with needs_user starting `head <40-char sha> …`
+(`dasks update <card> --status blocked-on-user --needs-user "head <sha> merge PR #N? If approved, it merges." --what … --why … --do … --rec …
+--after …`); the user logs in on the board and taps approve. GET /api/merge-ok?card=&sha= then answers ok for that head
+only; a new push needs a new OK. The PR's card is its `human/<card>` or `dasks/<card>` branch, else a `<card>:` title
+prefix. Board URL: $DASKS_URL, else ~/.dasks/client.json."""
+import json, os, re, shlex, subprocess, sys, urllib.parse, urllib.request
+
+def _client():
+    home = os.environ.get("DASKS_HOME") or os.path.expanduser("~/.dasks")
+    try:
+        with open(os.path.join(home, "client.json")) as f: j = json.load(f)
+        return j if isinstance(j, dict) else {}
+    except Exception: return {}
+
+CLIENT = _client()
+BOARD = (os.environ.get("DASKS_URL") or CLIENT.get("url") or "http://127.0.0.1:4747").rstrip("/")
+# An https board signed by its own CA: $DASKS_CA_FILE, else client.json "ca" (install.sh --ca-file).
+CA = os.environ.get("DASKS_CA_FILE") or CLIENT.get("ca") or ""
+if CA:
+    import ssl
+    urllib.request.install_opener(urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=CA))))
+CARD_RE = re.compile(r"[a-z][a-z0-9]{0,23}\.t-[a-z0-9]+(?:-[a-z0-9]+)*")
+MERGE_TEXT = re.compile(r"\bpr\b[\s\S]*\bmerge\b|pulls/\d+/merge|mergePullRequest|enablePullRequestAutoMerge", re.I)
+INDIRECT = re.compile(r"\beval\b|\bsource\b|(^|[;&|]\s*)\.\s|\b(?:ba|z)?sh\s+-\w*c\b|\bxargs\b|\$\(|`|\$\{?[A-Za-z_]+\}?\s+pr\b")
+# `gh pr merge` options that take a value: the value is never the PR.
+VALUE_OPTS = {"-R", "--repo", "-b", "--body", "-F", "--body-file", "-t", "--subject", "-A", "--author-email", "--match-head-commit"}
+
+def refuse(why):
+    print("dask-merge-gate: refused: " + why, file=sys.stderr); sys.exit(2)
+
+def gh(*args):
+    try: r = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError) as e: refuse("gh failed (%s)" % e)
+    if r.returncode != 0: refuse("gh %s failed: %s" % (" ".join(args[:3]), (r.stderr or r.stdout).strip()[:200]))
+    return r.stdout
+
+def words_of(cmd):
+    """The command as words; refuses anything that is not exactly one simple command."""
+    if "\n" in cmd.strip() or "\r" in cmd: refuse("a merge must be one command on one line")
+    try:
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        words = list(lex)
+    except ValueError: refuse("cannot parse the command")
+    if any(w and set(w) <= set(";&|()<>") for w in words):
+        refuse("a merge must be a single plain command (no ;, &&, ||, |, &, redirects or subshells): run `gh pr merge <n>` on its own")
+    return words
+
+def target(cmd):
+    """(repo or '', PR selector or '') of the one merge in `cmd`."""
+    words = words_of(cmd)
+    if not words or os.path.basename(words[0]) != "gh": refuse("the merge must start with gh (no prefixes or wrappers)")
+    if len(words) > 1 and words[1] == "api":
+        path = next((w for w in words[2:] if "pulls/" in w), "")
+        m = re.search(r"repos/([^/\s]+/[^/\s]+)/pulls/(\d+)/merge", path)
+        if not m: refuse("a `gh api` merge the gate cannot read (use repos/<owner>/<repo>/pulls/<n>/merge or gh pr merge)")
+        return m.group(1), m.group(2)
+    if words[1:3] != ["pr", "merge"]: refuse("a merge the gate cannot read; run a plain `gh pr merge <n> [-R owner/repo]`")
+    repo, sel, i = "", "", 3
+    while i < len(words):
+        w = words[i]
+        if w in VALUE_OPTS:
+            if i + 1 >= len(words): refuse("%s needs a value" % w)
+            if w in ("-R", "--repo"): repo = words[i + 1]
+            i += 2; continue
+        if w.startswith("--repo="): repo = w.split("=", 1)[1]
+        elif w.startswith("-R") and len(w) > 2: repo = w[2:]
+        elif not w.startswith("-"):
+            if sel: refuse("more than one PR named; merge one PR per command")
+            sel = w
+        i += 1
+    if repo and not sel: refuse("-R names another repo: name the PR too")
+    return repo, sel
+
+def main():
+    if os.environ.get("DASK_MERGE_GATE") == "0": return
+    try: payload = json.load(sys.stdin)
+    except Exception: return
+    cmd = ((payload or {}).get("tool_input") or {}).get("command")
+    if isinstance(cmd, list): cmd = " ".join(map(str, cmd))
+    if not isinstance(cmd, str) or not MERGE_TEXT.search(cmd) or "gh" not in cmd: return
+    if INDIRECT.search(cmd): refuse("the merge command uses indirection the gate cannot read; run a plain `gh pr merge <n>`")
+    repo, sel = target(cmd)
+    info = json.loads(gh("pr", "view", *([sel] if sel else []), *(["-R", repo] if repo else []), "--json", "headRefOid,headRefName,title,url"))
+    branch, title, sha = info.get("headRefName") or "", info.get("title") or "", info.get("headRefOid") or ""
+    m = re.fullmatch(r"(?:human|dasks)/(%s)" % CARD_RE.pattern, branch) or re.match(r"(%s):" % CARD_RE.pattern, title)
+    if not m: refuse("%s has no Dasks card (branch human/<card> or dasks/<card>, or a `<card>:` title); the human merges it" % info.get("url", "this PR"))
+    card = m.group(1)
+    q = urllib.parse.urlencode({"card": card, "sha": sha})
+    try:
+        with urllib.request.urlopen(BOARD + "/api/merge-ok?" + q, timeout=15) as r: ok = json.loads(r.read() or b"{}").get("ok") is True
+    except Exception as e: refuse("the board could not confirm a merge OK (%s)" % e)
+    if not ok:
+        refuse("no merge OK from the user for %s at head %s. Ask on the board: set the card to blocked-on-user with needs_user "
+               "starting `head %s`, and wait for the user to approve it there" % (card, sha[:12], sha))
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,7 @@
+#!/bin/sh
+# Dasks launcher (Node >= 22.18 runs TypeScript directly). Works through a symlink (e.g. ~/.local/bin/dasks-server).
+SELF=$0
+while [ -L "$SELF" ]; do L=$(readlink "$SELF"); case $L in /*) SELF=$L ;; *) SELF=$(dirname "$SELF")/$L ;; esac; done
+DIR=$(cd "$(dirname "$SELF")/.." && pwd)
+NODE=${DASKS_NODE:-$(command -v node || echo node)}
+exec "$NODE" --disable-warning=ExperimentalWarning "$DIR/src/server.ts" "$@"

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0B0C0F">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Dasks">
+  <title>Dasks</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/ds/fonts.css">
+  <link rel="stylesheet" href="/ds/tokens.css">
+  <link rel="stylesheet" href="/ds/components.css">
+  <link rel="stylesheet" href="/chrome.css">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/i18n.js" defer></script>
+  <script type="module" src="/done-ticker.js"></script>
+  <script src="/chrome.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body data-theme="dasks" data-variant="metal">
+  <script src="/theme-boot.js"></script>
+  <header class="topbar">
+    <a class="brand" href="/" data-i18n-aria="brand.home">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="4.5" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/></svg>
+      <span>Dasks</span>
+    </a>
+    <nav class="tabs" data-i18n-aria="nav.views">
+      <a href="#/home" data-view="home"><span data-i18n="nav.home"></span></a>
+      <a href="#/today" data-view="today"><span data-i18n="nav.today"></span><span class="ds-badge" data-tone="warning" id="badge-top" hidden></span></a>
+      <a href="/asks" data-view="asks"><span data-i18n="nav.asks"></span></a>
+      <a href="#/board" data-view="board"><span data-i18n="nav.board"></span></a>
+      <button type="button" class="nav-more" id="nav-more" data-action="nav-more" aria-haspopup="true" aria-expanded="false" aria-controls="more-menu"><span data-i18n="nav.more"></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    </nav>
+    <div class="top-actions">
+      <span class="live" id="live" data-i18n="live" data-i18n-title="live.title"></span>
+    </div>
+  </header>
+  <div class="more-menu" id="more-menu" hidden>
+    <p class="more-group" data-i18n="nav.g.projects"></p>
+    <a href="#/goals" data-view="goals"><span data-i18n="nav.goals"></span></a>
+    <a href="#/board" data-view="board" class="more-phone"><span data-i18n="nav.board"></span></a>
+    <a href="#/connections" data-view="connections"><span data-i18n="nav.connections"></span></a>
+    <a href="/fleet" data-view="fleet"><span data-i18n="nav.fleet"></span></a>
+    <a href="#/review" data-view="review"><span data-i18n="nav.review"></span></a>
+    <p class="more-group" data-i18n="nav.g.other"></p>
+    <div class="more-theme"><div class="ds-segmented theme" role="group" data-i18n-aria="theme.label"><button type="button" class="ds-segment" data-set-theme="light" aria-pressed="false"><span data-i18n="theme.day"></span></button><button type="button" class="ds-segment" data-set-theme="dark" aria-pressed="false"><span data-i18n="theme.night"></span></button><button type="button" class="ds-segment" data-set-theme="auto" aria-pressed="false"><span data-i18n="theme.auto"></span></button></div></div>
+    <div class="more-foot">
+      <button type="button" class="ds-button auth-btn" data-variant="secondary" data-size="sm" id="auth-btn" data-action="auth" hidden></button>
+      <div class="ds-segmented lang" role="group" data-i18n-aria="lang.switch"><button type="button" class="ds-segment" data-lang="ko" lang="ko" aria-pressed="false"><span data-i18n="lang.ko"></span></button><button type="button" class="ds-segment" data-lang="en" lang="en" aria-pressed="true"><span data-i18n="lang.en"></span></button></div>
+    </div>
+  </div>
+  <section class="done-ticker" id="done-ticker" data-i18n-aria="done.tick.label" hidden></section>
+  <section class="day-summary" id="day-summary" data-i18n-aria="sum.label" hidden></section>
+  <main id="main" tabindex="-1"><p class="loading" data-i18n="loading"></p></main>
+  <aside class="panel" id="panel" role="dialog" aria-modal="false" hidden data-i18n-aria="panel"></aside>
+  <div class="scrim" id="scrim" hidden></div>
+  <nav class="bottombar" data-i18n-aria="nav.views">
+    <a href="#/home" data-view="home"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11l8-7 8 7v8a1 1 0 0 1-1 1h-4v-6h-6v6H5a1 1 0 0 1-1-1z" stroke="currentColor" stroke-width="2" fill="none" stroke-linejoin="round"/></svg><span data-i18n="nav.home"></span></a>
+    <a href="#/today" data-view="today"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="3" stroke="currentColor" stroke-width="2" fill="none"/><path d="M4 10h16M9 3v4M15 3v4" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg><span data-i18n="nav.today"></span><span class="ds-badge" data-tone="warning" id="badge-bottom" hidden></span></a>
+    <a href="/asks" data-view="asks"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13l2.5-7h11L20 13v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z M4 13h4.5l1.5 2.5h4l1.5-2.5H20" stroke="currentColor" stroke-width="2" fill="none" stroke-linejoin="round"/></svg><span data-i18n="nav.asks"></span></a>
+    <button type="button" class="nav-more" data-action="nav-more" aria-haspopup="true" aria-expanded="false" aria-controls="more-menu"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6" stroke="currentColor" stroke-width="2" fill="none"/><circle cx="12" cy="12" r="1.6" stroke="currentColor" stroke-width="2" fill="none"/><circle cx="19" cy="12" r="1.6" stroke="currentColor" stroke-width="2" fill="none"/></svg><span data-i18n="nav.more"></span></button>
+  </nav>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

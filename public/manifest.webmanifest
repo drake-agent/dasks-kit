@@ -1,0 +1,1 @@
+{ "name": "Dasks", "short_name": "Dasks", "start_url": "/#/today", "display": "standalone", "background_color": "#0B0C0F", "theme_color": "#0B0C0F", "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }] }

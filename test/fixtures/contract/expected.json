@@ -1,0 +1,159 @@
+{
+ "checks-after-heading.md": {
+  "errors": [
+   "pass_checks: need 3-5 concrete checks, got 2"
+  ],
+  "ok": false,
+  "warnings": [
+   "self-contained card: section '## Background' missing or empty",
+   "self-contained card: section '## Why' missing or empty",
+   "self-contained card: section '## Context pack' missing or empty"
+  ]
+ },
+ "clean.md": {
+  "errors": [],
+  "ok": true,
+  "warnings": []
+ },
+ "comments.md": {
+  "errors": [],
+  "ok": true,
+  "warnings": []
+ },
+ "crlf.md": {
+  "errors": [],
+  "ok": true,
+  "warnings": []
+ },
+ "empty.md": {
+  "errors": [
+   "missing field: id",
+   "missing field: goal",
+   "missing field: role",
+   "missing field: tier",
+   "missing field: repo",
+   "missing field: branch",
+   "missing field: lane",
+   "missing field: deadline",
+   "pass_checks: need 3-5 concrete checks, got 0"
+  ],
+  "ok": false,
+  "warnings": [
+   "self-contained card: section '## Background' missing or empty",
+   "self-contained card: section '## Why' missing or empty",
+   "self-contained card: section '## Context pack' missing or empty",
+   "self-contained card: section '## Tests' missing or empty",
+   "depends_on missing (write 'none' if nothing)",
+   "size missing: write 'small' or 'big' (big = a deeper review; unsure = big)"
+  ]
+ },
+ "hard-errors.md": {
+  "errors": [
+   "missing field: repo",
+   "missing field: lane",
+   "role must be one of builder|designer|marketer|ops|qa|research|reviewer",
+   "tier must be 1, 2 or 3",
+   "deadline must be YYYY-MM-DD",
+   "pass_checks: need 3-5 concrete checks, got 2"
+  ],
+  "ok": false,
+  "warnings": []
+ },
+ "korean.md": {
+  "errors": [],
+  "ok": true,
+  "warnings": []
+ },
+ "line-separators.md": {
+  "errors": [
+   "PAIR REFUSED: unknown implementer model 'mystery"
+  ],
+  "ok": false,
+  "warnings": []
+ },
+ "odd-whitespace.md": {
+  "errors": [],
+  "ok": true,
+  "warnings": [
+   "self-contained card: section '## Why' missing or empty"
+  ]
+ },
+ "pair-alias-spaces.md": {
+  "errors": [],
+  "ok": true,
+  "warnings": []
+ },
+ "pair-alias.md": {
+  "errors": [],
+  "ok": true,
+  "warnings": []
+ },
+ "pair-missing-review.md": {
+  "errors": [
+   "PAIR REFUSED: reviewer model not specified"
+  ],
+  "ok": false,
+  "warnings": []
+ },
+ "pair-missing.md": {
+  "errors": [
+   "PAIR REFUSED: implementer model not specified"
+  ],
+  "ok": false,
+  "warnings": []
+ },
+ "pair-non-code-role.md": {
+  "errors": [],
+  "ok": true,
+  "warnings": []
+ },
+ "pair-reversed.md": {
+  "errors": [],
+  "ok": true,
+  "warnings": []
+ },
+ "pair-review-only.md": {
+  "errors": [
+   "PAIR REFUSED: implementer model not specified"
+  ],
+  "ok": false,
+  "warnings": []
+ },
+ "pair-same.md": {
+  "errors": [
+   "PAIR REFUSED: same model family reviewing itself (claude -> claude-example)"
+  ],
+  "ok": false,
+  "warnings": []
+ },
+ "pair-unknown.md": {
+  "errors": [
+   "PAIR REFUSED: unknown implementer model 'mystery-model'"
+  ],
+  "ok": false,
+  "warnings": []
+ },
+ "too-many-checks.md": {
+  "errors": [
+   "pass_checks: need 3-5 concrete checks, got 6"
+  ],
+  "ok": false,
+  "warnings": []
+ },
+ "unicode-digits.md": {
+  "errors": [],
+  "ok": true,
+  "warnings": []
+ },
+ "warnings-only.md": {
+  "errors": [],
+  "ok": true,
+  "warnings": [
+   "self-contained card: section '## Background' missing or empty",
+   "self-contained card: section '## Why' missing or empty",
+   "self-contained card: section '## Context pack' missing or empty",
+   "depends_on missing (write 'none' if nothing)",
+   "size missing: write 'small' or 'big' (big = a deeper review; unsure = big)"
+  ]
+ }
+}

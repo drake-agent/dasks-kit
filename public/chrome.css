@@ -1,0 +1,199 @@
+/* The shared app chrome (chrome.js): top bar, More menu, phone bottom bar. Loaded by every page, so it uses
+   --ds-* tokens only (the board's own role names live in style.css). */
+.topbar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: var(--ds-space-5); min-height: 64px; box-sizing: border-box;
+  padding: var(--ds-space-3) var(--ds-space-6); background: color-mix(in srgb, var(--ds-color-bg-canvas) 86%, transparent);
+  backdrop-filter: blur(var(--ds-glass-blur)); border-bottom: 1px solid var(--ds-color-border-default); }
+.brand { display: flex; align-items: center; gap: var(--ds-space-2); font-family: var(--ds-font-display); font-weight: var(--ds-weight-semibold);
+  font-size: var(--ds-type-title-2-size); color: var(--ds-color-text-primary); text-decoration: none; letter-spacing: -0.01em; }
+.brand svg { color: var(--ds-color-action-accent); }
+.tabs { display: flex; align-items: center; gap: 2px; margin-left: auto; padding: 3px; border-radius: var(--ds-radius-pill); background: var(--ds-color-bg-surface-sunken);
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.18); min-width: 0; overflow-x: auto; scrollbar-width: none; } /* project pages fill it with every project */
+.tabs::-webkit-scrollbar { display: none; }
+.tabs a, .tabs .nav-more { position: relative; display: inline-flex; align-items: center; gap: var(--ds-space-1); min-height: 34px; padding: 0 var(--ds-space-4); border-radius: var(--ds-radius-pill);
+  color: var(--ds-color-text-secondary); text-decoration: none; font: inherit; font-weight: var(--ds-weight-medium); font-size: var(--ds-type-label-size); line-height: 1.2; white-space: nowrap;
+  background: none; border: 0; cursor: pointer; }
+.tabs a:hover, .tabs .nav-more:hover { color: var(--ds-color-text-primary); }
+.tabs a[aria-current="page"], .tabs .nav-more[data-active] { color: var(--ds-color-text-primary); background: linear-gradient(180deg, var(--ds-color-bg-surface-raised), var(--ds-color-bg-surface));
+  box-shadow: inset 0 0.5px 0 var(--ds-metal-highlight), var(--ds-shadow-sm); }
+.tabs .nav-more svg { width: 14px; height: 14px; }
+.tabs .ds-badge { margin-left: 2px; }
+.top-actions { display: flex; align-items: center; gap: var(--ds-space-4); }
+.live { font-size: var(--ds-type-caption-size); color: var(--ds-color-text-secondary); display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ds-color-text-tertiary); flex: none; }
+.live.on::before { background: var(--ds-color-status-success); }
+.auth-btn { white-space: nowrap; }
+.auth-btn[data-state="in"] { color: var(--ds-color-text-secondary); }
+
+/* More: a popover under the tab pill on wide screens, a bottom sheet above the tab bar on phones. */
+.more-menu { position: fixed; top: 60px; right: var(--ds-space-6); z-index: 40; width: 240px; display: flex; flex-direction: column;
+  padding: var(--ds-space-2); border-radius: var(--ds-radius-lg); background: var(--ds-color-bg-surface-raised); border: 1px solid var(--ds-color-border-strong);
+  box-shadow: var(--ds-shadow-lg, var(--ds-shadow-md)); }
+.more-menu[hidden] { display: none; }
+.more-group { margin: var(--ds-space-2) var(--ds-space-3) var(--ds-space-1); font-size: var(--ds-type-caption-size); color: var(--ds-color-text-tertiary); font-weight: var(--ds-weight-medium); }
+.more-group:first-child { margin-top: var(--ds-space-1); }
+.more-menu a { display: flex; align-items: center; min-height: 36px; padding: 0 var(--ds-space-3); border-radius: var(--ds-radius-md); color: var(--ds-color-text-primary);
+  text-decoration: none; font-size: var(--ds-type-body-size); }
+.more-menu a:hover, .more-menu a:focus-visible { background: var(--ds-color-action-secondary-bg-hover); }
+.more-menu a[aria-current="page"] { background: var(--ds-color-action-accent-soft); }
+.more-menu .more-phone { display: none; }
+.more-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--ds-space-2); margin-top: var(--ds-space-2); padding: var(--ds-space-3) var(--ds-space-2) var(--ds-space-1);
+  border-top: 1px solid var(--ds-color-border-subtle); }
+.more-foot:not(:has(.auth-btn:not([hidden]))) { justify-content: flex-end; }
+.more-theme { display: flex; align-items: center; justify-content: flex-end; gap: var(--ds-space-2); margin-top: var(--ds-space-2); padding: var(--ds-space-3) var(--ds-space-2) var(--ds-space-1);
+  border-top: 1px solid var(--ds-color-border-subtle); }
+.more-theme + .more-foot { border-top: 0; margin-top: 0; }
+.bottombar { display: none; }
+
+@media (max-width: 1100px) { .live { display: none; } }
+@media (max-width: 760px) {
+  body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
+  .topbar { min-height: 52px; padding: var(--ds-space-2) var(--ds-space-4); gap: var(--ds-space-3); padding-top: max(8px, env(safe-area-inset-top)); }
+  .brand { font-size: var(--ds-type-title-3-size); }
+  .tabs, .live { display: none; }
+  .bottombar { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); position: fixed; z-index: 30; left: 0; right: 0; bottom: 0;
+    padding-bottom: env(safe-area-inset-bottom); background: var(--ds-glass-fill); backdrop-filter: blur(var(--ds-glass-blur)); border-top: 1px solid var(--ds-glass-border); }
+  .bottombar a, .bottombar .nav-more { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-height: 58px;
+    color: var(--ds-color-text-secondary); text-decoration: none; font: inherit; font-size: 12px; font-weight: var(--ds-weight-semibold); background: none; border: 0; cursor: pointer; }
+  .bottombar svg { width: 22px; height: 22px; }
+  .bottombar a[aria-current="page"], .bottombar .nav-more[data-active], .bottombar .nav-more[aria-expanded="true"] { color: var(--ds-color-text-primary); }
+  .bottombar .ds-badge { position: absolute; top: 3px; left: calc(50% + 11px); margin: 0; min-width: 18px; height: 18px; padding: 0 5px; font-size: 11px; line-height: 18px; justify-content: center; }
+  .more-menu { position: fixed; top: auto; left: var(--ds-space-3); right: var(--ds-space-3); bottom: calc(66px + env(safe-area-inset-bottom)); width: auto; padding: var(--ds-space-2) var(--ds-space-2) var(--ds-space-3); }
+  .more-menu a { min-height: 44px; }
+  .more-menu .more-phone { display: flex; }
+  body.more-open::after { content: ""; position: fixed; inset: 0; z-index: 25; background: rgb(0 0 0 / 0.45); }
+}
+
+/* Page headings: one size on every page (the board views use .view-head h1, the standalone pages their own heads). */
+.view-head h1, .ask-head h1 { font-family: var(--ds-font-display); font-size: 24px; line-height: 30px; font-weight: var(--ds-weight-semibold); letter-spacing: -0.02em; }
+@media (max-width: 760px) { .view-head h1, .ask-head h1 { font-size: 20px; line-height: 25px; } }
+/* /asks starts at the same left edge as the board views; reading pages keep a measure. */
+@media (min-width: 761px) {
+  .ask-head, #asks, #sum { margin-left: 0; margin-right: auto; padding-left: var(--ds-space-6); padding-right: var(--ds-space-6); box-sizing: content-box; }
+}
+/* Standalone pages show the live dot only while the board page's snapshot is fresh (chrome.js); its space stays. */
+body.has-chrome #live:not(.on) { visibility: hidden; }
+/* /asks on wide screens: two decision cards side by side. */
+@media (min-width: 1100px) {
+  #asks { max-width: 1440px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+  #asks > :not(.ask-item) { grid-column: 1 / -1; }
+}
+
+@media (max-width: 760px) { .topbar .top-actions { margin-left: auto; } }
+
+/* One drawing for 'waits on the user' everywhere: an amber dot and amber text, no fill. */
+.turn-tag { display: inline-flex; align-items: center; gap: 6px; font-size: var(--ds-type-caption-size); font-weight: var(--ds-weight-medium); color: var(--ds-color-status-warning-text); background: none; padding: 0; }
+.turn-tag::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ds-color-status-warning); flex: none; }
+/* One button shape: 8px corners on every page and size (pills read as a different family). */
+.ds-button { border-radius: 8px; }
+@media (min-width: 1024px) { body[data-theme][data-variant] { --ds-type-caption-size: 13px; --ds-type-label-size: 14px; } }
+.tabs .nav-more { min-width: 7.5em; justify-content: center; } /* one state in the top bar; the full sentence is the tooltip */
+
+/* One icon family (2px stroke, round caps, like the tab bar's): inline icons are SVG masks, never text glyphs. */
+.ico { display: inline-block; width: 14px; height: 14px; flex: none; vertical-align: -2px; background: currentColor; -webkit-mask: var(--i) center / contain no-repeat; mask: var(--i) center / contain no-repeat; }
+.ico-right { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 6l6 6-6 6'/%3E%3C/svg%3E"); }
+/* "More" and other show/hide toggles: one quiet link style on every page, starting at the list's text edge (not a
+   button with its own inset). Real actions stay .ds-button. */
+[data-theme] .more-link { display: inline-flex; align-items: center; gap: 4px; min-height: 32px; padding: 0; margin: 0; border: 0;
+  background: none; box-shadow: none; cursor: pointer; font: inherit; font-size: var(--ds-type-label-size); font-weight: var(--ds-weight-medium);
+  color: var(--ds-color-text-secondary); text-align: start; }
+/* A small chevron after the words says "this opens more", the same 2px icon family as the rest. */
+[data-theme] .more-link::after { content: ""; width: 12px; height: 12px; flex: none; background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E") center / contain no-repeat; }
+[data-theme] .more-link[aria-expanded="true"]::after, [data-theme] .more-link[aria-pressed="true"]::after { transform: rotate(180deg); }
+[data-theme] .more-link:hover { color: var(--ds-color-text-primary); }
+[data-theme] .more-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+[data-theme] .more-link:focus-visible { outline: 2px solid var(--ds-color-focus-ring, var(--ds-color-action-primary)); outline-offset: 2px; border-radius: 4px; }
+@media (pointer: coarse) { [data-theme] .more-link { min-height: 44px; } }
+/* The same link as a <details> toggle: no browser marker, the chevron turns when open. */
+[data-theme] summary.more-link { list-style: none; }
+[data-theme] summary.more-link::-webkit-details-marker { display: none; }
+[data-theme] details[open] > summary.more-link::after { transform: rotate(180deg); }
+[data-theme] .more-link .n { color: var(--ds-color-text-tertiary); font-variant-numeric: tabular-nums; }
+
+/* Korean line breaks: wrap between words, never inside one; headings and short leads balance
+   their lines, paragraphs avoid a one-word last line. Long ids and URLs still break when they must. */
+[data-theme] { word-break: keep-all; overflow-wrap: break-word; }
+[data-theme] :is(h1, h2, h3, .sx-banner, .ds-empty-desc) { text-wrap: balance; }
+[data-theme] p { text-wrap: pretty; }
+
+/* Selects show they open a list: one chevron from the shared icon family. */
+[data-theme] select.ds-select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239AA0A8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 12px center; background-size: 14px; padding-right: 36px; }
+/* Primary buttons are flat: no glow. */
+[data-theme] .ds-button[data-variant="primary"] { box-shadow: none; }
+
+/* Phone tab bar: one fixed height on every page; the open tab is a soft pill behind its icon. */
+@media (max-width: 760px) {
+  .bottombar { height: calc(58px + env(safe-area-inset-bottom)); box-sizing: border-box; }
+  .bottombar a, .bottombar .nav-more { height: 58px; font-weight: var(--ds-weight-medium); isolation: isolate; }
+  .bottombar a[aria-current="page"], .bottombar .nav-more[data-active] { font-weight: var(--ds-weight-semibold); }
+  .bottombar a[aria-current="page"]::before, .bottombar .nav-more[data-active]::before { content: ""; position: absolute; top: 6px; left: calc(50% - 22px); width: 44px; height: 28px; border-radius: 14px; background: var(--ds-color-bg-surface-raised); z-index: -1; }
+  .bottombar .ds-badge { top: 0; left: calc(50% + 12px); }
+}
+
+.ico-arrow { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h14'/%3E%3Cpath d='M13 6l6 6-6 6'/%3E%3C/svg%3E"); }
+
+/* The More pill with one of its pages open looks exactly like an active tab (no outline of its own). */
+.tabs .nav-more[data-active] { border-color: transparent; }
+.tabs .nav-more:focus-visible { outline: 2px solid var(--ds-color-focus-ring); outline-offset: 2px; }
+
+/* Day mode: public/ds/tokens.css is metal/dark only (its base block is dark too), so light mode maps the
+   semantic tokens the pages use onto the light palette, after the design system's metal/light block. Tokens only:
+   exact palette matches where they exist, color-mix of palette tokens where the light value is not in tokens.css. Shared by
+   every chrome page (style.css is the board page's only). theme-boot.js sets body[data-mode]. */
+html:has(> body[data-mode="light"]) { color-scheme: light; }
+[data-theme="dasks"][data-variant="metal"][data-mode="light"] {
+  --ds-color-scheme: light;
+  --ink-l: var(--ds-palette-metal-ink-light); --paper-l: var(--ds-palette-base-paper-light); --blue-l: var(--ds-palette-blue);
+  --ds-color-bg-canvas: var(--ds-palette-metal-canvas-light);
+  --ds-color-bg-surface: var(--paper-l);
+  --ds-color-bg-surface-raised: var(--paper-l);
+  --ds-color-bg-surface-sunken: var(--ds-palette-metal-side-light);
+  --ds-color-text-primary: var(--ink-l);
+  --ds-color-text-secondary: var(--ds-palette-metal-ink2-light);
+  --ds-color-text-tertiary: var(--ds-palette-metal-ink2-light);
+  --ds-color-text-disabled: var(--ds-palette-metal-ink3-light);
+  --ds-color-text-inverse: var(--paper-l);
+  --ds-color-text-link: var(--ink-l);
+  --ds-color-text-on-primary: var(--paper-l);
+  --ds-color-text-on-accent: var(--paper-l);
+  --ds-color-text-on-danger: var(--paper-l);
+  --ds-color-border-default: color-mix(in srgb, var(--ink-l) 8%, transparent);
+  --ds-color-border-strong: color-mix(in srgb, var(--ink-l) 16%, transparent);
+  --ds-color-border-subtle: color-mix(in srgb, var(--ink-l) 4%, transparent);
+  --ds-color-action-primary: var(--blue-l);
+  --ds-color-action-primary-hover: color-mix(in srgb, var(--blue-l) 85%, var(--ink-l));
+  --ds-color-action-primary-pressed: color-mix(in srgb, var(--blue-l) 72%, var(--ink-l));
+  --ds-color-action-secondary-bg: var(--ds-palette-metal-pill-bottom-light);
+  --ds-color-action-secondary-bg-hover: var(--ds-palette-metal-well-light);
+  --ds-color-action-secondary-text: var(--ink-l);
+  --ds-color-action-accent: var(--blue-l);
+  --ds-color-action-accent-hover: color-mix(in srgb, var(--blue-l) 85%, var(--ink-l));
+  --ds-color-action-accent-soft: color-mix(in srgb, var(--blue-l) 12%, var(--paper-l));
+  --ds-color-action-disabled-bg: var(--ds-palette-metal-side-light);
+  --ds-color-action-disabled-text: var(--ds-palette-metal-ink3-light);
+  --ds-color-status-success: color-mix(in srgb, var(--ds-palette-preset-green-light) 55%, var(--ink-l));
+  --ds-color-status-success-bg: color-mix(in srgb, var(--ds-palette-preset-green-light) 14%, var(--paper-l));
+  --ds-color-status-success-text: color-mix(in srgb, var(--ds-palette-preset-green-light) 45%, var(--ink-l));
+  --ds-color-status-warning: color-mix(in srgb, var(--ds-palette-metal-attention-light) 75%, var(--ink-l));
+  --ds-color-status-warning-bg: color-mix(in srgb, var(--ds-palette-metal-attention-light) 12%, var(--paper-l));
+  --ds-color-status-warning-text: color-mix(in srgb, var(--ds-palette-metal-attention-light) 60%, var(--ink-l));
+  --ds-color-status-danger: color-mix(in srgb, var(--ds-palette-preset-red-light) 75%, var(--ink-l));
+  --ds-color-status-danger-bg: color-mix(in srgb, var(--ds-palette-preset-red-light) 10%, var(--paper-l));
+  --ds-color-status-danger-text: color-mix(in srgb, var(--ds-palette-preset-red-light) 60%, var(--ink-l));
+  --ds-color-status-info: var(--blue-l);
+  --ds-color-status-info-bg: color-mix(in srgb, var(--blue-l) 12%, var(--paper-l));
+  --ds-color-status-info-text: color-mix(in srgb, var(--blue-l) 72%, var(--ink-l));
+  --ds-color-brand-primary: var(--blue-l);
+  --ds-color-brand-secondary: var(--ds-palette-silver);
+  --ds-color-focus-ring: var(--blue-l);
+  --ds-color-unread: var(--blue-l);
+  --ds-shadow-sm: 0 1px 1px color-mix(in srgb, var(--ink-l) 8%, transparent);
+  --ds-shadow-md: 0 1px 1px color-mix(in srgb, var(--ink-l) 8%, transparent), 0 2px 4px color-mix(in srgb, var(--ink-l) 5%, transparent), 0 10px 24px color-mix(in srgb, var(--ink-l) 8%, transparent);
+  --ds-shadow-lg: 0 2px 4px color-mix(in srgb, var(--ink-l) 5%, transparent), 0 10px 40px color-mix(in srgb, var(--ink-l) 10%, transparent);
+  --ds-glass-fill: var(--ds-palette-glass-tint-light);
+  --ds-glass-border: color-mix(in srgb, var(--ink-l) 7%, transparent);
+  --ds-metal-highlight: color-mix(in srgb, var(--paper-l) 90%, transparent);
+  --ds-metal-gradient: linear-gradient(160deg, var(--ds-palette-rim-c-light), var(--ds-palette-rim-a-light), var(--ds-palette-rim-b-light), var(--ds-palette-rim-a-light), var(--ds-palette-rim-c-light));
+}

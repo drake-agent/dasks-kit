@@ -1,0 +1,70 @@
+{
+  "bad": [
+    {
+      "text": "Nothing to do for now. Say adopt or reject when you want to look again.",
+      "reasons": [
+        "not-a-question",
+        "no-effect",
+        "no-op"
+      ]
+    },
+    {
+      "text": "Merge the contact-form fix PR? Recommended: OK if the review is clean.",
+      "reasons": [
+        "no-effect"
+      ]
+    },
+    {
+      "text": "Approve delta.t-omega? If approved, it is adopted.",
+      "reasons": [
+        "raw-id"
+      ]
+    },
+    {
+      "text": "지금은 할 일 없어요. 다시 보고 싶을 때 채택이나 반려를 말해 주세요.",
+      "reasons": [
+        "not-a-question",
+        "no-effect",
+        "no-op"
+      ]
+    },
+    {
+      "text": "할 일 없음. 러너가 CI 통과 확인 후 머지합니다.",
+      "reasons": [
+        "not-a-question",
+        "no-effect",
+        "no-op"
+      ]
+    },
+    {
+      "text": "contact-form-loses-text-on-submit PR을 병합해도 될까요? 추천: 리뷰 CLEAN이면 OK.",
+      "reasons": [
+        "no-effect"
+      ]
+    },
+    {
+      "text": "delta.t-omega 승인할까요? 승인하면 채택돼요.",
+      "reasons": [
+        "raw-id"
+      ]
+    },
+    {
+      "text": "review-delta-pr31-202601011200 결과를 승인할까요? 승인하면 병합돼요.",
+      "reasons": [
+        "raw-id"
+      ]
+    },
+    {
+      "text": "auto-merge를 켤까요? 승인하면 CI 통과 뒤 자동으로 병합돼요. 추천: 승인.가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가",
+      "reasons": [
+        "too-long"
+      ]
+    }
+  ],
+  "good": [
+    "Merge the contact-form fix (PR #12) into main? If you approve, it merges now and the card moves to done. Recommended: approve (the cross review is clean).",
+    "Turn on auto-merge? If approved, it merges by itself once CI passes. Recommended: approve.",
+    "「문의 폼 입력 유실 수정」 변경(PR #12)을 main에 병합할까요? 승인하면 바로 병합되고 카드가 완료로 넘어가요. 추천: 승인 (교차 리뷰 깨끗함).",
+    "auto-merge를 켤까요? 승인하면 CI 통과 뒤 자동으로 병합돼요. 추천: 승인."
+  ]
+}

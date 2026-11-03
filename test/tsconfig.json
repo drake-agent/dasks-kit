@@ -1,0 +1,6 @@
+// Tests read HTTP responses as loose JSON: the DOM lib types Response.json() as any, where Node's own types say unknown.
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": { "lib": ["ES2024", "DOM"] },
+  "include": ["./**/*.ts"]
+}
