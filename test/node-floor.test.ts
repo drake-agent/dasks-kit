@@ -12,8 +12,20 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 test('node floor: each supported line needs its security release; other lines are refused', () => {
   for (const ok of ['22.23.4', 'v22.23.5', '22.24.0', '24.22.1', '24.30.0', '26.12.1', '28.0.0']) assert.equal(nodeProblem(ok), null, ok);
-  for (const bad of ['22.23.1', '22.22.9', '24.22.0', '24.9.9', '26.8.1', '23.11.0', '25.5.0', '20.19.0', '27.0.0']) assert.ok(nodeProblem(bad), bad);
+  for (const bad of ['22.23.1', '22.22.9', '24.22.0', '24.9.9', '26.8.1', '23.11.0', '25.5.0', '20.19.0', '27.0.0',
+    '22.23.4-rc.0', '24.22.1-rc.1', '26.12.1-nightly20261001', '22.23', 'garbage']) assert.ok(nodeProblem(bad), bad);
   assert.match(nodeProblem('22.23.1')!, /22\.23\.4/);
+});
+
+test('the check runs as a script from a path with spaces too', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dasks floor with space-'));
+  try {
+    const copy = path.join(dir, 'node-floor.ts');
+    fs.copyFileSync(path.join(ROOT, 'src/lib/node-floor.ts'), copy);
+    const r = spawnSync(process.execPath, ['--import', "data:text/javascript,Object.defineProperty(process.versions,'node',{value:'22.23.1'})", copy], { encoding: 'utf8' });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /lacks security fixes/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('install.sh refuses a node without its security fixes unless DASKS_ALLOW_UNPATCHED_NODE=1', () => {
