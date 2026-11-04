@@ -13,7 +13,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawnSync, type SpawnSyncOptions } from 'node:child_process';
 import {
-  DELETE_DIRS, INSTALL, LABEL_RE, NAME_RE, PLAN_DEFAULTS, REMOVE, REPO_RE, SURVEY, parseFacts, planJobs, releaseAsset, remoteCommand,
+  DELETE_DIRS, INSTALL, LABEL_RE, LOADED, NAME_RE, PLAN_DEFAULTS, REMOVE, REPO_RE, SURVEY, parseFacts, planJobs, releaseAsset, remoteCommand,
   runnerArch, runnerNames, type PlanOptions,
 } from '../lib/ci-runners.ts';
 
@@ -97,7 +97,7 @@ function onHost(host: string | undefined, script: string, args: string[], opt: {
   return out;
 }
 
-type Survey = { facts: ReturnType<typeof parseFacts>; dirs: { name: string; state: string; repo: string }[]; cacheSha?: string; max?: number };
+type Survey = { facts: ReturnType<typeof parseFacts>; dirs: { name: string; state: string; repo: string }[]; cacheSha?: string; max?: number; gui: boolean };
 function survey(host: string | undefined, tarball = ''): Survey {
   const r = onHost(host, SURVEY, tarball ? [tarball] : []);
   if (r.status !== 0) throw new Error(`could not read ${where(host)}: ${(r.stderr || r.stdout).trim()}`);
@@ -108,6 +108,7 @@ function survey(host: string | undefined, tarball = ''): Survey {
     else if (kind === 'dir') out.dirs!.push({ name: f[0], state: f[1], repo: f[2] ?? '' });
     else if (kind === 'cache') out.cacheSha = f[0];
     else if (kind === 'max') out.max = Number(f[0]) || undefined;
+    else if (kind === 'gui') out.gui = f[0] === 'ok';
   }
   if (!out.facts) throw new Error(`could not read cores and RAM of ${where(host)}`);
   return out as Survey;
@@ -213,17 +214,22 @@ async function cmdAdd(a: Args) {
   checkRepo(repo, a.flags['--allow-public-repo'] === true);
 
   const s = survey(host);
+  if (!s.gui) throw new Refusal(`${where(host)} has no login session for this user, so a runner would stop soon after it starts. Log this user in at the Mac's screen (automatic login works), then run add again. Nothing was registered.`, 1);
   const plan = planJobs(s.facts, planOptions(a));
   const count = countIn === 'auto' ? plan.jobs : Number(countIn);
   const label = hostLabel(host);
   const names = runnerNames(label, repo, count);
-  const labels = [...new Set([label, ...labelsIn])].join(',');
+  // GitHub adds self-hosted, macOS and the architecture itself; a label is kept once, whatever its case.
+  const defaults = ['self-hosted', 'macOS', runnerArch(s.facts.arch).toUpperCase()];
+  const seen = new Set(defaults.map((l) => l.toLowerCase()));
+  const extra = [label, ...labelsIn].filter((l) => !seen.has(l.toLowerCase()) && seen.add(l.toLowerCase()));
+  const labels = extra.join(',');
   const max = maxJobs ?? plan.jobs;
   const dirs = new Map(s.dirs.map((d) => [d.name, d]));
   const foreign = names.filter((n) => { const r = dirs.get(n)?.repo; return r && r !== repo; });
   if (foreign.length) throw new Refusal(`${foreign.map((n) => `${n} belongs to ${dirs.get(n)!.repo}`).join(', ')}; not touching it. Remove it first, or pick another --host.`);
 
-  console.log(`${where(host)}: ${count} runner(s) for ${repo}, labels self-hosted, macOS, ${labels}`);
+  console.log(`${where(host)}: ${count} runner(s) for ${repo}, labels ${[...defaults, ...extra].join(', ')}`);
   for (const n of names) {
     const d = dirs.get(n);
     console.log(`  ${n}: ${d?.state === 'configured' ? 'configured already: skipped (service checked)' : d ? 'half made: finished' : 'new'}`);
@@ -250,10 +256,15 @@ async function cmdAdd(a: Args) {
   for (;;) {
     const online = new Set(apiRunners(repo).filter((x) => x.status === 'online').map((x) => x.name));
     const left = names.filter((n) => !online.has(n));
-    if (!left.length) { console.log(`online: ${names.join(', ')}`); return; }
+    if (!left.length) break;
     if (Date.now() - t0 > ONLINE_WAIT_SEC * 1000) throw new Refusal(`not online after ${ONLINE_WAIT_SEC}s: ${left.join(', ')} (is the Mac's user logged in? LaunchAgents run in the login session)`, 1);
     await new Promise((res) => setTimeout(res, POLL_SEC * 1000));
   }
+  // Online is not enough: a runner started outside the login session goes offline when that session ends.
+  const lr = onHost(host, LOADED, names);
+  const missing = lr.stdout.split('\n').filter((l) => l.startsWith('missing\t')).map((l) => l.slice(8));
+  if (lr.status !== 0 || missing.length) throw new Refusal(`online, but not loaded in the login session (launchctl print gui/<uid>/<label>): ${missing.join(', ') || lr.stderr.trim()}`, 1);
+  console.log(`online: ${names.join(', ')} (loaded in the login session)`);
 }
 
 function cmdList(a: Args) {

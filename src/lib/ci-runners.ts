@@ -71,7 +71,11 @@ export function remoteCommand(script: string, args: string[]): string {
 // ---------- scripts that run on the host (bash, as the logged-in user) ----------
 
 // Every host script starts with tracing off (a trace would print the token) and no shell options for its children.
-const DIRS = 'set +xv; unset SHELLOPTS BASH_ENV ENV 2>/dev/null; R="$HOME/.dasks/ci-runners"; S="$HOME/.dasks/ci-slots"';
+// Runners live in the user's login session, gui/<uid>. From an ssh session launchctl's default is that session's own
+// domain, which launchd ends soon after ssh disconnects, so every launchctl call names gui/<uid>.
+const DIRS = `set +xv; unset SHELLOPTS BASH_ENV ENV 2>/dev/null; R="$HOME/.dasks/ci-runners"; S="$HOME/.dasks/ci-slots"
+uid=$(id -u); gui_ok() { launchctl print "gui/$uid" >/dev/null 2>&1; }
+label_of() { basename "$(cat "$1/.service" 2>/dev/null)" .plist; }`;
 
 /** Read-only: arch, cores and RAM, the runner dirs, and the SHA-256 of a cached tarball ($1, optional). */
 export const SURVEY = `${DIRS}
@@ -83,6 +87,7 @@ for d in "$R"/*/; do
 done
 if [ -n "\${1:-}" ] && [ -f "$R/.cache/$1" ]; then printf 'cache\\t%s\\n' "$(shasum -a 256 "$R/.cache/$1" | cut -d' ' -f1)"; fi
 [ -s "$S/max" ] && printf 'max\\t%s\\n' "$(cat "$S/max")"
+if gui_ok; then printf 'gui\\tok\\n'; else printf 'gui\\tmissing\\n'; fi
 exit 0
 `;
 
@@ -160,6 +165,7 @@ exit 0
 export const INSTALL = `${DIRS}
 IFS= read -r tok || true
 repo=$1; tgz="$R/.cache/$2"; sha=$3; labels=$4; max=$5; setmax=$6; shift 6
+gui_ok || { echo "dasks-ci: $(id -un) has no login session on this Mac (gui/$uid); nothing registered" >&2; exit 4; }
 mkdir -p "$R" "$S/hooks"
 cat > "$S/hooks/job-hook.sh.tmp" <<'DASKS_CI_HOOK'
 ${HOOK}DASKS_CI_HOOK
@@ -193,11 +199,16 @@ for name in "$@"; do
   if [ "$env_new" != "$(cat "$d/.env" 2>/dev/null)" ]; then printf '%s\\n' "$env_new" > "$d/.env"; restart=1; fi
   if [ ! -f "$d/.service" ]; then
     (cd "$d" && ./svc.sh install) || { echo "$name: svc.sh install failed" >&2; fail=1; continue; }
-  elif [ $restart = 1 ]; then
-    (cd "$d" && ./svc.sh stop) >/dev/null 2>&1
   fi
-  (cd "$d" && ./svc.sh start) >/dev/null 2>&1 || echo "$name: svc.sh start reported an error (it may be running already)"
-  echo "$name: service started"
+  plist=$(cat "$d/.service" 2>/dev/null); label=$(label_of "$d")
+  [ -n "$label" ] && [ -f "$plist" ] || { echo "$name: svc.sh made no LaunchAgent ($plist)" >&2; fail=1; continue; }
+  if launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+    [ $restart = 1 ] && launchctl kickstart -k "gui/$uid/$label" >/dev/null 2>&1
+  else
+    launchctl bootstrap "gui/$uid" "$plist" || { echo "$name: launchctl bootstrap gui/$uid failed" >&2; fail=1; continue; }
+  fi
+  launchctl kickstart "gui/$uid/$label" >/dev/null 2>&1
+  echo "$name: service started in gui/$uid"
 done
 exit $fail
 `;
@@ -211,10 +222,11 @@ for name in "$@"; do
   d="$R/$name"
   [ -d "$d" ] || { echo "$name: no such runner here"; continue; }
   if [ -f "$d/.service" ]; then
-    plist=$(cat "$d/.service" 2>/dev/null)
+    plist=$(cat "$d/.service" 2>/dev/null); label=$(label_of "$d")
+    [ -n "$label" ] && launchctl bootout "gui/$uid/$label" >/dev/null 2>&1
     (cd "$d" || exit 1; ./svc.sh stop >/dev/null 2>&1; ./svc.sh uninstall)
-    # Never delete a runner whose LaunchAgent is still there: it would start a missing program at every login.
-    if [ -f "$d/.service" ] || { [ -n "$plist" ] && [ -e "$plist" ]; }; then
+    # Never delete a runner whose LaunchAgent is still there or loaded: it would start a missing program.
+    if [ -f "$d/.service" ] || { [ -n "$plist" ] && [ -e "$plist" ]; } || { [ -n "$label" ] && launchctl print "gui/$uid/$label" >/dev/null 2>&1; }; then
       echo "$name: svc.sh uninstall did not remove the service; runner kept (run ./svc.sh uninstall in $d, then remove again)" >&2; fail=1; continue
     fi
   fi
@@ -224,6 +236,14 @@ for name in "$@"; do
   rm -rf "$d" && echo "$name: removed"
 done
 exit $fail
+`;
+
+/** Read-only: for each runner name, whether its LaunchAgent is loaded in gui/<uid>. */
+export const LOADED = `${DIRS}
+for name in "$@"; do
+  label=$(label_of "$R/$name")
+  if [ -n "$label" ] && launchctl print "gui/$uid/$label" >/dev/null 2>&1; then printf 'loaded\\t%s\\n' "$name"; else printf 'missing\\t%s\\n' "$name"; fi
+done
 `;
 
 /** Delete runner dirs whose registration is already gone from GitHub: the names. */
