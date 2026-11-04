@@ -54,7 +54,11 @@ echo "$n" >> "$S/registered"; echo "$n $l" >> "$S/labels"; echo "$n" > .name; ec
 `);
   exe(path.join(d.pkg, 'svc.sh'), `#!/bin/bash
 echo "$(basename "$PWD") $1" >> "$FAKE_STATE/svc.log"
-case $1 in install) touch .service ;; uninstall) [ -n "$FAKE_SVC_FAIL" ] && exit 1; rm -f .service ;; esac
+p="$HOME/Library/LaunchAgents/actions.runner.$(basename "$PWD").plist"
+case $1 in
+  install) mkdir -p "$(dirname "$p")"; touch "$p"; echo "$p" > .service ;;
+  uninstall) [ -n "$FAKE_SVC_FAIL" ] && exit 1; rm -f "$p" .service ;;
+esac
 `);
   exe(path.join(d.pkg, 'run.sh'), '#!/bin/bash\n');
   const tgz = path.join(d.state, 'runner.tgz');
@@ -87,6 +91,26 @@ shift
 export HOME="$FAKE_REMOTE_HOME"
 # FAKE_REMOTE_SHELLOPTS: the host's login shell traces commands
 exec env \${FAKE_REMOTE_SHELLOPTS:+SHELLOPTS=$FAKE_REMOTE_SHELLOPTS} /bin/sh -c "$*"
+`);
+  // launchd: FAKE_NO_GUI = nobody logged in at the screen; FAKE_BOOTSTRAP_NOOP = bootstrap says yes but loads nothing.
+  exe(path.join(d.bin, 'launchctl'), `#!/bin/bash
+S="$FAKE_STATE"; L="$S/launchd"
+loaded() { [ -f "$L" ] && grep -qx "$1" "$L"; }
+case $1 in
+  print)
+    [ -n "$FAKE_NO_GUI" ] && { echo "Could not print domain: 125: Domain does not support specified action" >&2; exit 125; }
+    case $2 in "gui/$(id -u)") exit 0 ;; "gui/$(id -u)/"*) loaded "\${2##*/}"; exit ;; *) exit 1 ;; esac ;;
+  bootstrap)
+    echo "$*" >> "$S/launchctl.log"
+    [ "$2" = "gui/$(id -u)" ] && [ -f "$3" ] || exit 5
+    l=$(basename "$3" .plist); loaded "$l" && exit 5
+    [ -n "$FAKE_BOOTSTRAP_NOOP" ] || echo "$l" >> "$L" ;;
+  bootout)
+    echo "$*" >> "$S/launchctl.log"
+    loaded "\${2##*/}" || exit 3
+    grep -vx "\${2##*/}" "$L" > "$L.tmp"; mv "$L.tmp" "$L" ;;
+  *) echo "$*" >> "$S/launchctl.log" ;;
+esac
 `);
   exe(path.join(d.bin, 'sysctl'), '#!/bin/bash\necho "${FAKE_NCPU:-10}"; echo "${FAKE_MEM:-34359738368}"\n');
   const env = {
@@ -144,7 +168,13 @@ test('add over ssh: runners installed with hooks and the cap; the token never sh
     assert.equal(s.read('labels'), 'mac2-you-app-1 mac2,big,fast\nmac2-you-app-2 mac2,big,fast\n');
     assert.equal(fs.readFileSync(path.join(s.d.remote, '.dasks/ci-slots/max'), 'utf8').trim(), '5', 'cap defaults to the plan');
     assert.ok(fs.existsSync(path.join(s.d.home, '.dasks/ci-runners/.cache/actions-runner-osx-arm64-9.1.0.tar.gz')) || fs.existsSync(path.join(s.d.home, '.dasks/ci-runners/.cache/actions-runner-osx-x64-9.1.0.tar.gz')));
-    assert.match(s.read('svc.log'), /mac2-you-app-1 install\nmac2-you-app-1 start/);
+    assert.match(s.read('svc.log'), /mac2-you-app-1 install/);
+    assert.doesNotMatch(s.read('svc.log'), / start$/m, 'started through launchctl in the login session, not svc.sh start');
+    const uid = String(process.getuid!());
+    assert.match(s.read('launchctl.log'), new RegExp(`^bootstrap gui/${uid} .*/Library/LaunchAgents/actions\\.runner\\.mac2-you-app-1\\.plist$`, 'm'));
+    assert.match(s.read('launchctl.log'), new RegExp(`^kickstart gui/${uid}/actions\\.runner\\.mac2-you-app-1$`, 'm'));
+    assert.equal(s.read('launchd'), 'actions.runner.mac2-you-app-1\nactions.runner.mac2-you-app-2\n');
+    assert.match(r.out, /\(loaded in the login session\)/);
     // The token reached config.sh (it checks), and nowhere else.
     for (const t of [s.token]) {
       assert.ok(!r.out.includes(t), 'not in output');
@@ -211,6 +241,32 @@ test('a public repo is refused unless --allow-public-repo; dry runs change nothi
   } finally { s.cleanup(); }
 });
 
+test('no login session on the host: add stops before registering anything', () => {
+  const s = setup();
+  try {
+    const r = s.runEnv({ FAKE_NO_GUI: '1' }, 'add', '--repo', 'you/app', '--host', 'mac2', '--count', '1');
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /no login session for this user/);
+    assert.match(r.out, /automatic login works/);
+    assert.equal(s.read('registered'), '');
+    assert.doesNotMatch(s.read('gh.args'), /registration-token|releases/);
+    assert.equal(s.read('launchctl.log'), '');
+    assert.ok(!fs.existsSync(path.join(s.d.remote, '.dasks/ci-runners')));
+  } finally { s.cleanup(); }
+});
+
+test('online but not loaded in the login session is a failure; labels are kept once', () => {
+  const s = setup();
+  try {
+    const r = s.runEnv({ FAKE_BOOTSTRAP_NOOP: '1' }, 'add', '--repo', 'you/app', '--host', 'mac2', '--count', '1', '--labels', 'macOS,x,X,mac2,self-hosted,arm64,x64');
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /online, but not loaded in the login session.*: mac2-you-app-1/);
+    assert.match(r.out, /labels self-hosted, macOS, (ARM64, mac2, x, x64|X64, mac2, x, arm64)\n/);
+    // Only this Mac's own architecture label is GitHub's; the other one stays a label of yours.
+    assert.equal(s.read('labels'), `mac2-you-app-1 mac2,x,${process.arch === 'arm64' ? 'x64' : 'arm64'}\n`);
+  } finally { s.cleanup(); }
+});
+
 test('remove: service uninstalled, unregistered with a removal token on stdin, dir deleted', () => {
   const s = setup();
   try {
@@ -221,6 +277,8 @@ test('remove: service uninstalled, unregistered with a removal token on stdin, d
     assert.ok(!fs.existsSync(path.join(R, 'mac2-you-app-2')));
     assert.ok(fs.existsSync(path.join(R, 'mac2-you-app-1')), 'only the named runner');
     assert.match(s.read('svc.log'), /mac2-you-app-2 stop\nmac2-you-app-2 uninstall/);
+    assert.match(s.read('launchctl.log'), new RegExp(`^bootout gui/${process.getuid!()}/actions\\.runner\\.mac2-you-app-2$`, 'm'));
+    assert.equal(s.read('launchd'), 'actions.runner.mac2-you-app-1\n', 'only the removed one unloaded');
     assert.equal(s.read('registered').trim(), 'mac2-you-app-1');
     assert.ok(!r.out.includes(s.removeToken) && !s.read('ssh.args').includes(s.removeToken));
     const l = s.run('list', '--host', 'mac2');

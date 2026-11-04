@@ -28,17 +28,27 @@ You need `gh`, logged in as someone with admin rights on the repo (registering a
 ssh host alias from `~/.ssh/config`; without it everything happens on this Mac. ssh runs with `BatchMode=yes`, so the
 host must take your key without a prompt. The other Mac needs nothing but bash and its user logged in.
 
+**The user must be logged in at the Mac's screen.** Runners are LaunchAgents, and they live in that user's login
+session (`gui/<uid>`). An ssh session alone is not enough: launchd ends a job started there about a minute after ssh
+disconnects, and the runner goes offline for good. So `add` checks for the login session first
+(`launchctl print gui/$(id -u)`) and, when there is none, stops before registering anything. On a Mac with no one at
+it, turn on automatic login for that user (System Settings > Users & Groups) and keep it from logging out.
+
 ## What `add` does
 
 1. Refuses a public repo (see [below](#public-repos)).
-2. Reads the Mac's cores, RAM and architecture and works out the count (`--count auto`, the default, is the plan number).
+2. Reads the Mac's cores, RAM and architecture, checks the user's login session, and works out the count
+   (`--count auto`, the default, is the plan number).
 3. Downloads the runner for that architecture from the latest actions/runner release, checks its SHA-256 against the
    one published in that release (and again on the host), and unpacks one copy per runner into
    `~/.dasks/ci-runners/<name>/`.
 4. Gets a registration token with `gh` and hands it to `config.sh --unattended` through ssh stdin and the
    `ACTIONS_RUNNER_INPUT_TOKEN` variable. It never appears in a command line, a log, a file or the output.
-5. Writes the job hooks into each runner's `.env`, then `./svc.sh install` and `./svc.sh start`.
-6. Waits until every runner shows `online` on GitHub.
+5. Writes the job hooks into each runner's `.env`, writes the LaunchAgent with `./svc.sh install`, and loads it into the
+   login session with `launchctl bootstrap gui/<uid>` and `launchctl kickstart` (not `svc.sh start`, which from ssh
+   would load it into the ssh session).
+6. Waits until every runner shows `online` on GitHub, then checks each one is loaded in the login session
+   (`launchctl print gui/<uid>/<label>`).
 
 Runners are named `<host>-<owner>-<repo>-<n>` (a name over GitHub's 64 characters is cut and ends in a short hash of
 the repo). Their labels are GitHub's defaults (`self-hosted`, `macOS`, the architecture) plus the host name plus your
@@ -84,11 +94,10 @@ dasks-ci remove --repo you/app                       # every runner of that repo
 dasks-ci remove --repo you/app --host mac2 --name mac2-you-app-3 --dry-run
 ```
 
-It stops and uninstalls each service, unregisters the runner with a removal token (passed the same way as the
-registration token), and deletes its directory. A runner whose service does not uninstall is kept as it is, so no
-LaunchAgent is left pointing at a deleted program; fix it and run `remove` again. A runner already deleted on GitHub is
-cleaned up locally. `--dry-run`
-lists what would go and changes nothing. `~/.dasks/ci-slots/` stays for the runners that are left; delete it yourself
+It unloads each service from the login session (`launchctl bootout gui/<uid>/<label>`), uninstalls it, unregisters the
+runner with a removal token (passed the same way as the registration token), and deletes its directory. A runner whose
+service does not uninstall is kept as it is, so no LaunchAgent is left pointing at a deleted program; fix it and run
+`remove` again. A runner already deleted on GitHub is cleaned up locally. `--dry-run` lists what would go and changes nothing. `~/.dasks/ci-slots/` stays for the runners that are left; delete it yourself
 once none are. `uninstall.sh` removes the `dasks-ci` link but leaves your runners: remove them first.
 
 ## Public repos

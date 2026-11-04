@@ -6,6 +6,10 @@
   from its cores and RAM, `add` installs that many official runners (checksum-checked, registered with a token passed
   over stdin, run by their LaunchAgent) on this Mac or an ssh host, `list` and `remove` manage them. A job hook caps
   jobs at once per Mac across repos. Public repos are refused unless `--allow-public-repo`. See docs/ci-runners.md.
+- `dasks-ci add` needs the user logged in at the host's screen and stops before registering when there is no login
+  session; runners are loaded into `gui/<uid>` with `launchctl bootstrap` (and checked there after the online wait), so
+  they no longer stop when the ssh session that added them ends. `remove` unloads them the same way. Labels GitHub adds
+  itself, and repeats, are dropped from `--labels`.
 
 ## 1.0.0 — 2026-11-03
 
