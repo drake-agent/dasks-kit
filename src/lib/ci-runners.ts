@@ -1,5 +1,6 @@
 // dasks-ci: self-hosted GitHub Actions runners on your Macs (docs/ci-runners.md). Pure parts and the shell scripts that
 // run on a host; src/cli/ci.ts drives them locally or over ssh.
+import crypto from 'node:crypto';
 
 export const PLAN_DEFAULTS = { cpu_per_job: 2, ram_per_job_gb: 3, reserve_gb: 4 };
 export type PlanOptions = typeof PLAN_DEFAULTS;
@@ -44,8 +45,11 @@ export function slug(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '') || 'mac';
 }
 
+/** `<host>-<owner>-<repo>-<n>`. GitHub takes 64 characters: a longer base is cut and ends in a hash of the repo. */
 export function runnerNames(host: string, repo: string, count: number): string[] {
-  const base = `${slug(host)}-${slug(repo.split('/')[1] ?? repo)}`;
+  const [owner, name] = repo.split('/');
+  let base = `${slug(host)}-${slug(owner)}-${slug(name ?? '')}`;
+  if (base.length > 56) base = `${base.slice(0, 49).replace(/-+$/, '')}-${crypto.createHash('sha256').update(repo.toLowerCase()).digest('hex').slice(0, 6)}`;
   return Array.from({ length: count }, (_, i) => `${base}-${i + 1}`);
 }
 
@@ -61,12 +65,13 @@ export function shq(s: string): string {
 /** The command line ssh hands the remote login shell: the script travels base64 in argv, stdin stays free for a token. */
 export function remoteCommand(script: string, args: string[]): string {
   const b64 = Buffer.from(script).toString('base64');
-  return `bash -c "$(printf %s ${b64} | base64 --decode)" dasks-ci ${args.map(shq).join(' ')}`.trimEnd();
+  return `env -u SHELLOPTS -u BASH_ENV -u ENV bash --noprofile --norc -c "$(printf %s ${b64} | base64 --decode)" dasks-ci ${args.map(shq).join(' ')}`.trimEnd();
 }
 
 // ---------- scripts that run on the host (bash, as the logged-in user) ----------
 
-const DIRS = 'R="$HOME/.dasks/ci-runners"; S="$HOME/.dasks/ci-slots"';
+// Every host script starts with tracing off (a trace would print the token) and no shell options for its children.
+const DIRS = 'set +xv; unset SHELLOPTS BASH_ENV ENV 2>/dev/null; R="$HOME/.dasks/ci-runners"; S="$HOME/.dasks/ci-slots"';
 
 /** Read-only: arch, cores and RAM, the runner dirs, and the SHA-256 of a cached tarball ($1, optional). */
 export const SURVEY = `${DIRS}
@@ -165,16 +170,20 @@ echo "machine-wide job cap: $(cat "$S/max") ($S/max)"
 fail=0
 for name in "$@"; do
   d="$R/$name"
+  mine=$(cat "$d/.dasks-repo" 2>/dev/null)
+  if [ -n "$mine" ] && [ "$mine" != "$repo" ]; then echo "$name: this dir belongs to $mine, not $repo; left as it is" >&2; fail=1; continue; fi
   if [ -f "$d/.runner" ]; then
     echo "$name: already configured, not registered again"
   else
     mkdir -p "$d"
-    if [ ! -x "$d/config.sh" ]; then
+    printf '%s\\n' "$repo" > "$d/.dasks-repo"
+    # .dasks-unpacked is written only after a whole, checked extract; without it the package is unpacked again.
+    if [ ! -f "$d/.dasks-unpacked" ]; then
       got=$(shasum -a 256 "$tgz" 2>/dev/null | cut -d' ' -f1)
       [ "$got" = "$sha" ] || { echo "$name: $tgz is missing or its SHA-256 does not match; not unpacked" >&2; fail=1; continue; }
       tar -xzf "$tgz" -C "$d" || { echo "$name: unpack failed" >&2; fail=1; continue; }
+      printf '%s\\n' "$sha" > "$d/.dasks-unpacked"
     fi
-    printf '%s\\n' "$repo" > "$d/.dasks-repo"
     echo "$name: registering"
     (cd "$d" && ACTIONS_RUNNER_INPUT_TOKEN="$tok" ./config.sh --unattended --url "https://github.com/$repo" --name "$name" --labels "$labels" --work _work --replace) \\
       || { echo "$name: config.sh failed" >&2; fail=1; continue; }
@@ -201,7 +210,14 @@ fail=0
 for name in "$@"; do
   d="$R/$name"
   [ -d "$d" ] || { echo "$name: no such runner here"; continue; }
-  if [ -f "$d/.service" ]; then (cd "$d" || exit 1; ./svc.sh stop >/dev/null 2>&1; ./svc.sh uninstall) || echo "$name: svc.sh uninstall reported an error"; fi
+  if [ -f "$d/.service" ]; then
+    plist=$(cat "$d/.service" 2>/dev/null)
+    (cd "$d" || exit 1; ./svc.sh stop >/dev/null 2>&1; ./svc.sh uninstall)
+    # Never delete a runner whose LaunchAgent is still there: it would start a missing program at every login.
+    if [ -f "$d/.service" ] || { [ -n "$plist" ] && [ -e "$plist" ]; }; then
+      echo "$name: svc.sh uninstall did not remove the service; runner kept (run ./svc.sh uninstall in $d, then remove again)" >&2; fail=1; continue
+    fi
+  fi
   if [ -f "$d/.runner" ]; then
     (cd "$d" && ACTIONS_RUNNER_INPUT_TOKEN="$tok" ./config.sh remove) || { echo "DASKS-CI-KEPT $name"; fail=1; continue; }
   fi
@@ -212,5 +228,8 @@ exit $fail
 
 /** Delete runner dirs whose registration is already gone from GitHub: the names. */
 export const DELETE_DIRS = `${DIRS}
-for name in "$@"; do rm -rf "$R/$name" && echo "$name: removed"; done
+for name in "$@"; do
+  if [ -f "$R/$name/.service" ]; then echo "$name: its service is still installed; kept" >&2; continue; fi
+  rm -rf "$R/$name" && echo "$name: removed"
+done
 `;

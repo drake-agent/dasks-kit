@@ -74,14 +74,27 @@ function hostArg(a: Args): string | undefined {
 
 // ---------- running on a host ----------
 
-/** A script on the host: locally with bash, else over ssh. `input` goes to its stdin (where tokens travel). */
-function onHost(host: string | undefined, script: string, args: string[], opt: { input?: string; show?: boolean } = {}) {
-  const o: SpawnSyncOptions = { encoding: 'utf8', input: opt.input ?? '', stdio: ['pipe', opt.show ? 'inherit' : 'pipe', opt.show ? 'inherit' : 'pipe'], maxBuffer: 64 << 20 };
+/** This process's env without what would make a shell trace commands or read startup files. */
+function cleanEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const k of ['SHELLOPTS', 'BASHOPTS', 'BASH_ENV', 'ENV', 'PS4']) delete env[k];
+  return env;
+}
+
+/**
+ * A script on the host: locally with bash, else over ssh. A secret goes to its stdin as the first line; its output is
+ * always captured and the secret blanked out before anything is printed (`show` prints it after the run).
+ */
+function onHost(host: string | undefined, script: string, args: string[], opt: { secret?: string; show?: boolean } = {}) {
+  const o: SpawnSyncOptions = { encoding: 'utf8', input: opt.secret ? opt.secret + '\n' : '', stdio: 'pipe', maxBuffer: 64 << 20, env: cleanEnv() };
   const r = host
     ? spawnSync('ssh', ['-o', 'BatchMode=yes', host, remoteCommand(script, args)], o)
-    : spawnSync('bash', ['-c', script, 'dasks-ci', ...args], o);
+    : spawnSync('bash', ['--noprofile', '--norc', '-c', script, 'dasks-ci', ...args], o);
   if (r.error) throw new Error(`${host ? 'ssh' : 'bash'}: ${r.error.message}`);
-  return { status: r.status ?? 1, stdout: String(r.stdout ?? ''), stderr: String(r.stderr ?? '') };
+  const blank = (s: unknown) => (opt.secret ? String(s ?? '').replaceAll(opt.secret, '[token]') : String(s ?? ''));
+  const out = { status: r.status ?? 1, stdout: blank(r.stdout), stderr: blank(r.stderr) };
+  if (opt.show) { process.stdout.write(out.stdout); process.stderr.write(out.stderr); }
+  return out;
 }
 
 type Survey = { facts: ReturnType<typeof parseFacts>; dirs: { name: string; state: string; repo: string }[]; cacheSha?: string; max?: number };
@@ -171,7 +184,7 @@ function shipTarball(host: string, file: string, name: string) {
   const fd = fs.openSync(file, 'r');
   try {
     console.log(`copying ${name} to ${host}`);
-    const r = spawnSync('ssh', ['-o', 'BatchMode=yes', host, `mkdir -p "$HOME/.dasks/ci-runners/.cache" && cat > ${dst}.part && mv ${dst}.part ${dst}`], { stdio: [fd, 'inherit', 'inherit'] });
+    const r = spawnSync('ssh', ['-o', 'BatchMode=yes', host, `mkdir -p "$HOME/.dasks/ci-runners/.cache" && cat > ${dst}.part && mv ${dst}.part ${dst}`], { stdio: [fd, 'inherit', 'inherit'], env: cleanEnv() });
     if (r.status !== 0) throw new Error(`copying ${name} to ${host} failed`);
   } finally { fs.closeSync(fd); }
 }
@@ -207,6 +220,8 @@ async function cmdAdd(a: Args) {
   const labels = [...new Set([label, ...labelsIn])].join(',');
   const max = maxJobs ?? plan.jobs;
   const dirs = new Map(s.dirs.map((d) => [d.name, d]));
+  const foreign = names.filter((n) => { const r = dirs.get(n)?.repo; return r && r !== repo; });
+  if (foreign.length) throw new Refusal(`${foreign.map((n) => `${n} belongs to ${dirs.get(n)!.repo}`).join(', ')}; not touching it. Remove it first, or pick another --host.`);
 
   console.log(`${where(host)}: ${count} runner(s) for ${repo}, labels self-hosted, macOS, ${labels}`);
   for (const n of names) {
@@ -227,7 +242,7 @@ async function cmdAdd(a: Args) {
     if (host && survey(host, asset.name).cacheSha !== asset.sha) shipTarball(host, file, asset.name);
   }
   const token = todo.length ? runnerToken(repo, 'registration-token') : '';
-  const r = onHost(host, INSTALL, [repo, tarball, sha, labels, String(max), maxJobs ? '1' : '0', ...names], { input: token + '\n', show: true });
+  const r = onHost(host, INSTALL, [repo, tarball, sha, labels, String(max), maxJobs ? '1' : '0', ...names], { secret: token, show: true });
   if (r.status !== 0) throw new Refusal('some runners were not installed (see above); run the same command again to finish them', 1);
 
   console.log(`waiting for ${names.length} runner(s) to come online`);
@@ -267,7 +282,7 @@ function cmdRemove(a: Args) {
   if (a.flags['--dry-run'] === true) { console.log('Dry run: nothing was changed.'); return; }
   const names = dirs.map((d) => d.name);
   const token = runnerToken(repo, 'remove-token');
-  const r = onHost(host, REMOVE, [repo, ...names], { input: token + '\n' });
+  const r = onHost(host, REMOVE, [repo, ...names], { secret: token });
   process.stdout.write(r.stdout.split('\n').filter((l) => !l.startsWith('DASKS-CI-KEPT ')).join('\n'));
   process.stderr.write(r.stderr);
   const kept = r.stdout.split('\n').filter((l) => l.startsWith('DASKS-CI-KEPT ')).map((l) => l.slice(14).trim());
@@ -285,6 +300,7 @@ function cmdRemove(a: Args) {
   }
   if (gone.length) process.stdout.write(onHost(host, DELETE_DIRS, gone).stdout);
   if (gone.length < kept.length) throw new Refusal('some runners were kept (see above)', 1);
+  if (/runner kept/.test(r.stderr)) throw new Refusal('some runners were kept (see above)', 1);
 }
 
 async function main() {
