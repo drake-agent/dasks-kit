@@ -15,10 +15,11 @@ that is on this Mac's PATH, renews the lease while the harness runs and releases
 terminal you keep open, on any Mac of the fleet.
 
 ```json
-"captain": { "harness": ["claude", "codex"], "lease_sec": 300, "auto_merge": false, "same_machine_review": false }
+"captain": { "harness": ["claude", "codex"], "lease_sec": 300, "auto_merge": false, "same_machine_review": false, "watch_gap_sec": 600 }
 ```
 
-`auto_merge` and `same_machine_review` are explained under [Merging](#merging).
+`auto_merge` and `same_machine_review` are explained under [Merging](#merging), `watch_gap_sec` under
+[The watch](#the-watch).
 
 | Harness entry | What runs |
 |---|---|
@@ -59,6 +60,23 @@ CHAT 7
 The captain runs it in the background and starts it again after each batch. It remembers what it saw in
 `~/.dasks/captain/watch.json`; the first run only takes that baseline. `--once` looks once, `--follow` keeps printing,
 `--timeout S` exits 124 when nothing happened.
+
+A captain that forgets to start the watch again, or gets stuck in a long job, hears nothing more and nobody notices.
+So `dasks-captain`, which runs outside the agent's session, checks at each lease renewal when the watch last looked at
+the board (the time `watch.json` was last written):
+
+```text
+the watch has not looked for watch_gap_sec (default 600; or the session started that long ago and it never looked)
+  → one captain chat message: the watch stopped
+the watch looks again
+  → one captain chat message: it is back
+```
+
+It never starts the watch itself: only the captain's session can act on its lines. `watch_gap_sec: 0` turns the
+message off. A watch run with `--state FILE` writes elsewhere, so `dasks-captain` cannot see it.
+
+The skill also tells the captain to stay light: it does only short jobs itself and hands anything longer to a background
+subagent, so it answers each watch line at once.
 
 ## Merging
 

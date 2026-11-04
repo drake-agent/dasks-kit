@@ -10,7 +10,8 @@ import { task, tempRepo } from './helpers.ts';
 import { asHuman, humanDecides, humanSecrets, serve, unusedPort, until } from './state-support.ts';
 import { CaptainChat, CaptainLease } from '../src/lib/captain.ts';
 import { events } from '../src/cli/captain-watch.ts';
-import { harnessArgv } from '../src/cli/captain.ts';
+import { harnessArgv, watchGap } from '../src/cli/captain.ts';
+import { loadConfig } from '../src/lib/config.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const NODE = [process.execPath, '--disable-warning=ExperimentalWarning'];
@@ -59,6 +60,35 @@ test('lease: one holder; a second gets 409 with the holder; renew needs the leas
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   assert.deepEqual(harnessArgv('claude', 'P', '/f'), ['claude', 'P']);
   assert.deepEqual(harnessArgv('my-cli --system {prompt_file} --go', 'P', '/f'), ['my-cli', '--system', '/f', '--go']);
+});
+
+test('watch gap: one "stopped" after watch_gap_sec without a look, one "back" when it looks again, nothing when off', () => {
+  const start = 1_000_000, min = 60_000;
+  assert.equal(watchGap(null, start, start + 9 * min, 600, false), null, 'a new session gets watch_gap_sec to arm the watch');
+  assert.equal(watchGap(null, start, start + 11 * min, 600, false), 'stopped', 'never armed in this session');
+  assert.equal(watchGap(start - 60 * min, start, start + 5 * min, 600, false), null, 'a look from an earlier session is not held against this one');
+  assert.equal(watchGap(start + 1 * min, start, start + 12 * min, 600, false), 'stopped', '11 min since the last look');
+  assert.equal(watchGap(start + 1 * min, start, start + 30 * min, 600, true), null, 'said once, not again');
+  assert.equal(watchGap(start + 29 * min, start, start + 30 * min, 600, true), 'back');
+  assert.equal(watchGap(start + 29 * min, start, start + 30 * min, 600, false), null, 'nothing to clear');
+  assert.equal(watchGap(null, start, start + 999 * min, 0, false), null, '0 = off');
+});
+
+test('config: captain.watch_gap_sec defaults to 600; 0 turns it off; anything else under 60 throws', () => {
+  const { root, cleanup } = tempRepo();
+  const prev = process.env.DASKS_CONFIG;
+  try {
+    delete process.env.DASKS_CONFIG;
+    assert.equal(loadConfig(root).captain.watch_gap_sec, 600);
+    for (const ok of [0, 60, 86400]) {
+      fs.writeFileSync(path.join(root, 'config.json'), JSON.stringify({ captain: { watch_gap_sec: ok } }));
+      assert.equal(loadConfig(root).captain.watch_gap_sec, ok);
+    }
+    for (const bad of [30, -1, 1.5, '600', 86401]) {
+      fs.writeFileSync(path.join(root, 'config.json'), JSON.stringify({ captain: { watch_gap_sec: bad } }));
+      assert.throws(() => loadConfig(root), /watch_gap_sec/);
+    }
+  } finally { if (prev === undefined) delete process.env.DASKS_CONFIG; else process.env.DASKS_CONFIG = prev; cleanup(); }
 });
 
 test('lease over HTTP and the chat round trip: human writes, only the lease holder answers, the watch says CHAT', async () => {

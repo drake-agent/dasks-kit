@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Captain: `dasks-captain` writes once in the captain chat when the watch has not looked at the board for
+  `captain.watch_gap_sec` (default 600 s, 0 = off), and once more when it is back. The captain skill now says to stay
+  light: short jobs only, anything longer goes to a background subagent. See docs/captain.md.
 - `dasks-ci` (optional): runs a repo's GitHub Actions jobs on your own Macs as self-hosted runners. `plan` sizes a Mac
   from its cores and RAM, `add` installs that many official runners (checksum-checked, registered with a token passed
   over stdin, run by their LaunchAgent) on this Mac or an ssh host, `list` and `remove` manage them. A job hook caps
