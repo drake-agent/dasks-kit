@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `dasks-ci` (optional): runs a repo's GitHub Actions jobs on your own Macs as self-hosted runners. `plan` sizes a Mac
+  from its cores and RAM, `add` installs that many official runners (checksum-checked, registered with a token passed
+  over stdin, run by their LaunchAgent) on this Mac or an ssh host, `list` and `remove` manage them. A job hook caps
+  jobs at once per Mac across repos. Public repos are refused unless `--allow-public-repo`. See docs/ci-runners.md.
+
 ## 1.0.0 — 2026-11-03
 
 First public release.

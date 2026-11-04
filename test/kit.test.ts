@@ -230,7 +230,7 @@ test('install.sh: never clobbers files, links or MCP entries it did not make; re
     assert.match(client.token, /^dsk_[0-9a-f]{8}_/);
     assert.equal(fs.statSync(path.join(home, '.dasks/client.json')).mode & 0o777, 0o600);
     const rec = JSON.parse(fs.readFileSync(path.join(home, '.dasks/install.json'), 'utf8'));
-    assert.deepEqual(rec.links, ['dasks', 'dasks-captain', 'dasks-captain-watch'].map((c) => path.join(home, '.local/bin', c)));
+    assert.deepEqual(rec.links, ['dasks', 'dasks-captain', 'dasks-captain-watch', 'dasks-ci'].map((c) => path.join(home, '.local/bin', c)));
     assert.match(fs.readFileSync(path.join(home, '.codex/config.toml'), 'utf8'), /\[mcp_servers\.dasks\]/);
     // A skill an earlier kit installed (in the record, with the marker) and no longer ships goes on the next install; an
     // unrecorded one with the same shape stays.

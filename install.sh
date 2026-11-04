@@ -275,9 +275,9 @@ link() {
   remember links "$dst"
   echo "   $dst"
 }
-say "Linking dasks, gb and dask into $BIN"
+say "Linking dasks, gb, dask and dasks-ci into $BIN"
 run mkdir -p "$BIN"
-for c in dasks gb dask dasks-captain dasks-captain-watch; do link "$KIT/bin/$c" "$BIN/$c"; done
+for c in dasks gb dask dasks-captain dasks-captain-watch dasks-ci; do link "$KIT/bin/$c" "$BIN/$c"; done
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "   note: $BIN is not on your PATH. Add it:  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc" ;; esac
 
 # A skill folder is replaced only when this installer made it (its marker file or the record).

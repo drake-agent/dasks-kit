@@ -241,7 +241,7 @@ test('install.sh --join: a second HOME gets the clients pointing at the board, n
     assert.ok(!fs.existsSync(path.join(home, 'Library/LaunchAgents/dev.dasks.server.plist')));
     assert.equal(JSON.parse(fs.readFileSync(path.join(home, '.dasks/install.json'), 'utf8')).mode, 'join');
     assert.equal(JSON.parse(fs.readFileSync(path.join(home, '.dasks/runner.json'), 'utf8')).runner.enabled, true);
-    for (const c of ['dasks', 'dask', 'dasks-captain', 'dasks-captain-watch']) assert.ok(fs.existsSync(path.join(home, '.local/bin', c)), c);
+    for (const c of ['dasks', 'dask', 'dasks-captain', 'dasks-captain-watch', 'dasks-ci']) assert.ok(fs.existsSync(path.join(home, '.local/bin', c)), c);
     assert.ok(fs.existsSync(path.join(home, '.claude/skills/captain/SKILL.md')));
     const ready = spawnSync(path.join(home, '.local/bin/dask'), ['ready', '--all'], { env, encoding: 'utf8' });
     assert.equal(ready.status, 0, ready.stderr);

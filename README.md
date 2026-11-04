@@ -76,6 +76,7 @@ make.
 | `dasks` CLI (alias `gb`) | raw board reads and writes from any shell, including each project's profile (what works, what is missing) |
 | Skills | `dasks` (the card protocol agents follow), `review-loop` (cross-model review) and `captain`, for both tools |
 | Card runner | optional: builds ready cards while you are away and opens draft PRs ([docs/runner.md](docs/runner.md)) |
+| CI runners | optional: `dasks-ci` runs your repos' GitHub Actions jobs on your own Macs, sized to each Mac, with a cap on jobs at once ([docs/ci-runners.md](docs/ci-runners.md)) |
 | Merge gate | optional hook: an agent's merge runs only after you approve that exact head |
 | Captain and fleet | optional: one board for many Macs, and a captain session that steers them ([below](#captain-and-fleet)) |
 | UI languages | English (default) and Korean, switched in the top bar |
