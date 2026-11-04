@@ -73,6 +73,7 @@ open http://127.0.0.1:4747
 | `dasks` CLI(별칭 `gb`) | 어느 셸에서나 보드를 바로 읽고 써요. 프로젝트별 프로필(되는 것, 빠진 것)도 포함 |
 | 스킬 | `dasks`(에이전트가 따르는 카드 규칙), `review-loop`(교차 모델 리뷰), `captain`. 두 도구 모두에 설치돼요 |
 | 카드 러너 | 선택: 내가 없는 동안 준비된 카드를 만들고 draft PR을 열어요([docs/runner.md](docs/runner.md)) |
+| CI 러너 | 선택: `dasks-ci`로 저장소의 GitHub Actions 작업을 내 Mac에서 돌려요. Mac마다 감당할 만큼만 띄우고, 동시에 도는 작업 수에 상한을 둬요([docs/ci-runners.md](docs/ci-runners.md)) |
 | 머지 게이트 | 선택 훅: 내가 그 head를 승인해야 에이전트의 머지가 실행돼요 |
 | 화면 언어 | 영어(기본)와 한국어. 위쪽 막대에서 바꿀 수 있어요 |
 
