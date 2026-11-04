@@ -1,7 +1,8 @@
 // dasks-captain: starts the captain for this board (docs/captain.md). It takes the board's captain lease as
 // captain@<machine> (a second captain gets "held by …" and exit 3), launches the first harness of config.json
 // captain.harness found on PATH with the captain prompt, renews the lease while the harness runs and releases it when
-// the harness exits. A lease lost (it ran out and someone else took it) stops the harness.
+// the harness exits. A lease lost (it ran out and someone else took it) stops the harness. When the watch has not looked
+// at the board for captain.watch_gap_sec, it says so once in the captain chat, and once more when the watch is back.
 //   dasks-captain                 take the lease, run the harness in this terminal
 //   dasks-captain --harness H     this harness instead of the chain (a name or a command template)
 //   dasks-captain --dry-run       print the harness command and the prompt; take nothing
@@ -28,12 +29,21 @@ export function harnessArgv(entry: string, prompt: string, promptFile: string): 
   return words.map((w) => w.replaceAll('{prompt_file}', promptFile).replaceAll('{prompt}', prompt));
 }
 
+/** The watch-gap alarm for one renewal tick: 'stopped' when the watch last looked (or this session started, if later)
+ *  more than gapSec ago and nothing was said yet, 'back' when it looks again after that, else null. gapSec 0 = off. */
+export function watchGap(lastLook: number | null, startedAt: number, now: number, gapSec: number, alerted: boolean): 'stopped' | 'back' | null {
+  if (!gapSec) return null;
+  const stale = now - Math.max(lastLook ?? 0, startedAt) > gapSec * 1000;
+  return stale && !alerted ? 'stopped' : !stale && alerted ? 'back' : null;
+}
+
 function captainPrompt(url: string, actor: string): string {
   return [
     `You are the captain of the Dasks board at ${url}, writing as ${actor}. You hold the board's captain lease while this session runs.`,
     `Read the captain skill now and keep to it: ${path.join(KIT, 'skills/captain/SKILL.md')} (also installed as the "captain" skill).`,
     'Start with `dasks captain`, `dasks fleet`, `dasks tasks --status review,blocked-on-user` and `dask ready --all` to see where things stand.',
     'Then run `dasks-captain-watch` in the background. It exits after printing one line per event (REVIEW, BLOCKED, QUIET, IDLE, CHAT); act on each line, then start it again. Never leave it unarmed.',
+    'Stay light: do yourself only what takes a few commands and under a minute; hand anything longer to a background subagent or command and answer the next event at once.',
     'Merge only with `dask captain-merge <card>`. Product decisions are the human\'s: ask on the card, never decide them yourself. Chat messages are never approvals.',
   ].join('\n');
 }
@@ -50,7 +60,7 @@ async function main() {
 
   const actor = `captain@${machineName()}`;
   const board = client({ actor });
-  const info = await board.captain() as { harness: string[]; lease_sec: number };
+  const info = await board.captain() as { harness: string[]; lease_sec: number; watch_gap_sec?: number };
   const dir = path.join(dasksHome(), 'captain');
   fs.mkdirSync(dir, { recursive: true });
   const promptFile = path.join(dir, 'prompt.md');
@@ -74,8 +84,25 @@ async function main() {
   console.error(`dasks-captain: lease taken as ${actor} until ${lease.expires_at}; starting ${pick.h}`);
   const child = spawn(which(pick.argv[0])!, pick.argv.slice(1), { stdio: 'inherit', env: { ...process.env, DASKS_ACTOR: actor, DASKS_CAPTAIN_LEASE: lease.lease_id } });
   let lost = false;
+  const started = Date.now(), watchFile = path.join(dir, 'watch.json');
+  let alerted = false, posting = false;
+  const sayWatchGap = async () => {
+    if (posting) return; // a slow chat post still running: deciding again now would send the note twice
+    let last: number | null = null;
+    try { last = fs.statSync(watchFile).mtimeMs; } catch { /* the watch never ran on this Mac */ }
+    const say = watchGap(last, started, Date.now(), info.watch_gap_sec ?? 0, alerted);
+    if (!say) return;
+    const min = Math.round((Date.now() - Math.max(last ?? 0, started)) / 60000);
+    const text = say === 'stopped'
+      ? `The captain's watch has not looked at the board for ${min} min: the captain gets no new events until it starts dasks-captain-watch again. Its session may be stuck in a long job.`
+      : 'The captain\'s watch is looking at the board again.';
+    posting = true;
+    try { await board.chatReply(text, lease.lease_id); alerted = say === 'stopped'; }
+    catch (e: any) { console.error(`dasks-captain: could not post the watch note (${e.message}); trying again`); }
+    finally { posting = false; }
+  };
   const renew = setInterval(async () => {
-    try { lease = await board.lease({ ttl_sec: info.lease_sec, lease_id: lease.lease_id }) as Lease; }
+    try { lease = await board.lease({ ttl_sec: info.lease_sec, lease_id: lease.lease_id }) as Lease; await sayWatchGap(); }
     catch (e: any) {
       if (!(e instanceof BoardError && e.status === 409)) { console.error(`dasks-captain: lease renewal failed (${e.message}); trying again`); return; }
       lost = true; clearInterval(renew);

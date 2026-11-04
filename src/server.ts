@@ -923,7 +923,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
     if (p === '/api/captain') {
       const l = lease.current();
       return send(res, 200, { lease: l ? { holder: l.holder, since: l.since, expires_at: l.expires_at } : null, harness: cfg.captain.harness, lease_sec: cfg.captain.lease_sec,
-        auto_merge: cfg.captain.auto_merge, same_machine_review: cfg.captain.same_machine_review, chat_seq: chat.lastSeq });
+        auto_merge: cfg.captain.auto_merge, same_machine_review: cfg.captain.same_machine_review, watch_gap_sec: cfg.captain.watch_gap_sec, chat_seq: chat.lastSeq });
     }
     if (p === '/api/captain/chat') {
       const q = url.searchParams.get('since') ?? '0';

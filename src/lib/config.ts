@@ -83,10 +83,12 @@ export const DEFAULT_REVIEW: ReviewConfig = { stale_days: 3 };
 export interface FleetConfig { dead_min: number }
 /** auto_merge: captain-merge merges on its own (else a clean card waits for the human's merge OK at its head);
  *  same_machine_review: with auto_merge, a review sent from a builder's machine counts too. Both off by default: one OS
- *  account can write as any of its models, so the board cannot tell which model wrote a review on that machine. */
-export interface CaptainConfig { harness: string[]; lease_sec: number; auto_merge: boolean; same_machine_review: boolean }
+ *  account can write as any of its models, so the board cannot tell which model wrote a review on that machine.
+ *  watch_gap_sec: dasks-captain says so in the captain chat when the watch has not looked at the board for this long
+ *  (0 = never). */
+export interface CaptainConfig { harness: string[]; lease_sec: number; auto_merge: boolean; same_machine_review: boolean; watch_gap_sec: number }
 export const DEFAULT_FLEET: FleetConfig = { dead_min: 15 };
-export const DEFAULT_CAPTAIN: CaptainConfig = { harness: ['claude', 'codex'], lease_sec: 300, auto_merge: false, same_machine_review: false };
+export const DEFAULT_CAPTAIN: CaptainConfig = { harness: ['claude', 'codex'], lease_sec: 300, auto_merge: false, same_machine_review: false, watch_gap_sec: 600 };
 
 export interface IntakeConfig { todo_limit: number; goal_limits: Record<string, number>; exempt_actors: string[]; dup_check: boolean }
 export const DEFAULT_INTAKE: IntakeConfig = { todo_limit: 100, goal_limits: {}, exempt_actors: ['user'], dup_check: true };
@@ -203,6 +205,8 @@ function validateConfig(cfg: Config): void {
   if (!(typeof cfg.fleet.dead_min === 'number' && cfg.fleet.dead_min > 0)) throw new Error('config: fleet.dead_min must be a number > 0');
   if (!Array.isArray(cfg.captain.harness) || !cfg.captain.harness.length || !cfg.captain.harness.every((h) => typeof h === 'string' && h.trim() && !/[\r\n\0]/.test(h))) throw new Error('config: captain.harness must be a non-empty list of harness names or command templates');
   if (!Number.isInteger(cfg.captain.lease_sec) || cfg.captain.lease_sec < 30 || cfg.captain.lease_sec > 3600) throw new Error('config: captain.lease_sec must be 30-3600');
+  const gap = cfg.captain.watch_gap_sec;
+  if (!Number.isInteger(gap) || (gap !== 0 && (gap < 60 || gap > 86400))) throw new Error('config: captain.watch_gap_sec must be 0 (off) or 60-86400');
   for (const k of ['auto_merge', 'same_machine_review'] as const) if (typeof cfg.captain[k] !== 'boolean') throw new Error(`config: captain.${k} must be true or false`);
   if (typeof cfg.summary.at !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(cfg.summary.at)) throw new Error('config: summary.at must be HH:MM (24 h, this Mac\'s time zone)');
   if (!(Number.isFinite(cfg.review.stale_days) && cfg.review.stale_days > 0)) throw new Error('config: review.stale_days must be a number > 0');

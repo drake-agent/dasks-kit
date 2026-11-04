@@ -44,5 +44,9 @@ human only what needs a human.
   card's activity, then `dasks release <card> --force` with a note saying why. Never release a card a live runner holds.
 - **Never record a review.** Reviews come from the other model family (the runner, or `dask review-record` by a reviewer
   session). A review row written by a captain does not count for a merge.
+- **Stay light.** Do yourself only what takes about three commands and under a minute: a status read, one `dask`
+  command, a merge. Hand anything longer (a log sweep, a test run, a build, a review, a diagnosis) to a background
+  subagent or a background command, and answer the next watch line at once. A captain busy with a long job misses
+  events and buries the human's questions. If `dasks-captain` writes in the chat that the watch stopped, start it again.
 - **Stay small.** One line in the chat per thing the human should know. No status reports nobody asked for.
 - **Leave cleanly.** When the session ends, `dasks-captain` releases the lease. If you see a lease error, stop steering.
