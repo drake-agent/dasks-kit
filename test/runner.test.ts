@@ -430,6 +430,7 @@ case "$prompt" in
     mkdir -p src/a && echo hi > src/a/built.txt && git add -A && git -c user.name=t -c user.email=t@example.invalid commit -qm "card: add built.txt" && echo "RESULT: built after a nudge"
     exit 0 ;;
 esac
+[ -f "$FAKE_DIR/mode" ] && FAKE_AGENT=$(cat "$FAKE_DIR/mode")
 case "\${FAKE_AGENT:-success}" in
   success) mkdir -p src/a && echo hi > src/a/built.txt && git add -A && git -c user.name=t -c user.email=t@example.invalid commit -qm "card: add built.txt" && echo "RESULT: built src/a/built.txt" ;;
   nocommit) echo "thinking"; echo "RESULT: stopped the spec does not say which file" ;;
@@ -438,6 +439,10 @@ case "\${FAKE_AGENT:-success}" in
   ratelimit) echo "API Error: 429 rate_limit_error: you have hit your usage limit" >&2; exit 1 ;;
   crash) mkdir -p src/a && echo half > src/a/built.txt && git add -A && git -c user.name=t -c user.email=t@example.invalid commit -qm "card: half" && exit 3 ;;
   slowclaim) sleep 300 ;;
+  dirty) mkdir -p src/a && echo half > src/a/half.txt && echo 'KEY=1' > .env && exit 3 ;;
+  dirtyhang) mkdir -p src/a && echo half > src/a/half.txt && echo 'KEY=1' > .env; sleep 300 & wait ;;
+  dirtybroken) mkdir -p src/a && echo half > src/a/half.txt && git remote set-url origin /nonexistent/remote.git && exit 3 ;;
+  resume) git log --format=%s > "$FAKE_DIR/resume.log"; ls src/a > "$FAKE_DIR/resume.files"; echo done > src/a/built.txt && git add -A && git -c user.name=t -c user.email=t@example.invalid commit -qm "card: finish" && echo "RESULT: built on the saved work" ;;
 esac
 `;
 const FAKE_GH = `#!/bin/bash
@@ -464,14 +469,14 @@ async function world(env: Record<string, string> = {}) {
   const mainBefore = g(bare, 'rev-parse', 'main').trim();
   for (const t of ['claude', 'codex']) fs.writeFileSync(path.join(fake, t), FAKE_AGENT, { mode: 0o755 });
   fs.writeFileSync(path.join(fake, 'gh'), FAKE_GH, { mode: 0o755 });
-  if (env.NO_GITLEAKS !== '1') fs.writeFileSync(path.join(fake, 'gitleaks'), '#!/bin/bash\nprintf "%s\\n" "$*" >> "$FAKE_DIR/gitleaks.args"\nexit 0\n', { mode: 0o755 });
+  if (env.NO_GITLEAKS !== '1') fs.writeFileSync(path.join(fake, 'gitleaks'), '#!/bin/bash\nprintf "%s\\n" "$*" >> "$FAKE_DIR/gitleaks.args"\n[ -f "$FAKE_DIR/leak" ] && exit 1\nexit 0\n', { mode: 0o755 });
 
   const card = 'beta.t-build';
   const board = tempRepo([task({ id: card, title: 'Build me', lane: 'claude', priority: 'p1', spec_state: 'ready', body: 'touches: src/a\n\n## Context\nAdd src/a/built.txt.\n' } as any)]);
   const port = await unusedPort();
   fs.writeFileSync(path.join(board.root, 'config.json'), JSON.stringify({
     server: { hosts: ['127.0.0.1'], port }, projects: [{ id: 'beta', name: 'Beta', repo: proj }],
-    runner: { enabled: true, ...(env.FAKE_AGENT === 'hang' ? { timeout_min: 0.1, max_min: 0.1 } : { timeout_min: 1, max_min: 1 }), idle_min: 0, backoff_min: 60 },
+    runner: { enabled: true, ...(/hang$/.test(env.FAKE_AGENT ?? '') ? { timeout_min: 0.1, max_min: 0.1 } : { timeout_min: 1, max_min: 1 }), idle_min: 0, backoff_min: 60 },
   }, null, 2));
   execFileSync('git', ['-C', board.root, 'add', '-A']); execFileSync('git', ['-C', board.root, 'commit', '-qm', 'config']);
   const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(DASKS?_|CLAUDE|CODEX)/.test(k)));
@@ -494,7 +499,7 @@ async function world(env: Record<string, string> = {}) {
   const runnerProc = (...args: string[]) => spawn(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(ROOT, 'src/cli/runner.ts'), ...args], { env: runEnv, stdio: ['ignore', 'pipe', 'pipe'] });
   const state = () => { try { return JSON.parse(fs.readFileSync(path.join(home, '.dasks/runner/state.json'), 'utf8')); } catch { return null; } };
   return {
-    card, home, proj, bare, mainBefore, runner, runnerProc, state, url, token, get, read, g,
+    card, tmp, fake, home, proj, bare, mainBefore, runner, runnerProc, state, url, token, get, read, g,
     config: (fn: (c: any) => void) => { const f = path.join(board.root, 'config.json'); const c = JSON.parse(fs.readFileSync(f, 'utf8')); fn(c); fs.writeFileSync(f, JSON.stringify(c)); },
     stop: async () => { const done = new Promise((r) => srv.once('exit', r)); srv.kill(); await done; board.cleanup(); fs.rmSync(tmp, { recursive: true, force: true }); },
   };
@@ -511,6 +516,7 @@ test('e2e success: Claude builds, Codex reviews (a repro blocks), one fix, a cle
     assert.equal(t.claimed_by, '', 'handed back: nobody holds the card');
     assert.match(t.body, /claim: #runner-[0-9a-f-]{36} closed \(runner: review/);
     assert.match(w.read('gitleaks.args'), /^git --no-banner --redact --log-opts/m, 'scanned before the push');
+    assert.doesNotMatch(w.read('claude.args'), /You are continuing/, 'no saved branch: a plain first run');
     const gh = w.read('gh.args');
     assert.match(gh, /^pr create --draft --base main --head dasks\/beta\.t-build --title beta\.t-build: Build me --body /m);
     assert.match(gh, /## Follow-ups/, 'the pass-2 follow-up is in the PR body');
@@ -780,7 +786,7 @@ test('e2e: off unless enabled; a project without a repo is skipped with one line
   } finally { await w.stop(); }
 });
 
-test('e2e crash with commits: the attempt fails, no PR, the commits stay on the branch for the next attempt', async () => {
+test('e2e crash with commits: the attempt fails, no PR, the commits stay on the branch and go to origin for the next attempt', async () => {
   const w = await world({ FAKE_AGENT: 'crash' });
   try {
     const r = await w.runner('--once');
@@ -788,6 +794,7 @@ test('e2e crash with commits: the attempt fails, no PR, the commits stay on the 
     const t = await w.get();
     assert.equal(t.status, 'todo', r.out);
     assert.match(t.body, /gave the card back: the agent exited 3 with 1 new commit\(s\)/);
+    assert.match(t.body, /Work saved: branch dasks\/beta\.t-build on origin @ /, 'its commits went to origin too');
     assert.equal(t.outcomes.length, 1);
     assert.ok(t.outcomes[0].run_id, 'the outcome names its run');
     assert.doesNotMatch(w.read('gh.args'), /^pr (create|view)/m, 'no PR for a failed attempt');
@@ -805,6 +812,92 @@ test('e2e without gitleaks: the card is built but nothing is pushed', async () =
     assert.match(t.body, /gitleaks is not installed/);
     assert.doesNotMatch(w.read('gh.args'), /^pr (create|view)/m, 'no PR');
     assert.throws(() => w.g(w.bare, 'rev-parse', '--verify', 'dasks/beta.t-build'), 'nothing pushed');
+  } finally { await w.stop(); }
+});
+
+test('e2e stopped build: uncommitted edits become a WIP commit on origin, a secret-shaped file stays out, the note says where', async () => {
+  const w = await world({ FAKE_AGENT: 'dirtyhang' });
+  try {
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    const t = await w.get();
+    assert.equal(t.status, 'todo');
+    assert.equal(t.claimed_by, '');
+    assert.match(t.body, /gave the card back: timeout: /);
+    const tip = w.g(w.bare, 'rev-parse', 'dasks/beta.t-build').trim();
+    assert.ok(t.body.includes(`Work saved: branch dasks/beta.t-build on origin @ ${tip.slice(0, 7)}, with a WIP commit`), t.body);
+    assert.match(t.outcomes[0].note, /Work saved: branch dasks\/beta\.t-build on origin/);
+    assert.match(w.g(w.bare, 'log', '-1', '--format=%s', tip), /^beta\.t-build: wip: .*timeout/);
+    assert.deepEqual(w.g(w.bare, 'ls-tree', '-r', '--name-only', tip).trim().split('\n'), ['README.md', 'src/a/half.txt']);
+    assert.ok(w.read('gitleaks.args').includes(`--log-opts origin/main..${tip}`), 'the scan read the WIP commit before the push');
+    assert.equal(w.g(w.bare, 'rev-parse', 'main').trim(), w.mainBefore, 'the default branch never moves');
+    assert.doesNotMatch(w.read('gh.args'), /^pr (create|view)/m, 'no PR for WIP');
+    assert.deepEqual(w.state().running, {});
+  } finally { await w.stop(); }
+});
+
+test('e2e gitleaks finding: nothing is pushed, the note says so, the changes wait on a local ref off the branch', async () => {
+  const w = await world({ FAKE_AGENT: 'dirty' });
+  try {
+    fs.writeFileSync(path.join(w.fake, 'leak'), '');
+    await w.runner('--once');
+    const t = await w.get();
+    assert.equal(t.status, 'todo');
+    assert.match(t.body, /Work not pushed: gitleaks flagged the new commits \(or failed\), so nothing left this Mac/);
+    const kept = /kept only on testbox, at (refs\/dasks\/kept\/\S+), off the branch/.exec(t.body)?.[1];
+    assert.ok(kept, t.body);
+    assert.equal(w.g(w.bare, 'for-each-ref', 'refs/heads/dasks').trim(), '', 'nothing on origin');
+    assert.equal(w.g(w.proj, 'show', `${kept}:src/a/half.txt`).trim(), 'half');
+    assert.equal(w.g(w.proj, 'branch', '--list', 'dasks/*').trim(), '', 'the flagged commit is not on the branch the next run would take');
+  } finally { await w.stop(); }
+});
+
+test('e2e without gitleaks: a stopped build pushes nothing, says so, and keeps the WIP commit on the local branch', async () => {
+  const w = await world({ FAKE_AGENT: 'dirty', NO_GITLEAKS: '1' });
+  try {
+    await w.runner('--once');
+    const t = await w.get();
+    assert.match(t.body, /Work not pushed: gitleaks is not installed\. 1 commit\(s\) stay on local branch dasks\/beta\.t-build on testbox, the last one a WIP commit/);
+    assert.equal(w.g(w.bare, 'for-each-ref', 'refs/heads/dasks').trim(), '');
+    assert.equal(w.g(w.proj, 'show', 'dasks/beta.t-build:src/a/half.txt').trim(), 'half');
+  } finally { await w.stop(); }
+});
+
+test('e2e continue: the next run, from another clone, starts on the saved branch and its prompt says so', async () => {
+  const w = await world({ FAKE_AGENT: 'dirty' });
+  try {
+    await w.runner('--once');
+    const saved = w.g(w.bare, 'rev-parse', 'dasks/beta.t-build').trim();
+    const other = path.join(w.tmp, 'other-clone');
+    w.g(w.tmp, 'clone', '-q', w.bare, other);
+    w.config((c) => { c.projects[0].repo = other; });
+    fs.writeFileSync(path.join(w.fake, 'mode'), 'resume');
+    fs.rmSync(path.join(w.fake, 'claude.args'));
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /continuing from origin's dasks\/beta\.t-build/);
+    assert.equal(w.read('resume.files').trim(), 'half.txt', 'the saved edits were in the worktree when the agent started');
+    assert.match(w.read('resume.log'), /^beta\.t-build: wip: /m);
+    assert.ok(w.read('claude.args').includes(`You are continuing: an earlier run of this card stopped before it finished and this worktree starts from its work (origin's dasks/beta.t-build @ ${saved.slice(0, 7)})`));
+    const t = await w.get();
+    assert.equal(t.status, 'review', r.out);
+    w.g(w.bare, 'merge-base', '--is-ancestor', saved, 'dasks/beta.t-build');   // a fast-forward, not a rewrite
+    assert.match(w.g(w.bare, 'log', '-1', '--format=%s', 'dasks/beta.t-build'), /^card: finish/);
+  } finally { await w.stop(); }
+});
+
+test('e2e failed save: a push that cannot work still hands the card back, and the note says the work is local', async () => {
+  const w = await world({ FAKE_AGENT: 'dirtybroken' });
+  try {
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    const t = await w.get();
+    assert.equal(t.status, 'todo');
+    assert.equal(t.claimed_by, '');
+    assert.equal(t.outcomes.length, 1);
+    assert.match(t.body, /Work not pushed: git push failed .*1 commit\(s\) stay on local branch dasks\/beta\.t-build on testbox/);
+    assert.equal(w.g(w.proj, 'show', 'dasks/beta.t-build:src/a/half.txt').trim(), 'half');
+    assert.deepEqual(w.state().running, {});
   } finally { await w.stop(); }
 });
 

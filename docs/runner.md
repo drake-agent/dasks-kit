@@ -17,7 +17,8 @@ flowchart LR
   G --> H[push branch, draft PR]
   H --> I[card to review, handed back]
   H -->|not clean after pass 2| B2[card blocked, you are told]
-  D -->|failed, stopped, limit| R[outcome, then release]
+  D -->|failed, stopped, limit| S[save the work: WIP commit, scan, push branch]
+  S --> R[outcome, then release]
 ```
 
 - **Claim.** The claim asks the board to refuse it while a card with overlapping `touches:` is being worked in the same
@@ -26,9 +27,10 @@ flowchart LR
   stops what it left running and gives the card back. A record goes away only after the board confirmed the release or
   the hand-back.
 - **Success** means: the agent exited 0, was not stopped, ended with `RESULT: built …` and made commits after the
-  branch tip it started from. Anything else is a failed attempt: its commits stay on the branch for the next one.
-- **Giving a card back:** the failed attempt's outcome is recorded for that run first (it counts toward the board's
-  retry cap), then the release names the run, so it can never release a later claim.
+  branch tip it started from. Anything else is a failed attempt, and its work is saved for the next one (below).
+- **Giving a card back:** the work is saved first (below), then the failed attempt's outcome is recorded for that run (it
+  counts toward the board's retry cap), then the release names the run, so it can never release a later claim. Both
+  notes say where the work is.
 - **Limits** count from the card's start, across build, review and fix: never stopped before `timeout_min`. Past it, a
   run that is still writing is kept: new log output or a change in its worktree (an edit, a new file, a commit; checked
   every 30 s, without blocking the runner; a worktree that cannot be read in time counts as activity) counts. A run
@@ -45,7 +47,7 @@ flowchart LR
   skipped with the reason, and `dask runner status` lists the held repos. If `gh` is missing, not logged in or fails, the
   count is skipped and cards start without the PR limit (one log line).
 - **Usage or rate limits:** that tool waits `backoff_min`; the attempt does not count.
-- **gitleaks is required.** Without it the runner builds but never pushes.
+- **gitleaks is required.** Without it the runner builds but never pushes, neither a finished branch nor saved work.
 - It **never merges**, never pushes the default branch and never force-pushes.
 - **Review.** At most 2 passes per PR, and passes an earlier attempt left on the board count. Pass 1 reviews the whole
   change. If a finding blocks, the builder gets one fix pass and pass 2 re-checks only those findings and regressions
@@ -69,6 +71,45 @@ flowchart LR
   ([fleet.md](fleet.md)). A runner silent for `fleet.dead_min` loses its cards to the pool.
 - **Order.** Cards you pushed start first, then bug fixes (cards of kind `bug`: `dasks new <app> "…" --kind bug`), then
   the rest by priority. `dask ready` and MCP `ready_tasks` list them in the same order.
+
+## Stopped builds keep their work
+
+A build that stops before it finishes (timeout, idle stop, `max_min`, a failed attempt, a usage limit, the runner being
+stopped or dying) keeps its work, so the next attempt on any Mac continues from it instead of starting over.
+
+**Saving, before the card goes back:**
+
+1. Uncommitted changes become one commit, `<card>: wip: unfinished work saved by the runner (<reason>)`, built in a
+   temporary index with no hooks. Files with secret-shaped names (`.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`,
+   `*.mobileprovision`, `id_rsa*`, `id_ed25519*`) stay out even when staged. Ignored files are not saved. No WIP commit
+   is made when the worktree is not on the card branch, has unresolved conflicts, has more than 1000 changed paths or a
+   file over 50 MiB; earlier commits are still saved and the note says why.
+2. gitleaks scans `<default branch>..<tip>`, the WIP commit included, before anything leaves the Mac.
+3. The card branch `dasks/<card>` is pushed to origin. Never the default branch, never with force.
+
+| What happened | The note says | Where the work is |
+|---|---|---|
+| Clean scan, push worked | `Work saved: branch … on origin @ <sha>` | origin, and the local branch |
+| gitleaks is not installed | `Work not pushed: gitleaks is not installed` | the local branch on this Mac, WIP commit included |
+| gitleaks flagged something, or failed | `Work not pushed: gitleaks flagged …` | earlier commits on the local branch; the WIP commit on this Mac only, at `refs/dasks/kept/<card>/<sha>`, off the branch so the next run does not build on it |
+| Push failed | `Work not pushed: git push failed (…)` | the local branch on this Mac |
+
+A save that fails never holds up the hand-back: the card goes back with a note saying what was and was not saved. If the
+board cannot be reached, the release retries with the same note. If the runner dies mid-save, the next start saves again.
+
+**Continuing, before the next build.** The runner fetches `dasks/<card>` and starts from the first of these that fits:
+
+- origin's branch, when this Mac's local branch holds nothing beyond it;
+- this Mac's local branch, when it is ahead of origin's or origin has none (or the fetch failed);
+- otherwise the default branch, as for a first run.
+
+A saved branch counts only if it shares history with the default branch and adds something the default branch does not
+have, so a branch whose work was already squash-merged is not picked up. One that conflicts with the default branch is
+still used: the build merges. When a local branch and origin's have split, origin's wins, because every Mac can see it,
+and the local tip is kept at `refs/dasks/kept/<card>/<sha>` (one log line says so). A build that continues gets a prompt
+saying it is continuing and from where, and that `wip:` commits are unfinished saves.
+
+To look at a kept ref: `git log refs/dasks/kept/<card>/<sha>`. To drop it: `git update-ref -d <ref>`.
 
 ## Turn it on
 

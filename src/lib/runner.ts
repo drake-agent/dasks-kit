@@ -379,7 +379,7 @@ export function runnerRules(card: string, branch: string, base: string): string 
     '----- runner rules (these override the claim and submit steps above) -----',
     `The card runner on this Mac already claimed ${card} and checked out branch ${branch} (from ${base}) in this worktree, your working directory.`,
     `Do not run \`dask begin\`, \`dask claim\`, \`dask submit\`, \`dask release\` or \`dask block\`, do not push, do not open a PR and never merge: the runner gets a cross-model review, pushes the branch and opens a draft PR after you stop.`,
-    `Do the card's work here and commit it on ${branch}; every commit message starts with "${card}: ". Uncommitted changes are lost.`,
+    `Do the card's work here and commit it on ${branch}; every commit message starts with "${card}: ". Commit often: if this run is stopped, the runner tries to save uncommitted changes as a WIP commit, but that can fail.`,
     'If the card cannot be done as written (a missing decision, a wrong spec), make no commits and say why in the RESULT line.',
     HEADLESS_WAIT_RULE,
     helperRule(card),
@@ -436,6 +436,16 @@ export function continuePrompt(card: string, branch: string): string {
     `Your run for ${card} ended without a RESULT line, so the runner cannot tell whether the work is done. Continue where you stopped: finish the card's work on ${branch} and commit it (messages start with "${card}: "). Do not push, open a PR or touch the board.`,
     HEADLESS_WAIT_RULE,
     'End your final message with exactly one line: `RESULT: built <one-line summary>` or `RESULT: stopped <why>`.',
+  ].join('\n');
+}
+
+/** The prompt line of a build that starts from an earlier run's saved branch. */
+export function resumeLine(branch: string, from: 'origin' | 'local', sha: string, base: string): string {
+  const where = from === 'origin' ? `origin's ${branch} @ ${sha.slice(0, 7)}` : `the local ${branch} @ ${sha.slice(0, 7)}`;
+  return [
+    `You are continuing: an earlier run of this card stopped before it finished and this worktree starts from its work (${where}).`,
+    `Read \`git log ${base}..HEAD\` and \`git diff ${base}...HEAD\` first and carry on from there; do not start over. Commits with "wip:" in the title are unfinished saves, so check them before you rely on them. If ${base} has moved, merge it; never rebase or force.`,
+    'If nothing is left to do, make one empty commit that says so (`git commit --allow-empty`): the runner counts a run as built only by its new commits.',
   ].join('\n');
 }
 
@@ -503,6 +513,8 @@ export interface RunRecord {
   start_sha: string;
   pid: number;
   phase: Phase;
+  /** Where this run's work is, as the card's note says it. Set once the save ran, so a retried release says the same. */
+  saved?: string;
   /** Set when a release or hand-back failed: what the next look (or a restart) must still tell the board. */
   pending?: { reason: string; count: boolean };
   /** Set once the draft PR is open: what the hand-back needs if it has to be retried. */
@@ -548,8 +560,7 @@ export type Verdict =
   | { ok: false; kind: 'stopped' | 'rate-limited' | 'failed'; reason: string };
 
 /** Did this attempt build the card? Only an agent that exited 0, was not stopped, ended with `RESULT: built …` and made
- *  commits after start_sha did. Commits of a failed attempt stay on the branch for the next one but do not make it a
- *  success. */
+ *  commits after start_sha did. Commits of a failed attempt are kept for the next one but do not make it a success. */
 export function attemptVerdict(a: { code: number | null; stopped: string; result: string; newCommits: number; raw: string }): Verdict {
   if (a.stopped) return { ok: false, kind: 'stopped', reason: `timeout: ${a.stopped}` };
   if (a.newCommits === 0 && RATE_LIMITED.test(a.raw)) return { ok: false, kind: 'rate-limited', reason: 'usage or rate limit' };

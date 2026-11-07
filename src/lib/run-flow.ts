@@ -8,12 +8,13 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
-  agentCommand, agentText, attemptVerdict, continuePrompt, countStart, fixPrompt, prBody, RATE_LIMITED, readCodeReview, recheckPrompt, resultLine, reviewPrompt, runnerRules, withFollowUps,
+  agentCommand, agentText, attemptVerdict, continuePrompt, countStart, fixPrompt, prBody, RATE_LIMITED, readCodeReview, recheckPrompt, resumeLine, resultLine, reviewPrompt, runnerRules, withFollowUps,
   type HistoryRow, type Picked, type RunnerConfig, type RunnerState, type RunRecord, type Tool,
 } from './runner.ts';
 import { REVIEW_PASSES } from './review-runs.ts';
 import { supervise, worktreeStamp, type Supervised } from './supervise.ts';
 import { closeRepoView, openRepoView, repoSource, specLoop, TOOL_NAME as SPEC_TOOL_NAME, type AgentRun } from './spec-flow.ts';
+import { originRef, pickStart, pushableBranch, saveWork } from './keep-work.ts';
 import { SPEC_RETRIES, type SpecPicked } from './runner.ts';
 
 export class BoardError extends Error {
@@ -81,34 +82,46 @@ function history(env: FlowEnv, card: string, r: RunRecord, outcome: HistoryRow['
   });
 }
 
-/** Give the card back for one failed or stopped attempt. Order matters: the outcome of THIS run first (it counts toward
- *  the retry cap only when `count`), then a release that names the run. If the board cannot be reached, the record stays
- *  with `pending` and the next look or a restart tries again. Returns true when the board confirmed. */
+/** Give the card back for one failed or stopped attempt. Order matters: the build's work is saved first (keep-work.ts;
+ *  once per run, and whatever happens to it the card still goes back), then the outcome of THIS run (it counts toward the
+ *  retry cap only when `count`), then a release that names the run. Both carry where the work is. If the board cannot be
+ *  reached, the record stays with `pending` and the next look or a restart tries again. Returns true when the board
+ *  confirmed. */
 export async function settle(env: FlowEnv, card: string, r: RunRecord, reason: string, count: boolean, outcome: HistoryRow['outcome'] = count ? 'released' : 'error'): Promise<boolean> {
   env.update((s) => { if (s.running[card]) Object.assign(s.running[card], { phase: 'releasing', pending: { reason, count } }); });
+  if (r.saved === undefined && r.kind !== 'spec' && r.repo && r.base) {
+    // A run that lost the card (a runner back from the dead, say) leaves the branch to the run that holds it now.
+    const now = await env.api('GET', `/api/tasks/${card}?log=0`).catch(() => null);
+    const lost = now?.run_id && r.run_id && now.run_id !== r.run_id;
+    r.saved = lost ? '' : await saveWork({ repo: r.repo, dir: r.dir, branch: r.branch, base: r.base, card, machine: r.machine, reason, gitleaks: env.which('gitleaks') });
+    const saved = r.saved;
+    env.update((s) => { if (s.running[card]) s.running[card].saved = saved; });
+    if (saved) env.log(`${card}: ${saved}`);
+  }
+  const where = r.saved ? ` ${r.saved}` : '';
   if (count) {
     try {
-      await env.api('POST', `/api/tasks/${card}/outcome`, { state: 'failed', note: oneLine(`runner: ${reason}`, 1000), evidence: [r.log], job: r.job, run_id: r.run_id, attempt: r.attempt });
+      await env.api('POST', `/api/tasks/${card}/outcome`, { state: 'failed', note: `${oneLine(`runner: ${reason}`, 600)}${where}`, evidence: [r.log], job: r.job, run_id: r.run_id, attempt: r.attempt });
     } catch (e: any) {
       if (!(e instanceof BoardError) || e.status >= 500) { env.log(`${card}: outcome not recorded yet (${e.message}); will retry`); return false; }
       env.log(`${card}: outcome refused: ${e.message}`);
     }
   }
   try {
-    await env.api('POST', `/api/tasks/${card}/release`, { run_id: r.run_id, note: `claim: #${r.job} closed (runner: ${oneLine(reason, 200)}). The runner gave the card back: ${oneLine(reason, 400)}. Log: ${r.log}` });
+    await env.api('POST', `/api/tasks/${card}/release`, { run_id: r.run_id, note: `claim: #${r.job} closed (runner: ${oneLine(reason, 200)}). The runner gave the card back: ${oneLine(reason, 400)}.${where} Log: ${r.log}` });
   } catch (e: any) {
     if (e instanceof BoardError && e.status === 409 && e.body?.rule === 'run') env.log(`${card}: already on another run; nothing to release`);
     else if (e instanceof BoardError && e.status < 500) env.log(`${card}: release refused: ${e.message}`);
     else { env.log(`${card}: release failed (${e.message}); will retry`); return false; }
   }
-  // Commits stay on the branch for the next attempt; only a branch with nothing beyond its base is deleted.
+  // Commits stay on the local branch too; only a branch with nothing beyond its base is deleted.
   if (r.kind === 'spec') { if (r.dir) closeRepoView(r.repo, r.dir); }
   else if (r.repo && r.dir) {
     removeWorktree(r.repo, r.dir);
     if (r.base && commitsAfter(r.repo, r.base, r.branch) === 0) gitOk(r.repo, 'branch', '-D', r.branch);
   }
   env.log(`${card}: released (${reason})${count ? '; attempt counted' : ''}`);
-  history(env, card, r, outcome, reason);
+  history(env, card, r, outcome, `${oneLine(reason, 150)}${where}`);
   return true;
 }
 
@@ -299,13 +312,21 @@ export async function runCard(env: FlowEnv, p: Picked, cfg: RunnerConfig, title:
   env.log(`${card}: claimed as ${env.actor} (run ${r.run_id}, attempt ${r.attempt}); ${tool} builds in ${dir}; log ${logFile}`);
   const save = (patch: Partial<RunRecord>) => { Object.assign(r, patch); env.update((s) => { if (s.running[card]) Object.assign(s.running[card], patch); }); };
 
+  let resume = '';
   try {
     gitOk(repo, 'fetch', '-q', 'origin');
     const base = defaultBase(repo);
     fs.mkdirSync(env.worktreesDir, { recursive: true });
     removeWorktree(repo, dir);
-    if (gitOk(repo, 'rev-parse', '-q', '--verify', `refs/heads/${branch}`)) git(repo, 'worktree', 'add', dir, branch);
-    else git(repo, 'worktree', 'add', '-b', branch, dir, base);
+    // An earlier attempt's saved branch, here or on origin, is the start; docs/runner.md "Stopped builds keep their work".
+    const start = await pickStart(repo, branch, base, card);
+    if (start.aside) env.log(`${card}: an earlier local tip of ${branch} is not part of this run's start; kept at ${start.aside}`);
+    if (start.from === 'local') git(repo, 'worktree', 'add', dir, branch);
+    else git(repo, 'worktree', 'add', '-B', branch, dir, start.from === 'origin' ? originRef(branch) : base);
+    if (start.from !== 'base') {
+      resume = resumeLine(branch, start.from, start.sha, base);
+      env.log(`${card}: continuing from ${start.from === 'origin' ? 'origin\'s' : 'the local'} ${branch} @ ${start.sha.slice(0, 7)}`);
+    }
     save({ base, start_sha: git(dir, 'rev-parse', 'HEAD'), phase: 'worktree' });
   } catch (e: any) {
     fs.appendFileSync(logFile, `worktree: ${e.message}\n`);
@@ -318,7 +339,7 @@ export async function runCard(env: FlowEnv, p: Picked, cfg: RunnerConfig, title:
     fs.appendFileSync(logFile, why + '\n');
     await settle(env, card, r, why, false); return;
   }
-  const prompt = `${ds.stdout.trim()}\n\n${runnerRules(card, branch, r.base)}`;
+  const prompt = `${ds.stdout.trim()}\n\n${runnerRules(card, branch, r.base)}${resume ? `\n\n${resume}` : ''}`;
   const session = randomUUID();
 
   // build
@@ -356,7 +377,7 @@ export async function runCard(env: FlowEnv, p: Picked, cfg: RunnerConfig, title:
   // secret scan, push, draft PR
   save({ phase: 'pushing' });
   const baseName = r.base.replace(/^origin\//, '');
-  if (branch === baseName || !branch.startsWith('dasks/')) { await settle(env, card, r, 'refusing to push a default branch', false); return; }
+  if (!pushableBranch(branch, r.base)) { await settle(env, card, r, 'refusing to push a default branch', false); return; }
   const gl = env.which('gitleaks');
   if (!gl) { await settle(env, card, r, 'gitleaks is not installed (brew install gitleaks); nothing was pushed', false); return; }
   const scan = spawnSync(gl, ['git', '--no-banner', '--redact', '--log-opts', `${r.base}..${branch}`, dir], { encoding: 'utf8', timeout: 180_000 });

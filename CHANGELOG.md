@@ -9,6 +9,11 @@
   findings go under `## Follow-ups` in the PR body. The runner now runs pass 2 after its fix pass; not clean after it,
   the PR stays a draft, the card is blocked with the open findings and you get a message. Spec reviews are unchanged.
   See the `review-loop` skill and docs/runner.md.
+- Runner: a build that stops before it finishes keeps its work. Uncommitted changes become a WIP commit (secret-shaped
+  files stay out), gitleaks scans the new commits, and `dasks/<card>` is pushed to origin; a finding, a failed scan or a
+  missing gitleaks pushes nothing. The card's note says where the work is, or that it was not saved and why, and a failed
+  save never holds up the hand-back. The next run on any Mac starts from the saved branch when it is still usable, and
+  its prompt says it is continuing. See docs/runner.md.
 - Captain: `dasks-captain` writes once in the captain chat when the watch has not looked at the board for
   `captain.watch_gap_sec` (default 600 s, 0 = off), and once more when it is back. The captain skill now says to stay
   light: short jobs only, anything longer goes to a background subagent. See docs/captain.md.
