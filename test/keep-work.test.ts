@@ -191,6 +191,22 @@ test('saveWork: unresolved conflicts are not committed', async () => {
   } finally { w.done(); }
 });
 
+test('saveWork: a worktree git will not move still leaves the folder, and the branch stays free', async () => {
+  const w = world();
+  try {
+    w.worktree();
+    w.commit(w.dir, 'a.txt', 'mine');
+    w.g(w.repo, 'worktree', 'lock', w.dir);   // git refuses to move a locked worktree
+    w.g(w.dir, 'checkout', '-q', '--detach');
+    fs.writeFileSync(path.join(w.dir, 'b.txt'), 'keep me');
+    const note = await saveWork(w.input());
+    const aside = /stay on box at (\S+), as a plain folder\./.exec(note)?.[1] ?? '';
+    assert.ok(aside, note);
+    assert.equal(fs.readFileSync(path.join(aside, 'b.txt'), 'utf8'), 'keep me');
+    assert.equal(fs.existsSync(w.dir), false);
+  } finally { w.done(); }
+});
+
 test('storedPasses: an unreadable answer is null, so no pass starts; a card with none is an empty list', async () => {
   const log = () => {};
   const failing = (status: number) => ({ log, api: async () => { throw new BoardError(status, 'nope'); } });

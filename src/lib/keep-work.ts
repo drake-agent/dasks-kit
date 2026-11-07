@@ -78,7 +78,12 @@ async function setAside(repo: string, dir: string, machine: string): Promise<str
   const head = await git(dir, ['rev-parse', 'HEAD']);
   const aside = `${dir}.kept-${Date.now()}`;
   const moved = head.code === 0 ? await git(repo, ['worktree', 'move', dir, aside]) : head;
-  if (moved.code !== 0) return `The uncommitted files could not be set aside (${why(moved, 120)}).`;
+  if (moved.code !== 0) {
+    // git will not move this worktree (submodules, say): the folder still can, and the prune frees the branch.
+    try { fs.renameSync(dir, aside); } catch (e: any) { return `The uncommitted files could not be set aside (${why(moved, 120)}; ${said(e.message, 120)}).`; }
+    await git(repo, ['worktree', 'prune']);
+    return `The uncommitted files stay on ${machine} at ${aside}, as a plain folder.`;
+  }
   const off = await git(aside, ['update-ref', '--no-deref', 'HEAD', head.out.trim()]);
   return off.code === 0 ? `The uncommitted files stay on ${machine} at ${aside}.` : `The uncommitted files stay on ${machine} at ${aside}, but it still holds the branch (${why(off, 120)}).`;
 }
