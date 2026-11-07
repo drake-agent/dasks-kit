@@ -174,7 +174,7 @@ let holdSaid = '';
 async function retryPending(env: FlowEnv): Promise<void> {
   for (const [card, r] of Object.entries(loadState().running)) {
     if (working.has(card) || (!r.pending && !r.handback)) continue;
-    if (r.handback) await handBack(env, card, r, r.handback.pr, r.handback.title, r.handback.summary, r.handback.review_note, r.handback.open, r.handback.blocked);
+    if (r.handback) await handBack(env, card, r, r.handback.pr, r.handback.title, r.handback.summary, r.handback.review_note, r.handback.open, r.handback.blocked, r.handback.skipped);
     else await settle(env, card, r, r.pending!.reason, r.pending!.count);
   }
 }
@@ -329,7 +329,7 @@ async function recover(): Promise<void> {
   for (const [card, r] of Object.entries(loadState().running)) {
     if (r.pid > 0) await endGroup(r.pid, env.graceMs);
     const ok = r.handback
-      ? await handBack(env, card, r, r.handback.pr, r.handback.title, r.handback.summary, r.handback.review_note, r.handback.open, r.handback.blocked)
+      ? await handBack(env, card, r, r.handback.pr, r.handback.title, r.handback.summary, r.handback.review_note, r.handback.open, r.handback.blocked, r.handback.skipped)
       : await settle(env, card, r, r.pending?.reason ?? 'the runner restarted mid-run', r.pending?.count ?? false);
     if (ok) log(`${card}: recovered after a runner restart`);
   }

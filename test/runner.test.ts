@@ -434,6 +434,9 @@ esac
 case "\${FAKE_AGENT:-success}" in
   success) mkdir -p src/a && echo hi > src/a/built.txt && git add -A && git -c user.name=t -c user.email=t@example.invalid commit -qm "card: add built.txt" && echo "RESULT: built src/a/built.txt" ;;
   nocommit) echo "thinking"; echo "RESULT: stopped the spec does not say which file" ;;
+  humanstep) mkdir -p src/a && echo hi > src/a/built.txt && git add -A && git -c user.name=t -c user.email=t@example.invalid commit -qm "card: add built.txt"
+    echo "HUMAN-STEP: Sign the release build -- needs your certificate"; echo "HUMAN-STEP: Buy the domain -- costs money"; echo "RESULT: built src/a/built.txt" ;;
+  humanonly) echo "HUMAN-STEP: Sign the release build -- needs your certificate"; echo "RESULT: stopped needs the human: Sign the release build" ;;
   stall) echo "waiting on a background job" ;;
   hang) sleep 300 & echo $! > "$FAKE_DIR/grandchild.pid"; wait ;;
   ratelimit) echo "API Error: 429 rate_limit_error: you have hit your usage limit" >&2; exit 1 ;;
@@ -653,6 +656,38 @@ test('e2e no commits: card released with a note naming the reason and the log, o
     assert.equal(t.outcomes[0].state, 'failed');
     assert.doesNotMatch(w.read('gh.args'), /^pr (create|view)/m, 'no PR');
     assert.equal(w.g(w.proj, 'branch', '--list', 'dasks/*').trim(), '', 'the empty branch is deleted');
+  } finally { await w.stop(); }
+});
+
+test('e2e human step: the rest is built, one card note per skipped step, the PR and the card say it is not done', async () => {
+  const w = await world({ FAKE_AGENT: 'humanstep' });
+  try {
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    const t = await w.get();
+    assert.equal(t.status, 'review', r.out);
+    assert.equal(w.g(w.bare, 'show', 'dasks/beta.t-build:src/a/built.txt').trim(), 'hi', 'the rest of the card was built');
+    assert.deepEqual(t.activity.map((a: any) => a.note).filter((n: string) => n?.startsWith('HUMAN-STEP:')), ['HUMAN-STEP: Sign the release build -- needs your certificate', 'HUMAN-STEP: Buy the domain -- costs money']);
+    assert.match(w.read('gh.args'), /Not done, skipped for you to do:\n- Sign the release build: needs your certificate\n- Buy the domain: costs money/);
+    assert.match(t.summary, /Not done: 2 skipped step\(s\) wait for you/);
+    assert.match(t.body, /Do the 2 step\(s\) the runner skipped/);
+    assert.equal(w.state().running[w.card], undefined, 'the record is gone once the board confirmed');
+  } finally { await w.stop(); }
+});
+
+test('e2e human step: a card that is only the human step ends as today, never built: no note, no PR, blocked on the user at the retry cap', async () => {
+  const w = await world({ FAKE_AGENT: 'humanonly' });
+  try {
+    assert.equal((await w.runner('--once')).status, 0);
+    const first = await w.get();
+    assert.equal(first.status, 'todo');
+    assert.match(first.body, /no commits \(RESULT: stopped needs the human: Sign the release build\)/);
+    assert.equal((await w.runner('--once')).status, 0);
+    const t = await w.get();
+    assert.equal(t.status, 'blocked-on-user', JSON.stringify(t.outcomes));
+    assert.match(t.needs_user, /needs the human: Sign the release build/);
+    assert.ok(!t.activity.some((a: any) => a.note?.startsWith('HUMAN-STEP:')), 'a stopped run leaves no skip note');
+    assert.doesNotMatch(w.read('gh.args'), /^pr (create|view)/m, 'no PR');
   } finally { await w.stop(); }
 });
 

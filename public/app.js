@@ -376,17 +376,20 @@ function renderChrome() {
  *  (localStorage 'dasks.summarySeen' = the dismissed summary's time). */
 const SUM_KEY = 'dasks.summarySeen';
 const SUM = { open: false, seen: '' };
+/** The steps unattended runs left for the human; empty when there are none. Each row opens its card. */
+const sumSkipped = (xs) => (xs.length ? `<h3>${esc(t('sum.skipped', { n: xs.length }))}</h3><ul class="tick-list">${xs.map((x) => `<li><button type="button" class="tick-card sum-skip" data-action="select" data-id="${esc(x.id)}"><span class="tick-title">${esc(x.title)}</span><span class="sum-step">${esc(x.step)}${x.why ? ` · ${esc(x.why)}` : ''}</span></button></li>`).join('')}</ul>` : '');
 function renderSummary() {
   const el = $('#day-summary'), s = S.summary;
   if (!el) return;
   if (!s || s.at === (stored(SUM_KEY) || SUM.seen)) { el.hidden = true; el.innerHTML = ''; return; }
   const w = s.waiting, waiting = w.asks.length + w.approve.length + w.blocked.length;
   const fails = s.failures.length + s.warnings.length, stuck = s.stuck.machines.length + s.stuck.cards.length;
-  const nums = [['sum.done', s.finished.length], ['sum.waiting', waiting], ['sum.stuck', stuck], ['sum.failures', fails]]
+  const skipped = s.skipped || [];   // a summary written before this field has none
+  const nums = [['sum.done', s.finished.length], ['sum.waiting', waiting], ['sum.stuck', stuck], ['sum.failures', fails], ...(skipped.length ? [['sum.skips', skipped.length]] : [])]
     .map(([k, n]) => `<span class="sum-n${n && k !== 'sum.done' ? ' warn' : ''}">${esc(t(k, { n }))}</span>`).join('');
   const cards = (xs) => xs.map((x) => `<li><button type="button" class="tick-card" data-action="select" data-id="${esc(x.id)}"><span class="tick-title">${esc(x.title)}</span>${x.hours ? `<span class="tick-ago">· ${esc(t('sum.nonews', { n: x.hours }))}</span>` : ''}</button></li>`).join('');
   const part = (k, xs) => (xs.length ? `<h3>${esc(t(k, { n: xs.length }))}</h3><ul class="tick-list">${cards(xs)}</ul>` : '');
-  const more = SUM.open ? `<div class="sum-more">${part('sum.finished', s.finished)}${part('sum.asks', w.asks)}${part('sum.approve', w.approve)}${part('sum.blocked', w.blocked)}
+  const more = SUM.open ? `<div class="sum-more">${part('sum.finished', s.finished)}${part('sum.asks', w.asks)}${part('sum.approve', w.approve)}${part('sum.blocked', w.blocked)}${sumSkipped(skipped)}
     ${s.stuck.machines.length ? `<h3>${esc(t('sum.machines', { n: s.stuck.machines.length }))}</h3><ul class="tick-list">${s.stuck.machines.map((m) => `<li>${esc(m.machine)} · ${esc(agoText(m.last_seen))}</li>`).join('')}</ul>` : ''}
     ${part('sum.stale', s.stuck.cards)}
     ${fails ? `<h3>${esc(t('sum.failed', { n: fails }))}</h3><ul class="tick-list">${s.failures.map((f) => `<li><button type="button" class="tick-card" data-action="select" data-id="${esc(f.id)}"><span class="tick-title">${esc(f.id)}</span><span class="tick-ago">${esc(f.note)}</span></button></li>`).join('')}${s.warnings.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}</div>` : '';

@@ -6,6 +6,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { parseTouches, touchesOverlap, touchesValue } from './touches.ts';
 import { toolIdentity } from './spec-state.ts';
+import { HUMAN_STEP_RULE } from './human-steps.ts';
 
 export type Tool = 'claude' | 'codex';
 
@@ -356,10 +357,11 @@ export function withFollowUps(body: string, lines: string[]): string {
 }
 
 /** A runner PR's body: open findings first when any are left, follow-ups in their own section. */
-export function prBody(o: { summary: string; card: string; note: string; open: string[]; blocked: boolean; followUps: string[]; actor: string }): string {
+export function prBody(o: { summary: string; card: string; note: string; open: string[]; blocked: boolean; followUps: string[]; skipped?: string[]; actor: string }): string {
   const open = o.open.length ? [o.blocked ? 'Not clean after the last review pass; this PR stays a draft. Open findings:' : 'Findings still to check:', ...o.open.map((l) => '  ' + l), ''] : [];
   return [...open, o.summary, '', `Card: ${o.card} (Dasks)`, `Review: ${o.note}.`, '',
     ...(o.followUps.length ? [followUpSection(o.followUps), ''] : []),
+    ...(o.skipped?.length ? ['Not done, skipped for you to do:', ...o.skipped.map((s) => `- ${s}`), ''] : []),
     `Opened by the Dasks runner (${o.actor}) as a draft. Merging is the user's call.`].join('\n');
 }
 
@@ -381,6 +383,7 @@ export function runnerRules(card: string, branch: string, base: string): string 
     `Do not run \`dask begin\`, \`dask claim\`, \`dask submit\`, \`dask release\` or \`dask block\`, do not push, do not open a PR and never merge: the runner gets a cross-model review, pushes the branch and opens a draft PR after you stop.`,
     `Do the card's work here and commit it on ${branch}; every commit message starts with "${card}: ". Commit often: if this run is stopped, the runner tries to save uncommitted changes as a WIP commit, but that can fail.`,
     'If the card cannot be done as written (a missing decision, a wrong spec), make no commits and say why in the RESULT line.',
+    HUMAN_STEP_RULE,
     HEADLESS_WAIT_RULE,
     helperRule(card),
     'End your final message with exactly one line: `RESULT: built <one-line summary>` or `RESULT: stopped <why>`.',
@@ -424,6 +427,7 @@ export function fixPrompt(card: string, branch: string, findings: string[]): str
     `The cross-model review of ${card} found these blocking problems. Fix them on ${branch} with the smallest change and commit (messages start with "${card}: "). Do not push, open a PR or touch the board.`,
     ...findings.map((f) => '  ' + f),
     'If a finding is wrong, leave the code and say why in your final message.',
+    HUMAN_STEP_RULE,
     HEADLESS_WAIT_RULE,
     helperRule(card),
     'End with exactly one line: `RESULT: fixed <summary>` or `RESULT: stopped <why>`.',
@@ -434,6 +438,7 @@ export function fixPrompt(card: string, branch: string, findings: string[]): str
 export function continuePrompt(card: string, branch: string): string {
   return [
     `Your run for ${card} ended without a RESULT line, so the runner cannot tell whether the work is done. Continue where you stopped: finish the card's work on ${branch} and commit it (messages start with "${card}: "). Do not push, open a PR or touch the board.`,
+    `${HUMAN_STEP_RULE} Repeat any such line from earlier in this run: only your final message counts.`,
     HEADLESS_WAIT_RULE,
     'End your final message with exactly one line: `RESULT: built <one-line summary>` or `RESULT: stopped <why>`.',
   ].join('\n');
@@ -518,7 +523,7 @@ export interface RunRecord {
   /** Set when a release or hand-back failed: what the next look (or a restart) must still tell the board. */
   pending?: { reason: string; count: boolean };
   /** Set once the draft PR is open: what the hand-back needs if it has to be retried. */
-  handback?: { pr: string; title: string; summary: string; review_note: string; open: string[]; blocked?: boolean };
+  handback?: { pr: string; title: string; summary: string; review_note: string; open: string[]; blocked?: boolean; skipped?: string[] };
 }
 
 export interface HistoryRow { card: string; tool: Tool; started: string; ended: string; outcome: 'review' | 'released' | 'rate-limited' | 'error' | 'spec-ready' | 'spec-draft'; detail: string; log: string; pr?: string }

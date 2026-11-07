@@ -72,5 +72,11 @@ The page is read-only.
 Once a day at `summary.at` (config, `HH:MM`, default `08:30`, this Mac's time zone; a board that was off then writes it
 within a minute of starting) the board writes a summary to `run/summary.json`: cards finished since the previous summary, cards
 waiting on you (open decisions, approvals asked in `needs_user`, cards blocked on you), quiet machines and cards with no
-news, failed runs and board warnings. It is shown at the top of the board until you press Got it (per browser), and read
+news, failed runs and board warnings, and any steps an unattended run skipped for you (`skipped`, the section is left out
+when there are none). It is shown at the top of the board until you press Got it (per browser), and read
 with `GET /api/summary`, MCP `get_summary` and `dasks summary`. It is never sent anywhere.
+
+A skipped step is any card note in the form `HUMAN-STEP: <step> -- <why>` ([runner.md](runner.md#what-one-run-does)). It stays
+on the list every day while its card is open. When the card is done the step closes: it is listed once more only if it was
+noted since the last summary, so you still see it. A cancelled card lists none, and the same step noted twice on a card is
+one entry.

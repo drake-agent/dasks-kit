@@ -312,6 +312,9 @@ function reviewTriage() {
     (pr) => prStatus.get(pr), (id) => { try { return readReviewRuns(ROOT, id) as any[]; } catch { return []; } }, new Date(), cfg.review.stale_days);
 }
 
+/** Only these cards' activity is read for the summary: open cards, and done cards changed since the last one. */
+const canListSkips = (t: { status: string; updated: string }, since: Date) => t.status !== 'cancelled' && (t.status !== 'done' || Date.parse(t.updated) >= since.getTime());
+
 /** Write the daily summary when it is due (checked every minute and at start). */
 function summaryTick(now = new Date()) {
   if (stopping) return; // a board shutting down writes nothing more
@@ -322,7 +325,7 @@ function summaryTick(now = new Date()) {
     const s = buildSummary({ now, since,
       tasks: board.tasks.map((t) => ({ id: t.id, title: t.title, goal: t.goal, status: t.status, pr: t.pr, needs_user: t.needs_user,
         done_at: t.status === 'done' && Date.parse(t.updated) >= since.getTime() ? (() => { const ms = lastDone(t.id); return ms === null ? null : new Date(ms).toISOString(); })() : null,
-        live_ask: !!liveAsk(t) })),
+        live_ask: !!liveAsk(t), notes: canListSkips(t, since) ? readActivity(ROOT, t.id).filter((a) => a.note).map((a) => ({ at: a.at, note: a.note })) : [] })),
       machines: fleet.list(cfg.fleet.dead_min, now), stale: stuckReport(board, now, cfg.stuck).items.filter((i) => i.reason === 'doing-stale'),
       outcomes: allOutcomes(ROOT), warnings: [backupNow().warning].filter((w): w is string => !!w) });
     saveSummary(ROOT, s);

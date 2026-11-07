@@ -47,6 +47,20 @@ flowchart LR
   skipped with the reason, and `dask runner status` lists the held repos. If `gh` is missing, not logged in or fails, the
   count is skipped and cards start without the PR limit (one log line).
 - **Usage or rate limits:** that tool waits `backoff_min`; the attempt does not count.
+- **Steps only you can do.** A build or fix prompt tells the agent to leave a login, signing, a paid purchase, a physical
+  device or an approval undone and finish the rest. It never tries, fakes or works around the step, and it writes one line
+  per step directly above its `RESULT:` line:
+
+  ```
+  HUMAN-STEP: <what is left undone> -- <why only you can do it>
+  ```
+
+  After a built run the runner writes each line as a card note (secrets redacted, cut to fit), lists the steps under "Not
+  done" in the PR body and in the card's next steps, and the [daily summary](api.md#daily-summary) lists them. The card goes
+  to review with its PR as usual; nothing marks a skipped step as done. If a required check needs the step, or nothing
+  useful is left without it, the agent ends with `RESULT: stopped needs the human: <step>`. That is a failed attempt like any
+  other: no PR, no note, the card goes back, and at `retry_cap` it is blocked on you with that reason. Only the lines
+  directly above the last `RESULT:` line count.
 - **gitleaks is required.** Without it the runner builds but never pushes, neither a finished branch nor saved work.
 - It **never merges**, never pushes the default branch and never force-pushes.
 - **Review.** At most 2 passes per PR, and passes an earlier attempt left on the board count. Pass 1 reviews the whole

@@ -14,6 +14,11 @@
   missing gitleaks pushes nothing. The card's note says where the work is, or that it was not saved and why, and a failed
   save never holds up the hand-back. The next run on any Mac starts from the saved branch when it is still usable, and
   its prompt says it is continuing. See docs/runner.md.
+- Runner: an unattended build that meets a step only you can do (a login, signing, a paid purchase, a physical device, an
+  approval) skips that one step, never fakes it, and finishes the rest. It reports `HUMAN-STEP: <step> -- <why>` above its
+  `RESULT:` line; the runner writes that as a card note and in the PR body, and the daily summary (data, text and page, in
+  English and Korean) lists the step until its card ends. A card that is only that step stops as before and is never
+  reported as built. See docs/runner.md.
 - Captain: `dasks-captain` writes once in the captain chat when the watch has not looked at the board for
   `captain.watch_gap_sec` (default 600 s, 0 = off), and once more when it is back. The captain skill now says to stay
   light: short jobs only, anything longer goes to a background subagent. See docs/captain.md.
