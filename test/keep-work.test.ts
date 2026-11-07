@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { pickStart, saveWork, type SaveInput } from '../src/lib/keep-work.ts';
-import { settle, type FlowEnv } from '../src/lib/run-flow.ts';
+import { BoardError, settle, storedPasses, type FlowEnv } from '../src/lib/run-flow.ts';
 import { emptyState, type RunRecord } from '../src/lib/runner.ts';
 
 const BRANCH = 'dasks/web.t-one', CARD = 'web.t-one', BASE = 'origin/main';
@@ -163,9 +163,9 @@ test('saveWork: a detached worktree and an oversized change are refused, and ear
     const tip = w.commit(w.dir, 'a.txt', 'a');
     w.g(w.dir, 'checkout', '-q', '--detach');
     fs.writeFileSync(path.join(w.dir, 'b.txt'), 'b');
-    assert.equal(await saveWork(w.input()), `Work saved: branch ${BRANCH} on origin @ ${tip.slice(0, 7)}. Uncommitted changes not saved: the worktree is not on ${BRANCH}.`);
-    w.g(w.dir, 'checkout', '-q', BRANCH);
-    fs.rmSync(path.join(w.dir, 'b.txt'));
+    const note = await saveWork(w.input());
+    assert.ok(note.startsWith(`Work saved: branch ${BRANCH} on origin @ ${tip.slice(0, 7)}. Uncommitted changes not saved: the worktree is not on ${BRANCH}. The uncommitted files stay on box at `), note);
+    w.g(w.repo, 'worktree', 'add', '-q', w.dir, BRANCH);
     for (let i = 0; i < 1001; i++) fs.writeFileSync(path.join(w.dir, `f${i}`), 'x');
     assert.match(await saveWork(w.input()), /Uncommitted changes not saved: 1001 changed paths, over the limit of 1000/);
     assert.equal(w.onOrigin(), tip);
@@ -183,7 +183,20 @@ test('saveWork: unresolved conflicts are not committed', async () => {
     const note = await saveWork(w.input());
     assert.match(note, /Uncommitted changes not saved: the worktree has unresolved merge conflicts/);
     assert.doesNotMatch(w.g(w.bare, 'log', '--format=%s', w.onOrigin()), /wip:/);
+    const aside = /stay on box at (\S+)\./.exec(note)?.[1] ?? '';
+    assert.ok(aside && fs.existsSync(path.join(aside, 'a.txt')), note);
+    assert.match(fs.readFileSync(path.join(aside, 'a.txt'), 'utf8'), /<<<<<<</, 'the conflict is kept as it was');
+    assert.equal(fs.existsSync(w.dir), false);
+    w.g(w.repo, 'worktree', 'add', '-q', w.dir, BRANCH);   // the next run can still take the branch
   } finally { w.done(); }
+});
+
+test('storedPasses: an unreadable answer is null, so no pass starts; a card with none is an empty list', async () => {
+  const log = () => {};
+  const failing = (status: number) => ({ log, api: async () => { throw new BoardError(status, 'nope'); } });
+  assert.equal(await storedPasses(failing(503), 'web.t-one'), null);
+  assert.deepEqual(await storedPasses(failing(404), 'web.t-one'), []);
+  assert.deepEqual(await storedPasses({ log, api: async () => ({ passes: [{ pass: 1 }] }) }, 'web.t-one'), [{ pass: 1 }]);
 });
 
 test('saveWork: never the default branch, never a force-push', async () => {

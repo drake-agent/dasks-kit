@@ -31,6 +31,9 @@ flowchart LR
 - **Giving a card back:** the work is saved first (below), then the failed attempt's outcome is recorded for that run (it
   counts toward the board's retry cap), then the release names the run, so it can never release a later claim. Both
   notes say where the work is.
+- **Files the WIP commit cannot take** (unresolved conflicts, an oversized change, secret-shaped names) are not deleted:
+  the worktree moves to `<worktree>.kept-<time>` on that Mac, off the branch, and the card's note says where. Delete it
+  when you are done with it.
 - **Limits** count from the card's start, across build, review and fix: never stopped before `timeout_min`. Past it, a
   run that is still writing is kept: new log output or a change in its worktree (an edit, a new file, a commit; checked
   every 30 s, without blocking the runner; a worktree that cannot be read in time counts as activity) counts. A run
@@ -62,7 +65,8 @@ flowchart LR
   done" in the PR body and in the card's next steps, and the [daily summary](api.md#daily-summary) lists them. The card goes
   to review with its PR as usual; nothing marks a skipped step as done. If a required check needs the step, or nothing
   useful is left without it, the agent ends with `RESULT: stopped needs the human: <step>`. That is a failed attempt like any
-  other: no PR, no note, the card goes back, and at `retry_cap` it is blocked on you with that reason. Only the lines
+  other: no PR, the card goes back, and at `retry_cap` it is blocked on you with that reason. Steps it reported are still
+  noted, so the daily summary lists them. Only the lines
   directly above the last `RESULT:` line count.
 - **gitleaks is required.** Without it the runner builds but never pushes, neither a finished branch nor saved work.
 - It **never merges**, never pushes the default branch and never force-pushes.

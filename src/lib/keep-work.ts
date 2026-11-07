@@ -72,15 +72,28 @@ export async function saveWork(o: SaveInput): Promise<string> {
   try { return await save(o); } catch (e: any) { return `Work not saved: ${said(e.message)}.`; }
 }
 
+/** Files the WIP commit did not take stay on this Mac: the worktree moves aside, off the branch, so removing the card's
+ *  worktree cannot delete them and the next run can still check the branch out. Answers the sentence for the note. */
+async function setAside(repo: string, dir: string, machine: string): Promise<string> {
+  const head = await git(dir, ['rev-parse', 'HEAD']);
+  const aside = `${dir}.kept-${Date.now()}`;
+  const moved = head.code === 0 ? await git(repo, ['worktree', 'move', dir, aside]) : head;
+  if (moved.code !== 0) return `The uncommitted files could not be set aside (${why(moved, 120)}).`;
+  const off = await git(aside, ['update-ref', '--no-deref', 'HEAD', head.out.trim()]);
+  return off.code === 0 ? `The uncommitted files stay on ${machine} at ${aside}.` : `The uncommitted files stay on ${machine} at ${aside}, but it still holds the branch (${why(off, 120)}).`;
+}
+
 async function save({ repo, dir, branch, base, card, machine, reason, gitleaks }: SaveInput): Promise<string> {
   const ref = `refs/heads/${branch}`;
   const head = await tipOf(repo, ref);
   if (!head) return '';
   const wip: Wip = fs.existsSync(dir) ? await wipCommit(dir, branch, card, reason, head) : { leftOut: 0 };
   const tip = wip.sha ?? head;
+  const kept = wip.refused || wip.leftOut ? await setAside(repo, dir, machine) : '';
   const extras = [
     wip.refused ? `Uncommitted changes not saved: ${said(wip.refused)}.` : '',
     wip.leftOut ? `${wip.leftOut} changed file(s) left out of the WIP commit (secret-shaped names or no change from the branch).` : '',
+    kept,
   ].filter(Boolean).join(' ');
   const tell = (s: string) => (extras ? `${s} ${extras}` : s);
   const commits = await countAfter(repo, base, tip);

@@ -29,8 +29,9 @@ export function versionHolds(items: { goal: string; priority: string; milestone?
 // A context write puts the "## Context" block on top of the body, so the marker's "first line" is read past that block.
 const CONTEXT_ON_TOP = /^## Context[ \t]*\n[\s\S]*?(?:\n[ \t]*\n|$)/;
 const GATE_LINE = /^version_gate:[ \t]*(\S+)[ \t]*$/;
-// On a line of its own, or as a whole board note: `- <date> <time> <actor>: launch_gate: <milestone>`.
-const LAUNCH_LINE = /^(?:- \S+ \S+ \S+: )?launch_gate:[ \t]*(\S+)[ \t]*$/;
+// A board note reaches the body as `- <date> <time> <actor>: <text>`; the marker must then be the whole text.
+const NOTE_HEAD = /^- \S+ \S+ \S+: /;
+const LAUNCH_KEY = 'launch_gate:';
 
 /** The milestone a gate card marks, or ''. */
 export function gateOf(body: string | undefined): string {
@@ -38,10 +39,26 @@ export function gateOf(body: string | undefined): string {
   return GATE_LINE.exec(first)?.[1] ?? '';
 }
 /** The milestone one body line names as its launch gate, or ''. */
-export function launchGateOf(line: string): string { return LAUNCH_LINE.exec(line)?.[1] ?? ''; }
+export function launchGateOf(line: string): string {
+  const text = line.replace(NOTE_HEAD, '').trim();
+  if (!text.startsWith(LAUNCH_KEY)) return '';
+  const value = text.slice(LAUNCH_KEY.length).trim();
+  return /\s/.test(value) ? '' : value;
+}
 const closesAfterGate = (t: Pick<Task, 'body' | 'milestone'>) => (t.body ?? '').split('\n').some((l) => launchGateOf(l) === t.milestone);
 
-export interface VersionStatus { goal: string; milestone: string; total: number; done: number; open: number; ready: boolean; gate_card: string | null }
+export interface VersionStatus {
+  goal: string;
+  milestone: string;
+  /** Cards that count, and how those split. */
+  total: number;
+  done: number;
+  open: number;
+  /** Time to judge the version. */
+  ready: boolean;
+  /** The gate card's id once one exists, in any status. */
+  gate_card: string | null;
+}
 
 /** Where a goal's version stands, or null without a valid target. Cancelled cards, launch-gate cards and the gate card are
  *  not counted. Ready: at least one card done and none open. A gate card counts in any status: once made, never again. */
@@ -50,9 +67,10 @@ export function versionStatus(g: Targeted, tasks: Pick<Task, 'id' | 'goal' | 'mi
   if (!milestone) return null;
   const own = tasks.filter((t) => t.goal === g.id);
   const cards = own.filter((t) => t.milestone === milestone && t.status !== 'cancelled' && gateOf(t.body) !== milestone && !closesAfterGate(t));
-  const done = cards.filter((t) => t.status === 'done').length;
-  const gate = own.find((t) => gateOf(t.body) === milestone);
-  return { goal: g.id, milestone, total: cards.length, done, open: cards.length - done, ready: done > 0 && done === cards.length, gate_card: gate?.id ?? null };
+  const open = cards.filter((t) => t.status !== 'done').length;
+  const total = cards.length;
+  const gate_card = own.find((t) => gateOf(t.body) === milestone)?.id ?? null;
+  return { goal: g.id, milestone, total, done: total - open, open, ready: total > 0 && open === 0, gate_card };
 }
 
 /** Every goal's version, in goal order. */

@@ -36,7 +36,7 @@ The Goals page shows `<milestone>: 2/5` on the goal's row, or `<milestone>: read
 ## Cards that close after the gate
 
 Some cards can only finish once the version is judged, such as a release switch. Mark such a card with a line
-`launch_gate: <milestone>`, its own milestone, in its body or as a board note whose whole text is that line. It stays in
+`launch_gate: <milestone>` naming its own milestone. The line can sit in the body, or be a board note with nothing else in it. It stays in
 the milestone and starts as before, but it is not counted, so it does not hold the version back from ready. The marker is
 for the count: the board does not refuse to close the card early. Archiving old notes keeps this note in the card.
 

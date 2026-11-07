@@ -145,8 +145,8 @@ async function blockAtLimit(env: FlowEnv, card: string, r: RunRecord, pr: string
   });
 }
 
-/** The hand-back after the draft PR is open: card to review with its context, claim closed, released. one card note per skipped
- *  step (`skipped`: HUMAN-STEP lines), card to review with its context, claim closed, released. `blocked`: the review
+/** The hand-back after the draft PR is open: card to review with its context, claim closed, released. Each skipped step
+ *  (`skipped`: HUMAN-STEP lines) gets a card note first. `blocked`: the review
  *  stopped at the pass limit, so the card is also blocked and the user told. A retry may note a step twice; the summary
  *  lists it once. */
 export async function handBack(env: FlowEnv, card: string, r: RunRecord, pr: string, title: string, summary: string, reviewNote: string, open: string[], blocked = false, skipped: string[] = []): Promise<boolean> {
@@ -162,7 +162,7 @@ export async function handBack(env: FlowEnv, card: string, r: RunRecord, pr: str
   try {
     await env.api('POST', `/api/tasks/${card}/finish`, {
       status: 'review', pr, pr_summary: `Draft PR for ${card}: ${summary}`, result: `runner (${r.tool}): PR ${pr}`, note: reviewNote,
-      summary: [`Runner build by ${tool}: ${summary}`, `Review: ${oneLine(reviewNote, 200)}`, `Draft PR: ${pr}`, ...(left ? [`Not done: ${skipped.length} skipped step(s) wait for you`] : [])].join('\n'),
+      summary: [`Runner build by ${tool}: ${summary}`, `Review: ${oneLine(reviewNote, 190)}`, `Draft PR: ${pr}`, ...(left ? [`Not done: ${skipped.length} skipped step(s) wait for you`] : [])].join('\n'),
       what: `A draft PR for this card is open: ${title}`,
       why: `The runner built the card with ${tool}; ${oneLine(reviewNote, 200)}`,
       do: blocked ? 'Read the open findings in the PR body, fix the spec or the design, then unblock the card' : `${left}Read the PR and its checks; merge it or ask for changes`,
@@ -192,10 +192,14 @@ export async function handBack(env: FlowEnv, card: string, r: RunRecord, pr: str
   return true;
 }
 
-/** The review passes stored for a card, oldest first ([] when the board cannot say: recording a pass then refuses). */
-async function storedPasses(env: FlowEnv, card: string): Promise<any[]> {
+/** The review passes stored for a card, oldest first; null when the board cannot say, so no pass may start. */
+export async function storedPasses(env: Pick<FlowEnv, 'api' | 'log'>, card: string): Promise<any[] | null> {
   try { return (await env.api('GET', `/api/tasks/${card}/review-runs`))?.passes ?? []; }
-  catch (e: any) { env.log(`${card}: review passes not read (${oneLine(e.message, 200)})`); return []; }
+  catch (e: any) {
+    if (e instanceof BoardError && e.status === 404) return [];
+    env.log(`${card}: review passes not read (${oneLine(e.message, 200)})`);
+    return null;
+  }
 }
 
 /** The cross-model review as a board review-run row for the head it read, sent as <reviewer>@<machine> so the board
@@ -231,17 +235,19 @@ async function phase(env: FlowEnv, card: string, r: RunRecord, cfg: RunnerConfig
 interface ReviewResult { note: string; open: string[]; followUps: string[]; blocked: boolean; fixTexts: string[] }
 
 /** A PR left by an earlier attempt: its follow-ups are brought up to date, and a card stopped at the review limit puts
- *  it back to draft. Best effort: a failure is logged and the hand-back goes on. */
-function updateOpenPr(env: FlowEnv, card: string, dir: string, pr: string, rv: ReviewResult): void {
+ *  it back to draft. False when that draft step failed: the card must not be handed back as a draft. A failed edit of the
+ *  follow-ups is only logged. */
+function updateOpenPr(env: FlowEnv, card: string, dir: string, pr: string, rv: ReviewResult): boolean {
   const gh = (...args: string[]) => spawnSync('gh', args, { cwd: dir, encoding: 'utf8', timeout: 60_000 });
   if (rv.blocked) {
     const undo = gh('pr', 'ready', pr, '--undo');
-    if (undo.status !== 0) env.log(`${card}: ${pr} not put back to draft: ${oneLine(undo.stderr || undo.stdout || String(undo.error), 200)}`);
+    if (undo.status !== 0) { env.log(`${card}: ${pr} not put back to draft: ${oneLine(undo.stderr || undo.stdout || String(undo.error), 200)}`); return false; }
   }
-  if (!rv.followUps.length) return;
+  if (!rv.followUps.length) return true;
   const body = gh('pr', 'view', pr, '--json', 'body', '-q', '.body');
   const edit = body.status === 0 ? gh('pr', 'edit', pr, '--body', withFollowUps(body.stdout, rv.followUps)) : body;
   if (edit.status !== 0) env.log(`${card}: follow-ups not added to ${pr}: ${oneLine(edit.stderr || edit.stdout || String(edit.error), 200)}`);
+  return true;
 }
 
 /** The cross-model review: pass 1 on the whole change, one fix, pass 2 on the findings and the fixes. Passes already on
@@ -252,6 +258,7 @@ async function reviewStage(env: FlowEnv, card: string, r: RunRecord, cfg: Runner
   const out: ReviewResult = { note: `no cross-model review (${reviewer} is not installed)`, open: [], followUps: [], blocked: false, fixTexts: [] };
   if (!env.which(reviewer)) return out;
   const stored = await storedPasses(env, card);
+  if (!stored) { await settle(env, card, r, 'the board did not say which review passes are used, so no review ran', false); return null; }
   const reads = stored.map((p) => readCodeReview(String(p.answer ?? '')));
   const last = stored[stored.length - 1];
   let previous = reads.at(-1)?.blockers.map((f) => f.line) ?? [];
@@ -273,7 +280,10 @@ async function reviewStage(env: FlowEnv, card: string, r: RunRecord, cfg: Runner
     if (run.code !== 0 && !read.findings.length && !read.verdict) {
       out.note = [...notes, `the ${TOOL_NAME[reviewer]} review did not finish (pass ${pass}, exit ${run.code}; log ${rlog})`].join('; ');
       env.log(`${card}: ${out.note}`);
-      return { ...out, open: previous };
+      if (pass < REVIEW_PASSES) return { ...out, open: previous };
+      // The last pass gave no answer: it still counts, and the head has no clean review.
+      await recordReview(env, card, r, pass, tool, reviewer, cfg.model, run.text, previous.length, 0, false);
+      return { ...out, open: previous.length ? previous : [`review pass ${pass} gave no answer`], blocked: true };
     }
     const bad = read.blockers.map((f) => f.line);
     out.followUps = [...new Set([...out.followUps, ...read.followUps.map((f) => f.line)])];
@@ -379,6 +389,9 @@ export async function runCard(env: FlowEnv, p: Picked, cfg: RunnerConfig, title:
       await settle(env, card, r, `${tool} hit a usage or rate limit; the runner waits ${cfg.backoff_min} min (until ${until})`, false, 'rate-limited');
       return;
     }
+    // A reported step is listed for the human even when the run built nothing.
+    try { for (const s of humanSteps) await env.api('POST', `/api/tasks/${card}`, { note: humanStepLine(s) }); }
+    catch (e: any) { env.log(`${card}: a human step was not noted: ${oneLine(e.message, 200)}`); }
     await settle(env, card, r, verdict.reason, true); return;
   }
 
@@ -400,8 +413,9 @@ export async function runCard(env: FlowEnv, p: Picked, cfg: RunnerConfig, title:
     git(dir, 'push', '-u', 'origin', `refs/heads/${branch}:refs/heads/${branch}`);
     const have = spawnSync('gh', ['pr', 'view', branch, '--json', 'url', '-q', '.url'], { cwd: dir, encoding: 'utf8', timeout: 60_000 });
     pr = have.status === 0 ? have.stdout.trim() : '';
-    if (pr) updateOpenPr(env, card, dir, pr, rv);
-    else {
+    if (pr) {
+      if (!updateOpenPr(env, card, dir, pr, rv)) { await settle(env, card, r, `${pr} could not be put back to draft`, true); return; }
+    } else {
       const body = prBody({ summary: result.replace(/^RESULT:\s*/, '') || `Built by ${TOOL_NAME[tool]} for ${card}.`, card, note: rv.note, open: rv.open, blocked: rv.blocked, followUps: rv.followUps, skipped: humanSteps.map((s) => `${s.step}${s.why ? `: ${s.why}` : ''}`), actor: env.actor });
       const c = spawnSync('gh', ['pr', 'create', '--draft', '--base', baseName, '--head', branch, '--title', `${card}: ${title}`.slice(0, 200), '--body', body], { cwd: dir, encoding: 'utf8', timeout: 120_000 });
       if (c.status !== 0) throw new Error(`gh pr create: ${oneLine(c.stderr || c.stdout || String(c.error), 300)}`);

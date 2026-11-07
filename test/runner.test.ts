@@ -420,6 +420,7 @@ case "$prompt" in
       stuck) finding ;;
       security) echo "- R1 [P2] [security] src/a/built.txt:1 prints a token. Expected: redacted"; echo "VERDICT: changes" ;;
       followup) echo "- R1 [P0] src/a/built.txt:1 might be wrong, not shown"; echo "VERDICT: clean" ;;
+      dies2) if [ -n "$pass2" ]; then exit 1; else finding; fi ;;
       *) echo "- [P3] fine"; echo "VERDICT: clean" ;;
     esac
     exit 0 ;;
@@ -452,7 +453,8 @@ const FAKE_GH = `#!/bin/bash
 printf '%s\\n' "$*" >> "$FAKE_DIR/gh.args"
 case "$1 $2" in
   "pr view") if [ -n "\${FAKE_PR_OPEN:-}" ]; then case "$*" in *body*) echo "From the last attempt" ;; *) echo "https://github.com/example/proj/pull/7" ;; esac; else exit 1; fi ;;
-  "pr ready"|"pr edit") exit 0 ;;
+  "pr ready") [ -z "\${FAKE_UNDO_FAIL:-}" ] ;;
+  "pr edit") exit 0 ;;
   "pr list") case "\${FAKE_PRS:-0}" in fail) echo "HTTP 401: Bad credentials" >&2; exit 1 ;; *) echo "\${FAKE_PRS:-0}" ;; esac ;;
   "pr create") echo "Creating draft pull request"; echo "https://github.com/example/proj/pull/7" ;;
   *) exit 1 ;;
@@ -608,6 +610,31 @@ test('e2e: an open PR from an earlier attempt goes back to draft at the limit, a
   } finally { await f.stop(); }
 });
 
+test('e2e: a pass 2 that gives no answer counts, and the card blocks with the pass-1 findings', async () => {
+  const w = await world({ FAKE_AGENT: 'success', FAKE_REVIEW: 'dies2' });
+  try {
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    const t = await w.get();
+    assert.equal(t.spec_state, 'blocked', r.out);
+    assert.match(t.block_note, /says hi/);
+    assert.match(w.read('gh.args'), /stays a draft\. Open findings:/);
+  } finally { await w.stop(); }
+});
+
+test('e2e: a PR that cannot go back to draft is not handed back as a draft', async () => {
+  const w = await world({ FAKE_AGENT: 'success', FAKE_REVIEW: 'stuck', FAKE_PR_OPEN: '1', FAKE_UNDO_FAIL: '1' });
+  try {
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    const t = await w.get();
+    assert.equal(t.status, 'todo', r.out);
+    assert.match(t.body, /could not be put back to draft/);
+    const msgs = (await (await fetch(`${w.url}/api/tasks/${w.card}/messages`)).json()).messages ?? [];
+    assert.ok(!msgs.some((m: any) => /stays a draft/.test(m.text ?? '')), 'nobody is told it is a draft');
+  } finally { await w.stop(); }
+});
+
 test('e2e: passes an earlier attempt stored count: with both used and no clean head the run gets no review and the card blocks', async () => {
   const w = await world({ FAKE_AGENT: 'success', FAKE_REVIEW: 'clean' });
   try {
@@ -676,7 +703,7 @@ test('e2e human step: the rest is built, one card note per skipped step, the PR 
   } finally { await w.stop(); }
 });
 
-test('e2e human step: a card that is only the human step ends as today, never built: no note, no PR, blocked on the user at the retry cap', async () => {
+test('e2e human step: a card that is only the human step is never built: its step is noted, no PR, blocked on the user at the retry cap', async () => {
   const w = await world({ FAKE_AGENT: 'humanonly' });
   try {
     assert.equal((await w.runner('--once')).status, 0);
@@ -687,7 +714,7 @@ test('e2e human step: a card that is only the human step ends as today, never bu
     const t = await w.get();
     assert.equal(t.status, 'blocked-on-user', JSON.stringify(t.outcomes));
     assert.match(t.needs_user, /needs the human: Sign the release build/);
-    assert.ok(!t.activity.some((a: any) => a.note?.startsWith('HUMAN-STEP:')), 'a stopped run leaves no skip note');
+    assert.ok(t.activity.some((a: any) => a.note?.startsWith('HUMAN-STEP: Sign the release build')), 'the step reaches the summary');
     assert.doesNotMatch(w.read('gh.args'), /^pr (create|view)/m, 'no PR');
   } finally { await w.stop(); }
 });
