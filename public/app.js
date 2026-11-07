@@ -684,7 +684,7 @@ function viewGoals() {
     out.push(`<div class="goal card">
       <div class="row goal-row ${S.selected === g.id ? 'selected' : ''}" data-action="select" data-id="${esc(g.id)}">
         ${caret(g.id, g.milestones.length)}<span class="title">${esc(tt(g))}</span>
-        <span class="meta"><span class="chip owner">${esc(g.owner)}</span>${pctBar(gr.pct)}<span class="pct">${gr.pct}%</span></span>
+        <span class="meta">${gr.version ? `<span class="chip">${esc(t(gr.version.ready ? 'version.ready' : 'version.progress', { m: tt(g.milestones.find((m) => m.id === gr.version.milestone)), d: gr.version.done, n: gr.version.total }))}</span>` : ''}<span class="chip owner">${esc(g.owner)}</span>${pctBar(gr.pct)}<span class="pct">${gr.pct}%</span></span>
       </div>`);
     if (open) for (const m of g.milestones) {
       const mr = D.roll(m.id) || { pct: 0, done: 0, total: 0 };

@@ -193,6 +193,8 @@ export interface Goal {
   repo?: string;
   /** What the project can do today and what it lacks (lib/profile.ts). Raw as read; `dasks check` validates it. */
   profile?: Profile;
+  /** The milestone this goal builds now (docs/versions.md); unset = no version mode. */
+  version_target?: string;
   milestones: Milestone[];
   file: string;
 }

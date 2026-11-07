@@ -219,6 +219,7 @@ flowchart LR
 | Connection and token | `~/.dasks/client.json` (mode 600), read by every client |
 | HTTP API | [docs/api.md](docs/api.md) |
 | Cards, specs, touches, messages | [docs/cards.md](docs/cards.md) |
+| Build one version at a time | [docs/versions.md](docs/versions.md) |
 | Login and tokens | [docs/auth.md](docs/auth.md) |
 | Fleet and captain | [docs/fleet.md](docs/fleet.md), [docs/captain.md](docs/captain.md) |
 | Upgrade, backup to a remote, restore, roll back | [docs/upgrade.md](docs/upgrade.md) |

@@ -6,6 +6,12 @@ A card is one Markdown file with YAML front matter in the board's data repo: `da
 Statuses: `todo` → `doing` → `review` or `blocked-on-user` → `done` (or `cancelled`). A claim moves a card to `doing` and
 names its holder; a release gives it back.
 
+## Versions
+
+A project can build one milestone at a time: set `version_target` on its goal and the runner starts only that milestone's
+cards. `launch_gate: <milestone>` and `version_gate: <milestone>` lines mark cards that stay out of the version's count.
+See [versions.md](versions.md).
+
 ## Context block
 
 Moving a card to `review` or `blocked-on-user` needs a short context, so you can act without opening anything else.

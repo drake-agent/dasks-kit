@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 import { parseTouches, touchesOverlap, touchesValue } from './touches.ts';
 import { toolIdentity } from './spec-state.ts';
 import { HUMAN_STEP_RULE } from './human-steps.ts';
+import { versionHold } from './version-mode.ts';
 
 export type Tool = 'claude' | 'codex';
 
@@ -96,6 +97,8 @@ export interface Candidate {
   answer_key_by?: string[];
   /** the card's kind (bug fixes start first) and whether the user pushed it */
   kind?: string; pushed?: boolean;
+  /** the card's milestone and its goal's version target (docs/versions.md) */
+  milestone?: string; version_target?: string;
 }
 export interface Running { card: string; tool: Tool; repo: string; touches: string[] }
 export interface PickInput {
@@ -131,6 +134,8 @@ export function pickCards(x: PickInput): { picked: Picked[]; skipped: { card: st
   const order = x.ready.map((c, i) => ({ c, i })).sort((a, b) => first(a.c) - first(b.c) || PRIO(a.c.priority) - PRIO(b.c.priority) || a.i - b.i).map((o) => o.c);
   for (const c of order) {
     if (busy.has(c.id)) continue;
+    const off = versionHold(c);
+    if (off) { skipped.push({ card: c.id, why: off }); continue; }
     if (c.spec_state !== undefined && c.spec_state !== 'ready') { skipped.push({ card: c.id, why: `spec is ${c.spec_state || 'none'}, not ready` }); continue; }
     const tool = c.lane === 'claude' || c.lane === 'codex' ? c.lane : null;
     if (!tool) { skipped.push({ card: c.id, why: `lane ${c.lane || 'none'} is not claude or codex` }); continue; }
@@ -168,6 +173,8 @@ export interface SpecCandidate {
   failures?: number;
   /** the card's content hash (src/lib/spec-flow.ts cardHash) */
   hash?: string;
+  /** the card's milestone and its goal's version target: a held card takes no spec slot */
+  milestone?: string; version_target?: string;
 }
 export interface SpecPickInput {
   cands: SpecCandidate[];
@@ -203,6 +210,8 @@ export function pickSpecCards(x: SpecPickInput): { picked: SpecPicked[]; skipped
   for (const c of order) {
     if (busy.has(c.id) || (c.spec_state !== 'none' && c.spec_state !== 'draft')) continue;
     if (c.lane !== 'claude' && c.lane !== 'codex') continue;
+    const off = versionHold(c);
+    if (off) { skipped.push({ card: c.id, why: `spec: ${off}` }); continue; }
     if (c.spec_state === 'draft' && c.reviewed) continue;   // reviewed and not passed: waits for a new version
     const lane = c.lane as Tool;
     const repo = x.repos.get(c.goal);
@@ -534,7 +543,7 @@ export interface RunnerState {
   history: HistoryRow[];
   /** Cards started on one local day; kept apart from history so the cap holds whatever history keeps. */
   daily: { day: string; count: number };
-  /** Repos held at the last look (PR-first), with the reason, for `--status`. */
+  /** Repos held at the last look (PR-first) and goals held for their version, with the reason, for `--status`. */
   held?: Record<string, string>;
   /** Failed spec runs per card: the card text's hash and how many runs on it stored nothing and recorded no review. */
   spec_failures?: Record<string, { hash: string; count: number; at: string }>;

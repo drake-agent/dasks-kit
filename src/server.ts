@@ -18,6 +18,8 @@ import path from 'node:path';
 import { loadBoard, loadGoals, loadStats, reloadTaskFiles } from './lib/load.ts';
 import { check } from './lib/check.ts';
 import { rollup } from './lib/rollup.ts';
+import { versionRows, versionTargets } from './lib/version-mode.ts';
+import { gatesDue, makeGate } from './lib/version-gate.ts';
 import { boardRoot, expandHome, intakeConfigErrors, isAllowedBindHost, isLoopback, isWildcard, loadConfig } from './lib/config.ts';
 import { deadRunnerCards, Fleet, kitCommitOf, parseHeartbeat } from './lib/fleet.ts';
 import { Backup, backupView, remoteShown } from './lib/backup.ts';
@@ -334,6 +336,25 @@ function summaryTick(now = new Date()) {
 }
 const SUMMARY_TICK_MS = Number(process.env.DASKS_SUMMARY_TICK_MS) || 60_000;
 setInterval(() => summaryTick(), SUMMARY_TICK_MS).unref(); // the first check a tick after start: a board that was off writes it then
+
+/** A ready version gets its one gate card here, not in a runner: the board is one process and works with no runner on
+ *  (docs/versions.md). A failure is logged once until its text changes, and tried again next tick. */
+const gateSaid = new Map<string, string>();
+function versionTick() {
+  if (stopping) return;
+  let changed = false;
+  for (const s of gatesDue(board)) {
+    try {
+      const t = makeGate(ROOT, s.goal);
+      if (t) { console.error(`version: ${s.milestone} is ready; made ${t.id}`); changed = true; }
+      gateSaid.delete(s.goal);
+    } catch (e: any) {
+      if (gateSaid.get(s.goal) !== e.message) { gateSaid.set(s.goal, e.message); console.error(`version: no gate card for ${s.milestone}: ${e.message}`); }
+    }
+  }
+  if (changed) reloadAfterWrite();
+}
+setInterval(versionTick, Number(process.env.DASKS_VERSION_TICK_MS) || 60_000).unref();
 
 // ---------- helpers ----------
 /** When the card last moved to done (its activity log), or null. */
@@ -981,6 +1002,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
     if (p === '/api/tasks') return getTasks(req, res, url.searchParams);
     if (p === '/api/claims/dead') return deadClaims(res, url.searchParams);
     if (p === '/api/stuck') return send(res, 200, stuckReport(board, new Date(), cfg.stuck));
+    if (p === '/api/versions') return send(res, 200, versionRows(board));
     if (p === '/api/ready') {
       const g = url.searchParams.get('goal'); const lim = Number(url.searchParams.get('limit') || 0);
       // Every item carries spec_state and spec_by. Only ready specs by default; ?all=1 (or ?require_spec_ready=0) is the
@@ -988,7 +1010,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
       const flag = (k: string) => { const v = url.searchParams.get(k); if (v !== null && !['0', '1', 'true', 'false'].includes(v)) throw new HttpError(400, `${k} must be 1 or 0`); return v === null ? null : v === '1' || v === 'true'; };
       const all = flag('all'), strict = flag('require_spec_ready');
       return send(res, 200, readyQueue(board, { missing_hours: cfg.stuck.missing_hours, goal: g ? g.split(',').map((s) => s.trim()).filter(Boolean) : null, limit: lim > 0 ? lim : undefined,
-        spec: (t) => ({ spec_state: specIndex.facts.get(t.id)?.spec_state ?? 'none', spec_by: specIndex.facts.get(t.id)?.spec_by ?? null }), requireSpecReady: !(all === true || strict === false) }));
+        spec: (t) => ({ spec_state: specIndex.facts.get(t.id)?.spec_state ?? 'none', spec_by: specIndex.facts.get(t.id)?.spec_by ?? null }), requireSpecReady: !(all === true || strict === false), versionTargets: versionTargets(board.goals) }));
     }
     if (p === '/api/intake') {
       // Todo intake report: counts by goal, creator, id family, spec state; ?goal=a,b.

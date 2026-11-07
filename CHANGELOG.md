@@ -19,6 +19,11 @@
   `RESULT:` line; the runner writes that as a card note and in the PR body, and the daily summary (data, text and page, in
   English and Korean) lists the step until its card ends. A card that is only that step stops as before and is never
   reported as built. See docs/runner.md.
+- Version mode, opt-in per project: a goal's `version_target` (`POST /api/nodes/<goal>`, checked by `dasks check`) names
+  the milestone it builds now. New cards without a milestone go there, and the runner starts only its cards (`p0` apart),
+  logging the rest as skipped. `GET /api/versions` and the Goals page show progress. A ready version gets one gate card
+  that asks you to judge it; `launch_gate: <milestone>` marks cards that do not hold it back. No target, no change. See
+  docs/versions.md.
 - Captain: `dasks-captain` writes once in the captain chat when the watch has not looked at the board for
   `captain.watch_gap_sec` (default 600 s, 0 = off), and once more when it is back. The captain skill now says to stay
   light: short jobs only, anything longer goes to a background subagent. See docs/captain.md.

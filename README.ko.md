@@ -192,6 +192,7 @@ flowchart LR
 | 연결 정보와 토큰 | `~/.dasks/client.json`(권한 600). 모든 클라이언트가 읽어요 |
 | HTTP API | [docs/api.md](docs/api.md) |
 | 카드, 스펙, touches, 메시지 | [docs/cards.md](docs/cards.md) |
+| 버전 하나씩 만들기 | [docs/versions.md](docs/versions.md) |
 | 로그인과 토큰 | [docs/auth.md](docs/auth.md) |
 
 테스트는 `npm ci && npm test`로 돌려요.

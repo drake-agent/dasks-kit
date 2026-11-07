@@ -1,9 +1,10 @@
 // Progress roll-up: milestone % = done / non-cancelled tasks; goal % = mean of milestones;
 // north star = mean of goals. A milestone past `due` and < 100% is late.
 import { type Board, type Goal, type Milestone, type Task } from './schema.ts';
+import { versionStatus, type VersionStatus } from './version-mode.ts';
 
 export interface MilestoneRoll { id: string; pct: number; done: number; total: number; late: boolean; needsDate: boolean }
-export interface GoalRoll { id: string; pct: number; milestones: MilestoneRoll[] }
+export interface GoalRoll { id: string; pct: number; milestones: MilestoneRoll[]; version?: VersionStatus }
 export interface Rollup { pct: number; goals: GoalRoll[] }
 
 export function localDate(now: Date): string {
@@ -25,7 +26,8 @@ const mean = (xs: number[]) => (xs.length ? Math.round((xs.reduce((a, b) => a + 
 
 export function rollGoal(g: Goal, tasks: Task[], today: string): GoalRoll {
   const milestones = g.milestones.map((m) => rollMilestone(m, tasks, today));
-  return { id: g.id, pct: mean(milestones.map((m) => m.pct)), milestones };
+  const version = versionStatus(g, tasks);
+  return { id: g.id, pct: mean(milestones.map((m) => m.pct)), milestones, ...(version ? { version } : {}) };
 }
 
 export function rollup(b: Board, now = new Date()): Rollup {

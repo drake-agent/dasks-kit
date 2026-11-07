@@ -46,6 +46,9 @@ flowchart LR
   merge or close. It logs one line when a repo goes over (and when it is back under), each held card is logged as
   skipped with the reason, and `dask runner status` lists the held repos. If `gh` is missing, not logged in or fails, the
   count is skipped and cards start without the PR limit (one log line).
+- **Versions.** A goal with a `version_target` starts only that milestone's cards, `p0` cards apart; the others are logged
+  as skipped (`not in version <milestone>`), take no spec slot, and `dask runner status` counts them. Without a target
+  nothing is held. [versions.md](versions.md).
 - **Usage or rate limits:** that tool waits `backoff_min`; the attempt does not count.
 - **Steps only you can do.** A build or fix prompt tells the agent to leave a login, signing, a paid purchase, a physical
   device or an approval undone and finish the rest. It never tries, fakes or works around the step, and it writes one line

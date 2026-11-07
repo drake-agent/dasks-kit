@@ -163,6 +163,7 @@ export function check(b: Board): CheckResult {
     if (g.id !== expect) err(g.file, `goal id "${g.id}" must match file name "${expect}"`);
     if (g.parent !== NORTHSTAR_ID) err(g.file, `parent must be "${NORTHSTAR_ID}"`);
     if (!g.title.trim()) err(g.file, 'title is empty');
+    if (g.version_target && !g.milestones.some((m) => m.id === g.version_target)) err(g.file, `version_target "${g.version_target}" is not a milestone of this goal; the goal runs without version mode until it is fixed`);
     for (const n of [g, ...g.milestones]) for (const k of ['title_ko', 'title_en'] as const) {
       const v = n[k];
       if (v !== undefined && (v.length > MAX_TITLE_LEN || /[\r\n]/.test(v))) err(g.file, `${n.id}: ${k} must be one line of at most ${MAX_TITLE_LEN} characters`);

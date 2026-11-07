@@ -476,6 +476,7 @@ async function world(env: Record<string, string> = {}) {
 
   const card = 'beta.t-build';
   const board = tempRepo([task({ id: card, title: 'Build me', lane: 'claude', priority: 'p1', spec_state: 'ready', body: 'touches: src/a\n\n## Context\nAdd src/a/built.txt.\n' } as any)]);
+  if (env.VERSION_TARGET) fs.appendFileSync(path.join(board.root, 'data/goals/beta.yaml'), `version_target: ${env.VERSION_TARGET}\n`);
   const port = await unusedPort();
   fs.writeFileSync(path.join(board.root, 'config.json'), JSON.stringify({
     server: { hosts: ['127.0.0.1'], port }, projects: [{ id: 'beta', name: 'Beta', repo: proj }],
@@ -752,6 +753,21 @@ test('e2e PR-first: a repo over runner.pr_limit starts no new card and says why;
     assert.match(w.read('gh.args'), /^pr list --state open/m);
     const st = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(ROOT, 'src/cli/runner.ts'), '--status'], { env: { ...process.env, HOME: w.home }, encoding: 'utf8' });
     assert.match(st.stdout, /held: PR-first: 11 open PRs/);
+  } finally { await w.stop(); }
+});
+
+test('e2e version mode: a card outside the goal\'s target is skipped with the reason; --status shows it', async () => {
+  const w = await world({ VERSION_TARGET: 'beta.m2' });
+  try {
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /beta\.t-build: skipped: not in version beta\.m2/);
+    assert.equal(w.read('claude.args'), '', 'no build started');
+    const t = await w.get();
+    assert.equal(t.status, 'todo');
+    assert.equal(t.claimed_by, '');
+    const st = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(ROOT, 'src/cli/runner.ts'), '--status'], { env: { ...process.env, HOME: w.home }, encoding: 'utf8' });
+    assert.match(st.stdout, /held: version: beta starts only beta\.m2; 1 other card\(s\) wait/);
   } finally { await w.stop(); }
 });
 

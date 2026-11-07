@@ -21,6 +21,7 @@ import { lintNow, normNow } from './now-line.ts';
 import { type Activity, type Context, activityContent, activityRelPath, applyContext, contextErrors, contextExempt, holderOf, parseContext, readActivity, TERMINAL } from './collab.ts';
 import { holderSeenAt } from './lease.ts';
 import { cleanProfileInput } from './profile.ts';
+import { launchGateOf, versionTarget } from './version-mode.ts';
 
 export class HttpError extends Error {
   status: number;
@@ -636,7 +637,8 @@ function compactNotes(root: string, t: Task): { rel: string; content: string } |
   const marker = /^- \((\d+) older notes: /;
   const lines = m[2].split('\n');
   const earlier = Number(lines.map((l) => marker.exec(l)?.[1]).find(Boolean) ?? 0);
-  const notes = lines.map((l, i) => (/^- /.test(l) && !marker.test(l) ? i : -1)).filter((i) => i >= 0);
+  // A launch_gate note stays: it is read from the card's body (docs/versions.md).
+  const notes = lines.map((l, i) => (/^- /.test(l) && !marker.test(l) && !launchGateOf(l) ? i : -1)).filter((i) => i >= 0);
   const head = t.body.slice(0, m.index + m[1].length);
   const tail = t.body.slice(m.index + m[0].length);
   const orig = t.body;
@@ -1071,10 +1073,10 @@ function findReplay(root: string, base: string, explicit: boolean, goal: string,
   }
 }
 
-/** First active milestone of a goal (else its first one): the default when a client does not pick one. */
+/** The default when a client does not pick a milestone: the goal's version target, else its first active milestone, else its first. */
 function defaultMilestone(root: string, goal: string): string {
   const g = loadGoals(root).goals.find((g) => g.id === goal);
-  return (g?.milestones.find((m) => m.status === 'active') ?? g?.milestones[0])?.id ?? '';
+  return (g && versionTarget(g)) || (g?.milestones.find((m) => m.status === 'active') ?? g?.milestones[0])?.id || '';
 }
 
 export function createTask(root: string, input: NewTask, actor: string, now = new Date(), copts: CreateOpts = {}): Task {
@@ -1167,7 +1169,7 @@ export { readTask };
 // ---------- goals / milestones / north star ----------
 const NODE_EDITABLE: Record<string, string[]> = {
   northstar: ['title', 'title_ko', 'title_en', 'why', 'horizon'],
-  goal: ['title', 'title_ko', 'title_en', 'why', 'owner', 'repo', 'profile'],
+  goal: ['title', 'title_ko', 'title_en', 'why', 'owner', 'repo', 'profile', 'version_target'],
   milestone: ['title', 'title_ko', 'title_en', 'status', 'due', 'done_criteria'],
 };
 
@@ -1216,6 +1218,15 @@ export function updateNode(root: string, id: string, patch: Record<string, unkno
         try { p = cleanProfileInput(v); } catch (e: any) { throw new HttpError(400, e.message); }
         target.set('profile', doc.createNode({ as_of: isoLocal(), by: actor, ...p }));
         changed.push('profile');
+        continue;
+      }
+      if (k === 'version_target') {
+        // Empty turns version mode off. Checked against the file under the lock.
+        if (typeof v !== 'string') throw new HttpError(400, 'field "version_target" must be a string');
+        const own = ((doc.get('milestones') as YAML.YAMLSeq | undefined)?.items ?? []).some((it: any) => it?.get?.('id') === v);
+        if (v && !own) throw new HttpError(400, `version_target "${v}" is not a milestone of ${id}`);
+        if (v) target.set(k, v); else target.delete(k);
+        changed.push(`version_target -> ${v || 'none'}`);
         continue;
       }
       if (k === 'done_criteria') {
