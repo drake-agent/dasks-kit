@@ -31,7 +31,7 @@ board body while a card has no spec yet. Needs only python3 (and git + gh for be
   dask secrets <card> [--agent A]         are the card's secrets stored and allowed for this agent (dasks-secret check,
                                           no prompt)? Prints what is missing and the exact commands for the human
   dask review-record <card> --head SHA --impl claude|codex --reviewer "<family> [model]" --verdict clean|open
-                 [--open N] [--noted N] [--base B] --answer-file F   record a cross-model review of that head on the board
+                 [--open N] [--noted N] [--base B] --answer-file F   record a cross-model review of that head on the board (at most 2 passes)
                                           (the board takes the reviewer from who sends it, run it from the reviewing session)
   dask captain-merge <card> [--method squash|merge|rebase] [--dry-run]   merge the card's PR only when CI is green on its
                                           head, a clean cross-model review is recorded for that exact head and no changed
@@ -540,6 +540,8 @@ def family(reviewer):
     w = (str(reviewer or "").strip().split() or [""])[0].lower()
     return w if w in FAMILIES else None
 
+REVIEW_PASSES = 2
+
 def cmd_review_record(a, head, impl, reviewer, verdict, open_n, noted, base, answer_file, tool):
     cid = check_id(a[0])
     if not head or not SHA_RE.match(head): die("--head must be the 40-character sha the review read", 2)
@@ -551,17 +553,19 @@ def cmd_review_record(a, head, impl, reviewer, verdict, open_n, noted, base, ans
     with open(answer_file, encoding="utf-8") as f: answer = f.read()
     passes = (call("GET", "/api/tasks/%s/review-runs" % cid, who=actor(tool), missing_ok=False) or {}).get("passes") or []
     used = {x.get("pass") for x in passes}
-    n = next((k for k in (1, 2, 3) if k not in used and all(j in used for j in range(1, k))), None)
-    if n is None: die("%s already has review passes 1-3" % cid)
+    n = next((k for k in range(1, REVIEW_PASSES + 1) if k not in used and all(j in used for j in range(1, k))), None)
+    if n is None: die("%s already has its %d review passes; there is no third. Keep the PR draft and block the card: dask block %s --note \"<open findings>\"" % (cid, REVIEW_PASSES, cid))
     mb = ""
     if base:
         r = subprocess.run(["git", "merge-base", base, head], capture_output=True, text=True)
         mb = r.stdout.strip() if r.returncode == 0 and SHA_RE.match(r.stdout.strip()) else ""
-    row = {"pass": n, "head": head, "base": base or "main", "merge_base": mb, "tier": "normal", "mode": "narrow" if n == 3 else "simple",
+    row = {"pass": n, "head": head, "base": base or "main", "merge_base": mb, "tier": "normal", "mode": "simple",
            "reviewer": reviewer.strip(), "impl": impl, "verdict": verdict, "open": 0 if verdict == "clean" else max(1, open_n or 0), "noted": noted or 0,
            "at": datetime.now().astimezone().isoformat(timespec="seconds"), "log_sha256": hashlib.sha256(answer.encode("utf-8")).hexdigest(), "answer": answer}
     call("POST", "/api/tasks/%s/review-runs" % cid, row, actor(tool))
     print("recorded review pass %d of %s at %s: %s" % (n, cid, head[:12], verdict))
+    if n == REVIEW_PASSES and verdict != "clean":
+        print("not clean after the last pass: keep the PR draft, run dask block %s --note \"<open findings>\" and tell the user" % cid)
 
 class Refused(Exception): pass
 class ReadyForHuman(Refused):

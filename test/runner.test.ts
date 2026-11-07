@@ -4,10 +4,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
   RUNNER_DEFAULTS, agentText, attemptVerdict, blocking, cardTouches, countAllOpenPrs, countOpenPrs, countStart, emptyState, pickCards, prHolds, projectRepos, RATE_LIMITED, resultLine,
-  reviewFindings, runnerConfig, startedToday, type Candidate, type PickInput,
+  prBody, readCodeReview, recheckPrompt, reviewFindings, reviewPrompt, runnerConfig, withFollowUps, startedToday, type Candidate, type PickInput,
 } from '../src/lib/runner.ts';
 import { touchesOverlap } from '../src/lib/touches.ts';
 import { overrun, supervise, worktreeStamp } from '../src/lib/supervise.ts';
@@ -352,6 +353,57 @@ test('PR-first: a slow gh does not delay a heartbeat or a timer; repos are count
   } finally { delete process.env.FAKE_GH_SLEEP; fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('code review: a finding without a repro does not block, whatever its priority', () => {
+  const r = readCodeReview('R1 [P0] src/a.ts:3 looks wrong. Expected: right\n- R2 [P1] [repro] src/b.ts:9 no repro line follows\nR3 [P3] naming\nVERDICT: clean');
+  assert.deepEqual(r.findings.map((f) => f.severity), ['P0', 'P1', 'P3']);
+  assert.equal(r.blockers.length, 0);
+  assert.equal(r.followUps.length, 3);
+  assert.equal(r.clean, true);
+});
+
+test('code review: a tag of security, data-loss, approval or money blocks with no repro', () => {
+  for (const tag of ['security', 'data-loss', 'approval', 'money', 'Security', 'data loss', 'approval-gate']) {
+    const r = readCodeReview(`R1 [P2] [${tag}] src/a.ts:3 the token is logged. Expected: redacted\nVERDICT: changes`);
+    assert.equal(r.blockers.length, 1, tag);
+    assert.equal(r.clean, false, tag);
+  }
+  assert.equal(readCodeReview('R1 [P2] [style] src/a.ts:3 x\nVERDICT: clean').blockers.length, 0, 'any other tag is a follow-up');
+});
+
+test('code review: a repro with the command and the wrong result blocks; half a repro does not', () => {
+  const r = readCodeReview('R3 [P3] [repro] bin/x.py:12 an empty name crashes. Expected: refused\nrepro: python3 bin/x.py --name "" -> Traceback (KeyError)\nVERDICT: changes');
+  assert.equal(r.blockers.length, 1, 'even at P3');
+  assert.match(r.blockers[0].line, /\n {2}repro: python3 bin\/x\.py/);
+  for (const half of ['repro: python3 bin/x.py', 'repro: -> it crashes', 'repro: python3 bin/x.py ->']) {
+    assert.equal(readCodeReview(`R3 [P1] [repro] bin/x.py:12 crash\n${half}\nVERDICT: clean`).blockers.length, 0, half);
+  }
+  assert.equal(readCodeReview('R3 [P1] bin/x.py:12 crash\n\nrepro: a -> b\nVERDICT: clean').blockers.length, 0, 'the repro sits right under its finding');
+  assert.equal(readCodeReview('R3 [P1] bin/x.py:12 crash\nrepro: a -> b').blockers.length, 1, 'a repro counts with or without the tag');
+});
+
+test('code review: clean needs the reviewer\'s own verdict; pass-2 lines; an echoed pass-2 prompt reads as no finding', () => {
+  assert.equal(readCodeReview('R1 [P3] x y').clean, false, 'no verdict line');
+  assert.equal(readCodeReview('VERDICT: changes').clean, false);
+  assert.equal(readCodeReview('VERDICT: changes\nVERDICT: clean').clean, true, 'the last verdict counts');
+  assert.equal(readCodeReview('R1 resolved\nR2 resolved\nVERDICT: clean').findings.length, 0);
+  const prompt = recheckPrompt('beta.t-a', 'origin/main', 'claude', ['R1 [P1] [security] a.ts:1 x\n  repro: a -> b'], 'abc');
+  assert.match(prompt, /Pass 2 of 2/);
+  assert.match(prompt, /git diff abc\.\.HEAD/);
+  assert.equal(readCodeReview(prompt).findings.length, 0);
+  assert.equal(readCodeReview(reviewPrompt('beta.t-a', 'origin/main', 'claude')).findings.length, 0);
+});
+
+test('PR body: follow-ups go under their own heading, open findings on top; an old section is replaced', () => {
+  const body = prBody({ summary: 'built it', card: 'beta.t-a', note: 'n', open: ['R1 [P1] [money] a.ts:1 x'], blocked: true, followUps: ['- R2 [P3] a.ts:2 y'], actor: 'runner@one' });
+  assert.ok(body.indexOf('R1 [P1] [money]') < body.indexOf('built it'));
+  assert.match(body, /stays a draft/);
+  assert.match(body, /^## Follow-ups\n\n- R2 \[P3\] a\.ts:2 y$/m);
+  assert.doesNotMatch(prBody({ summary: 's', card: 'c', note: 'n', open: [], blocked: false, followUps: [], actor: 'a' }), /Follow-ups/);
+  assert.equal(withFollowUps('Intro\n', ['R1 [P3] a']), 'Intro\n\n## Follow-ups\n\n- R1 [P3] a\n');
+  assert.equal(withFollowUps('Intro\n\n## Follow-ups\n\n- old\n\n## Notes\nkeep\n', ['R1 [P3] a']), 'Intro\n\n## Follow-ups\n\n- R1 [P3] a\n\n## Notes\nkeep\n');
+  assert.equal(withFollowUps('Intro\n\n## Follow-ups\n\n- old\n', ['R1 [P3] a']), 'Intro\n\n## Follow-ups\n\n- R1 [P3] a\n');
+});
+
 // ---------- end to end: temp board, temp repo + bare remote, fake agents ----------
 
 const FAKE_AGENT = `#!/bin/bash
@@ -361,29 +413,48 @@ printf '%s\\n' "$*" >> "$FAKE_DIR/$me.args"
 prompt="\${@: -1}"
 case "$prompt" in
   *"cross-model reviewer"*)
-    if [ "\${FAKE_REVIEW:-clean}" = p1 ]; then echo "- [P1] src/a/built.txt:1 says hi, should say hello"; echo "VERDICT: changes"; else echo "- [P3] fine"; echo "VERDICT: clean"; fi
+    pass2=; case "$prompt" in *"Pass 2 of 2"*) pass2=1 ;; esac
+    finding() { echo "- R1 [P1] [repro] src/a/built.txt:1 says hi. Expected: hello"; echo "  repro: cat src/a/built.txt -> hi"; echo "VERDICT: changes"; }
+    case "\${FAKE_REVIEW:-clean}" in
+      p1) if [ -n "$pass2" ]; then echo "R1 resolved"; echo "- R2 [P3] src/a/built.txt:1 no newline policy"; echo "VERDICT: clean"; else finding; fi ;;
+      stuck) finding ;;
+      security) echo "- R1 [P2] [security] src/a/built.txt:1 prints a token. Expected: redacted"; echo "VERDICT: changes" ;;
+      followup) echo "- R1 [P0] src/a/built.txt:1 might be wrong, not shown"; echo "VERDICT: clean" ;;
+      dies2) if [ -n "$pass2" ]; then exit 1; else finding; fi ;;
+      *) echo "- [P3] fine"; echo "VERDICT: clean" ;;
+    esac
     exit 0 ;;
-  *"review of "*"found these P0/P1"*)
+  *"review of "*"found these blocking"*)
     echo hello > src/a/built.txt && git add -A && git -c user.name=t -c user.email=t@example.invalid commit -qm "fix" && echo "RESULT: fixed"
     exit 0 ;;
   *"ended without a RESULT line"*)
     mkdir -p src/a && echo hi > src/a/built.txt && git add -A && git -c user.name=t -c user.email=t@example.invalid commit -qm "card: add built.txt" && echo "RESULT: built after a nudge"
     exit 0 ;;
 esac
+[ -f "$FAKE_DIR/mode" ] && FAKE_AGENT=$(cat "$FAKE_DIR/mode")
 case "\${FAKE_AGENT:-success}" in
   success) mkdir -p src/a && echo hi > src/a/built.txt && git add -A && git -c user.name=t -c user.email=t@example.invalid commit -qm "card: add built.txt" && echo "RESULT: built src/a/built.txt" ;;
   nocommit) echo "thinking"; echo "RESULT: stopped the spec does not say which file" ;;
+  humanstep) mkdir -p src/a && echo hi > src/a/built.txt && git add -A && git -c user.name=t -c user.email=t@example.invalid commit -qm "card: add built.txt"
+    echo "HUMAN-STEP: Sign the release build -- needs your certificate"; echo "HUMAN-STEP: Buy the domain -- costs money"; echo "RESULT: built src/a/built.txt" ;;
+  humanonly) echo "HUMAN-STEP: Sign the release build -- needs your certificate"; echo "RESULT: stopped needs the human: Sign the release build" ;;
   stall) echo "waiting on a background job" ;;
   hang) sleep 300 & echo $! > "$FAKE_DIR/grandchild.pid"; wait ;;
   ratelimit) echo "API Error: 429 rate_limit_error: you have hit your usage limit" >&2; exit 1 ;;
   crash) mkdir -p src/a && echo half > src/a/built.txt && git add -A && git -c user.name=t -c user.email=t@example.invalid commit -qm "card: half" && exit 3 ;;
   slowclaim) sleep 300 ;;
+  dirty) mkdir -p src/a && echo half > src/a/half.txt && echo 'KEY=1' > .env && exit 3 ;;
+  dirtyhang) mkdir -p src/a && echo half > src/a/half.txt && echo 'KEY=1' > .env; sleep 300 & wait ;;
+  dirtybroken) mkdir -p src/a && echo half > src/a/half.txt && git remote set-url origin /nonexistent/remote.git && exit 3 ;;
+  resume) git log --format=%s > "$FAKE_DIR/resume.log"; ls src/a > "$FAKE_DIR/resume.files"; echo done > src/a/built.txt && git add -A && git -c user.name=t -c user.email=t@example.invalid commit -qm "card: finish" && echo "RESULT: built on the saved work" ;;
 esac
 `;
 const FAKE_GH = `#!/bin/bash
 printf '%s\\n' "$*" >> "$FAKE_DIR/gh.args"
 case "$1 $2" in
-  "pr view") exit 1 ;;
+  "pr view") if [ -n "\${FAKE_PR_OPEN:-}" ]; then case "$*" in *body*) echo "From the last attempt" ;; *) echo "https://github.com/example/proj/pull/7" ;; esac; else exit 1; fi ;;
+  "pr ready") [ -z "\${FAKE_UNDO_FAIL:-}" ] ;;
+  "pr edit") exit 0 ;;
   "pr list") case "\${FAKE_PRS:-0}" in fail) echo "HTTP 401: Bad credentials" >&2; exit 1 ;; *) echo "\${FAKE_PRS:-0}" ;; esac ;;
   "pr create") echo "Creating draft pull request"; echo "https://github.com/example/proj/pull/7" ;;
   *) exit 1 ;;
@@ -403,14 +474,15 @@ async function world(env: Record<string, string> = {}) {
   const mainBefore = g(bare, 'rev-parse', 'main').trim();
   for (const t of ['claude', 'codex']) fs.writeFileSync(path.join(fake, t), FAKE_AGENT, { mode: 0o755 });
   fs.writeFileSync(path.join(fake, 'gh'), FAKE_GH, { mode: 0o755 });
-  if (env.NO_GITLEAKS !== '1') fs.writeFileSync(path.join(fake, 'gitleaks'), '#!/bin/bash\nprintf "%s\\n" "$*" >> "$FAKE_DIR/gitleaks.args"\nexit 0\n', { mode: 0o755 });
+  if (env.NO_GITLEAKS !== '1') fs.writeFileSync(path.join(fake, 'gitleaks'), '#!/bin/bash\nprintf "%s\\n" "$*" >> "$FAKE_DIR/gitleaks.args"\n[ -f "$FAKE_DIR/leak" ] && exit 1\nexit 0\n', { mode: 0o755 });
 
   const card = 'beta.t-build';
   const board = tempRepo([task({ id: card, title: 'Build me', lane: 'claude', priority: 'p1', spec_state: 'ready', body: 'touches: src/a\n\n## Context\nAdd src/a/built.txt.\n' } as any)]);
+  if (env.VERSION_TARGET) fs.appendFileSync(path.join(board.root, 'data/goals/beta.yaml'), `version_target: ${env.VERSION_TARGET}\n`);
   const port = await unusedPort();
   fs.writeFileSync(path.join(board.root, 'config.json'), JSON.stringify({
     server: { hosts: ['127.0.0.1'], port }, projects: [{ id: 'beta', name: 'Beta', repo: proj }],
-    runner: { enabled: true, ...(env.FAKE_AGENT === 'hang' ? { timeout_min: 0.1, max_min: 0.1 } : { timeout_min: 1, max_min: 1 }), idle_min: 0, backoff_min: 60 },
+    runner: { enabled: true, ...(/hang$/.test(env.FAKE_AGENT ?? '') ? { timeout_min: 0.1, max_min: 0.1 } : { timeout_min: 1, max_min: 1 }), idle_min: 0, backoff_min: 60 },
   }, null, 2));
   execFileSync('git', ['-C', board.root, 'add', '-A']); execFileSync('git', ['-C', board.root, 'commit', '-qm', 'config']);
   const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(DASKS?_|CLAUDE|CODEX)/.test(k)));
@@ -433,13 +505,13 @@ async function world(env: Record<string, string> = {}) {
   const runnerProc = (...args: string[]) => spawn(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(ROOT, 'src/cli/runner.ts'), ...args], { env: runEnv, stdio: ['ignore', 'pipe', 'pipe'] });
   const state = () => { try { return JSON.parse(fs.readFileSync(path.join(home, '.dasks/runner/state.json'), 'utf8')); } catch { return null; } };
   return {
-    card, home, proj, bare, mainBefore, runner, runnerProc, state, url, token, get, read, g,
+    card, tmp, fake, home, proj, bare, mainBefore, runner, runnerProc, state, url, token, get, read, g,
     config: (fn: (c: any) => void) => { const f = path.join(board.root, 'config.json'); const c = JSON.parse(fs.readFileSync(f, 'utf8')); fn(c); fs.writeFileSync(f, JSON.stringify(c)); },
     stop: async () => { const done = new Promise((r) => srv.once('exit', r)); srv.kill(); await done; board.cleanup(); fs.rmSync(tmp, { recursive: true, force: true }); },
   };
 }
 
-test('e2e success: Claude builds, Codex reviews (P1), one fix pass, branch pushed, draft PR, card in review; main untouched', async () => {
+test('e2e success: Claude builds, Codex reviews (a repro blocks), one fix, a clean pass 2, branch pushed, draft PR, card in review; main untouched', async () => {
   const w = await world({ FAKE_AGENT: 'success', FAKE_REVIEW: 'p1' });
   try {
     const r = await w.runner('--once');
@@ -450,10 +522,14 @@ test('e2e success: Claude builds, Codex reviews (P1), one fix pass, branch pushe
     assert.equal(t.claimed_by, '', 'handed back: nobody holds the card');
     assert.match(t.body, /claim: #runner-[0-9a-f-]{36} closed \(runner: review/);
     assert.match(w.read('gitleaks.args'), /^git --no-banner --redact --log-opts/m, 'scanned before the push');
+    assert.doesNotMatch(w.read('claude.args'), /You are continuing/, 'no saved branch: a plain first run');
     const gh = w.read('gh.args');
     assert.match(gh, /^pr create --draft --base main --head dasks\/beta\.t-build --title beta\.t-build: Build me --body /m);
-    assert.match(gh, /P1/);
+    assert.match(gh, /## Follow-ups/, 'the pass-2 follow-up is in the PR body');
+    assert.match(gh, /R2 \[P3\]/);
     assert.ok(!/merge/.test(gh), 'never merges');
+    assert.doesNotMatch(gh, /stays a draft/);
+    assert.notEqual(t.spec_state, 'blocked');
     // The review is sent by the reviewer's own name and the claim by the builder's, so the board knows both families.
     const rows = (await (await fetch(`${w.url}/api/tasks/${w.card}/review-runs`)).json()).passes;
     assert.deepEqual([rows[0].actor, rows[0].reviewer_family, rows[0].builders, rows[0].builder_families],
@@ -462,6 +538,10 @@ test('e2e success: Claude builds, Codex reviews (P1), one fix pass, branch pushe
     assert.match(claude, /^-p --session-id [0-9a-f-]{36} --permission-mode auto --output-format stream-json --verbose /m);
     assert.match(claude, /--resume/, 'the builder got one fix pass');
     assert.match(w.read('codex.args'), /^exec --sandbox read-only/m);
+    assert.deepEqual(rows.map((x: any) => [x.pass, x.mode, x.verdict, x.open, x.noted]), [[1, 'simple', 'open', 1, 0], [2, 'simple', 'clean', 0, 1]]);
+    assert.notEqual(rows[0].head, rows[1].head, 'pass 2 read the fixed head');
+    assert.equal(w.g(w.bare, 'rev-parse', 'dasks/beta.t-build').trim(), rows[1].head);
+    assert.match(w.read('codex.args'), /Pass 2 of 2[\s\S]*> - R1 \[P1\] \[repro\][\s\S]*> repro: cat src\/a\/built\.txt -> hi/, 'pass 2 is told the pass-1 finding');
     assert.match(claude, /Headless run/);
     assert.match(claude, /Helpers stay read-only on the board/);
     assert.equal(w.g(w.bare, 'rev-parse', 'main').trim(), w.mainBefore, 'the default branch is never pushed');
@@ -470,6 +550,107 @@ test('e2e success: Claude builds, Codex reviews (P1), one fix pass, branch pushe
     const st = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(ROOT, 'src/cli/runner.ts'), '--status'], { env: { ...process.env, HOME: w.home }, encoding: 'utf8' });
     assert.match(st.stdout, /beta\.t-build {2}claude {2}review/);
     assert.match(st.stdout, /today: 1 card/);
+  } finally { await w.stop(); }
+});
+
+test('e2e: a finding without a repro blocks nothing: no fix, one pass, clean, listed as a follow-up', async () => {
+  const w = await world({ FAKE_AGENT: 'success', FAKE_REVIEW: 'followup' });
+  try {
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    const t = await w.get();
+    assert.equal(t.status, 'review', r.out);
+    assert.doesNotMatch(w.read('claude.args'), /--resume/, 'nothing to fix');
+    const rows = (await (await fetch(`${w.url}/api/tasks/${w.card}/review-runs`)).json()).passes;
+    assert.deepEqual(rows.map((x: any) => [x.pass, x.verdict, x.open, x.noted]), [[1, 'clean', 0, 1]]);
+    assert.match(w.read('gh.args'), /## Follow-ups[\s\S]*R1 \[P0\]/);
+  } finally { await w.stop(); }
+});
+
+test('e2e: a [security] finding with no repro stays open after pass 2: no third pass, PR draft, card blocked, user told', async () => {
+  const w = await world({ FAKE_AGENT: 'success', FAKE_REVIEW: 'security' });
+  try {
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    const t = await w.get();
+    assert.equal(t.status, 'review', r.out);
+    assert.equal(t.spec_state, 'blocked');
+    assert.match(t.block_note, /not clean after 2 review passes: - R1 \[P2\] \[security\]/);
+    assert.equal(t.claimed_by, '');
+    assert.equal(t.pr, 'https://github.com/example/proj/pull/7');
+    const gh = w.read('gh.args');
+    assert.match(gh, /^pr create --draft /m);
+    assert.match(gh, /stays a draft\. Open findings:/);
+    assert.doesNotMatch(gh, /^pr ready/m);
+    const rows = (await (await fetch(`${w.url}/api/tasks/${w.card}/review-runs`)).json()).passes;
+    assert.deepEqual(rows.map((x: any) => [x.pass, x.verdict]), [[1, 'open'], [2, 'open']]);
+    assert.equal(w.read('codex.args').split('cross-model reviewer').length - 1, 2, 'two reviewer runs, no third');
+    const msgs = (await (await fetch(`${w.url}/api/tasks/${w.card}/messages`)).json()).messages;
+    assert.equal(msgs.filter((m: any) => m.to === 'user' && m.kind === 'heads-up' && /not clean after 2 passes/.test(m.text)).length, 1);
+    assert.deepEqual(w.state().running, {}, 'the hand-back finished');
+  } finally { await w.stop(); }
+});
+
+test('e2e: an open PR from an earlier attempt goes back to draft at the limit, and its body gets the follow-ups', async () => {
+  const w = await world({ FAKE_AGENT: 'success', FAKE_REVIEW: 'stuck', FAKE_PR_OPEN: '1' });
+  try {
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    const gh = w.read('gh.args');
+    assert.match(gh, /^pr ready https:\/\/github\.com\/example\/proj\/pull\/7 --undo$/m);
+    assert.doesNotMatch(gh, /^pr create/m);
+    assert.equal((await w.get()).spec_state, 'blocked');
+  } finally { await w.stop(); }
+  const f = await world({ FAKE_AGENT: 'success', FAKE_REVIEW: 'followup', FAKE_PR_OPEN: '1' });
+  try {
+    assert.equal((await f.runner('--once')).status, 0);
+    const gh = f.read('gh.args');
+    assert.match(gh, /^pr edit https:\/\/github\.com\/example\/proj\/pull\/7 --body From the last attempt\n\n## Follow-ups\n\n- R1 \[P0\]/m);
+    assert.doesNotMatch(gh, /^pr ready/m);
+  } finally { await f.stop(); }
+});
+
+test('e2e: a pass 2 that gives no answer counts, and the card blocks with the pass-1 findings', async () => {
+  const w = await world({ FAKE_AGENT: 'success', FAKE_REVIEW: 'dies2' });
+  try {
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    const t = await w.get();
+    assert.equal(t.spec_state, 'blocked', r.out);
+    assert.match(t.block_note, /says hi/);
+    assert.match(w.read('gh.args'), /stays a draft\. Open findings:/);
+  } finally { await w.stop(); }
+});
+
+test('e2e: a PR that cannot go back to draft is not handed back as a draft', async () => {
+  const w = await world({ FAKE_AGENT: 'success', FAKE_REVIEW: 'stuck', FAKE_PR_OPEN: '1', FAKE_UNDO_FAIL: '1' });
+  try {
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    const t = await w.get();
+    assert.equal(t.status, 'todo', r.out);
+    assert.match(t.body, /could not be put back to draft/);
+    const msgs = (await (await fetch(`${w.url}/api/tasks/${w.card}/messages`)).json()).messages ?? [];
+    assert.ok(!msgs.some((m: any) => /stays a draft/.test(m.text ?? '')), 'nobody is told it is a draft');
+  } finally { await w.stop(); }
+});
+
+test('e2e: passes an earlier attempt stored count: with both used and no clean head the run gets no review and the card blocks', async () => {
+  const w = await world({ FAKE_AGENT: 'success', FAKE_REVIEW: 'clean' });
+  try {
+    const answer = 'R1 [P1] [money] a.ts:1 charges twice\nVERDICT: changes\n';
+    const row = (pass: number) => ({ pass, head: 'a'.repeat(40), base: 'main', merge_base: '', tier: 'normal', mode: 'simple', reviewer: 'codex', impl: 'claude', verdict: 'open', open: 1, noted: 0,
+      at: '2026-01-01T00:00:00Z', log_sha256: createHash('sha256').update(answer).digest('hex'), answer });
+    for (const pass of [1, 2]) {
+      const res = await fetch(`${w.url}/api/tasks/${w.card}/review-runs`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Dasks-Actor': 'codex@testbox', Authorization: `Bearer ${w.token}` }, body: JSON.stringify(row(pass)) });
+      assert.equal(res.status, 201, await res.text());
+    }
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    assert.equal(w.read('codex.args'), '', 'no third reviewer run');
+    const t = await w.get();
+    assert.equal(t.spec_state, 'blocked', r.out);
+    assert.match(t.block_note, /charges twice/);
   } finally { await w.stop(); }
 });
 
@@ -503,6 +684,38 @@ test('e2e no commits: card released with a note naming the reason and the log, o
     assert.equal(t.outcomes[0].state, 'failed');
     assert.doesNotMatch(w.read('gh.args'), /^pr (create|view)/m, 'no PR');
     assert.equal(w.g(w.proj, 'branch', '--list', 'dasks/*').trim(), '', 'the empty branch is deleted');
+  } finally { await w.stop(); }
+});
+
+test('e2e human step: the rest is built, one card note per skipped step, the PR and the card say it is not done', async () => {
+  const w = await world({ FAKE_AGENT: 'humanstep' });
+  try {
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    const t = await w.get();
+    assert.equal(t.status, 'review', r.out);
+    assert.equal(w.g(w.bare, 'show', 'dasks/beta.t-build:src/a/built.txt').trim(), 'hi', 'the rest of the card was built');
+    assert.deepEqual(t.activity.map((a: any) => a.note).filter((n: string) => n?.startsWith('HUMAN-STEP:')), ['HUMAN-STEP: Sign the release build -- needs your certificate', 'HUMAN-STEP: Buy the domain -- costs money']);
+    assert.match(w.read('gh.args'), /Not done, skipped for you to do:\n- Sign the release build: needs your certificate\n- Buy the domain: costs money/);
+    assert.match(t.summary, /Not done: 2 skipped step\(s\) wait for you/);
+    assert.match(t.body, /Do the 2 step\(s\) the runner skipped/);
+    assert.equal(w.state().running[w.card], undefined, 'the record is gone once the board confirmed');
+  } finally { await w.stop(); }
+});
+
+test('e2e human step: a card that is only the human step is never built: its step is noted, no PR, blocked on the user at the retry cap', async () => {
+  const w = await world({ FAKE_AGENT: 'humanonly' });
+  try {
+    assert.equal((await w.runner('--once')).status, 0);
+    const first = await w.get();
+    assert.equal(first.status, 'todo');
+    assert.match(first.body, /no commits \(RESULT: stopped needs the human: Sign the release build\)/);
+    assert.equal((await w.runner('--once')).status, 0);
+    const t = await w.get();
+    assert.equal(t.status, 'blocked-on-user', JSON.stringify(t.outcomes));
+    assert.match(t.needs_user, /needs the human: Sign the release build/);
+    assert.ok(t.activity.some((a: any) => a.note?.startsWith('HUMAN-STEP: Sign the release build')), 'the step reaches the summary');
+    assert.doesNotMatch(w.read('gh.args'), /^pr (create|view)/m, 'no PR');
   } finally { await w.stop(); }
 });
 
@@ -567,6 +780,21 @@ test('e2e PR-first: a repo over runner.pr_limit starts no new card and says why;
     assert.match(w.read('gh.args'), /^pr list --state open/m);
     const st = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(ROOT, 'src/cli/runner.ts'), '--status'], { env: { ...process.env, HOME: w.home }, encoding: 'utf8' });
     assert.match(st.stdout, /held: PR-first: 11 open PRs/);
+  } finally { await w.stop(); }
+});
+
+test('e2e version mode: a card outside the goal\'s target is skipped with the reason; --status shows it', async () => {
+  const w = await world({ VERSION_TARGET: 'beta.m2' });
+  try {
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /beta\.t-build: skipped: not in version beta\.m2/);
+    assert.equal(w.read('claude.args'), '', 'no build started');
+    const t = await w.get();
+    assert.equal(t.status, 'todo');
+    assert.equal(t.claimed_by, '');
+    const st = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(ROOT, 'src/cli/runner.ts'), '--status'], { env: { ...process.env, HOME: w.home }, encoding: 'utf8' });
+    assert.match(st.stdout, /held: version: beta starts only beta\.m2; 1 other card\(s\) wait/);
   } finally { await w.stop(); }
 });
 
@@ -636,7 +864,7 @@ test('e2e: off unless enabled; a project without a repo is skipped with one line
   } finally { await w.stop(); }
 });
 
-test('e2e crash with commits: the attempt fails, no PR, the commits stay on the branch for the next attempt', async () => {
+test('e2e crash with commits: the attempt fails, no PR, the commits stay on the branch and go to origin for the next attempt', async () => {
   const w = await world({ FAKE_AGENT: 'crash' });
   try {
     const r = await w.runner('--once');
@@ -644,6 +872,7 @@ test('e2e crash with commits: the attempt fails, no PR, the commits stay on the 
     const t = await w.get();
     assert.equal(t.status, 'todo', r.out);
     assert.match(t.body, /gave the card back: the agent exited 3 with 1 new commit\(s\)/);
+    assert.match(t.body, /Work saved: branch dasks\/beta\.t-build on origin @ /, 'its commits went to origin too');
     assert.equal(t.outcomes.length, 1);
     assert.ok(t.outcomes[0].run_id, 'the outcome names its run');
     assert.doesNotMatch(w.read('gh.args'), /^pr (create|view)/m, 'no PR for a failed attempt');
@@ -661,6 +890,92 @@ test('e2e without gitleaks: the card is built but nothing is pushed', async () =
     assert.match(t.body, /gitleaks is not installed/);
     assert.doesNotMatch(w.read('gh.args'), /^pr (create|view)/m, 'no PR');
     assert.throws(() => w.g(w.bare, 'rev-parse', '--verify', 'dasks/beta.t-build'), 'nothing pushed');
+  } finally { await w.stop(); }
+});
+
+test('e2e stopped build: uncommitted edits become a WIP commit on origin, a secret-shaped file stays out, the note says where', async () => {
+  const w = await world({ FAKE_AGENT: 'dirtyhang' });
+  try {
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    const t = await w.get();
+    assert.equal(t.status, 'todo');
+    assert.equal(t.claimed_by, '');
+    assert.match(t.body, /gave the card back: timeout: /);
+    const tip = w.g(w.bare, 'rev-parse', 'dasks/beta.t-build').trim();
+    assert.ok(t.body.includes(`Work saved: branch dasks/beta.t-build on origin @ ${tip.slice(0, 7)}, with a WIP commit`), t.body);
+    assert.match(t.outcomes[0].note, /Work saved: branch dasks\/beta\.t-build on origin/);
+    assert.match(w.g(w.bare, 'log', '-1', '--format=%s', tip), /^beta\.t-build: wip: .*timeout/);
+    assert.deepEqual(w.g(w.bare, 'ls-tree', '-r', '--name-only', tip).trim().split('\n'), ['README.md', 'src/a/half.txt']);
+    assert.ok(w.read('gitleaks.args').includes(`--log-opts origin/main..${tip}`), 'the scan read the WIP commit before the push');
+    assert.equal(w.g(w.bare, 'rev-parse', 'main').trim(), w.mainBefore, 'the default branch never moves');
+    assert.doesNotMatch(w.read('gh.args'), /^pr (create|view)/m, 'no PR for WIP');
+    assert.deepEqual(w.state().running, {});
+  } finally { await w.stop(); }
+});
+
+test('e2e gitleaks finding: nothing is pushed, the note says so, the changes wait on a local ref off the branch', async () => {
+  const w = await world({ FAKE_AGENT: 'dirty' });
+  try {
+    fs.writeFileSync(path.join(w.fake, 'leak'), '');
+    await w.runner('--once');
+    const t = await w.get();
+    assert.equal(t.status, 'todo');
+    assert.match(t.body, /Work not pushed: gitleaks flagged the new commits \(or failed\), so nothing left this Mac/);
+    const kept = /kept only on testbox, at (refs\/dasks\/kept\/\S+), off the branch/.exec(t.body)?.[1];
+    assert.ok(kept, t.body);
+    assert.equal(w.g(w.bare, 'for-each-ref', 'refs/heads/dasks').trim(), '', 'nothing on origin');
+    assert.equal(w.g(w.proj, 'show', `${kept}:src/a/half.txt`).trim(), 'half');
+    assert.equal(w.g(w.proj, 'branch', '--list', 'dasks/*').trim(), '', 'the flagged commit is not on the branch the next run would take');
+  } finally { await w.stop(); }
+});
+
+test('e2e without gitleaks: a stopped build pushes nothing, says so, and keeps the WIP commit on the local branch', async () => {
+  const w = await world({ FAKE_AGENT: 'dirty', NO_GITLEAKS: '1' });
+  try {
+    await w.runner('--once');
+    const t = await w.get();
+    assert.match(t.body, /Work not pushed: gitleaks is not installed\. 1 commit\(s\) stay on local branch dasks\/beta\.t-build on testbox, the last one a WIP commit/);
+    assert.equal(w.g(w.bare, 'for-each-ref', 'refs/heads/dasks').trim(), '');
+    assert.equal(w.g(w.proj, 'show', 'dasks/beta.t-build:src/a/half.txt').trim(), 'half');
+  } finally { await w.stop(); }
+});
+
+test('e2e continue: the next run, from another clone, starts on the saved branch and its prompt says so', async () => {
+  const w = await world({ FAKE_AGENT: 'dirty' });
+  try {
+    await w.runner('--once');
+    const saved = w.g(w.bare, 'rev-parse', 'dasks/beta.t-build').trim();
+    const other = path.join(w.tmp, 'other-clone');
+    w.g(w.tmp, 'clone', '-q', w.bare, other);
+    w.config((c) => { c.projects[0].repo = other; });
+    fs.writeFileSync(path.join(w.fake, 'mode'), 'resume');
+    fs.rmSync(path.join(w.fake, 'claude.args'));
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /continuing from origin's dasks\/beta\.t-build/);
+    assert.equal(w.read('resume.files').trim(), 'half.txt', 'the saved edits were in the worktree when the agent started');
+    assert.match(w.read('resume.log'), /^beta\.t-build: wip: /m);
+    assert.ok(w.read('claude.args').includes(`You are continuing: an earlier run of this card stopped before it finished and this worktree starts from its work (origin's dasks/beta.t-build @ ${saved.slice(0, 7)})`));
+    const t = await w.get();
+    assert.equal(t.status, 'review', r.out);
+    w.g(w.bare, 'merge-base', '--is-ancestor', saved, 'dasks/beta.t-build');   // a fast-forward, not a rewrite
+    assert.match(w.g(w.bare, 'log', '-1', '--format=%s', 'dasks/beta.t-build'), /^card: finish/);
+  } finally { await w.stop(); }
+});
+
+test('e2e failed save: a push that cannot work still hands the card back, and the note says the work is local', async () => {
+  const w = await world({ FAKE_AGENT: 'dirtybroken' });
+  try {
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    const t = await w.get();
+    assert.equal(t.status, 'todo');
+    assert.equal(t.claimed_by, '');
+    assert.equal(t.outcomes.length, 1);
+    assert.match(t.body, /Work not pushed: git push failed .*1 commit\(s\) stay on local branch dasks\/beta\.t-build on testbox/);
+    assert.equal(w.g(w.proj, 'show', 'dasks/beta.t-build:src/a/half.txt').trim(), 'half');
+    assert.deepEqual(w.state().running, {});
   } finally { await w.stop(); }
 });
 

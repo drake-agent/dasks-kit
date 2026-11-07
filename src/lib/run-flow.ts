@@ -1,5 +1,5 @@
-// One card run of the runner, as one state flow: claim -> recovery record -> worktree -> build -> review -> fix -> scan,
-// push, draft PR -> hand back. Every way out goes through settle(): the outcome (when the attempt counts) is recorded
+// One card run of the runner, as one state flow: claim -> recovery record -> worktree -> build -> review pass 1 -> fix ->
+// review pass 2 -> scan, push, draft PR -> hand back (and a block when pass 2 is not clean). Every way out goes through settle(): the outcome (when the attempt counts) is recorded
 // for this run before the claim is released, the release names the run so it cannot touch a later one, and the
 // recovery record stays until the board has confirmed it. Nothing here assumes one machine: the board URL, the machine
 // name and the token come from the caller (the stored connection).
@@ -8,11 +8,14 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
-  agentCommand, agentText, attemptVerdict, blocking, continuePrompt, countStart, fixPrompt, RATE_LIMITED, resultLine, reviewFindings, reviewPrompt, runnerRules,
+  agentCommand, agentText, attemptVerdict, continuePrompt, countStart, fixPrompt, prBody, RATE_LIMITED, readCodeReview, recheckPrompt, resumeLine, resultLine, reviewPrompt, runnerRules, withFollowUps,
   type HistoryRow, type Picked, type RunnerConfig, type RunnerState, type RunRecord, type Tool,
 } from './runner.ts';
+import { REVIEW_PASSES } from './review-runs.ts';
 import { supervise, worktreeStamp, type Supervised } from './supervise.ts';
+import { humanStepLine, humanStepsOf, mergeHumanSteps } from './human-steps.ts';
 import { closeRepoView, openRepoView, repoSource, specLoop, TOOL_NAME as SPEC_TOOL_NAME, type AgentRun } from './spec-flow.ts';
+import { originRef, pickStart, pushableBranch, saveWork } from './keep-work.ts';
 import { SPEC_RETRIES, type SpecPicked } from './runner.ts';
 
 export class BoardError extends Error {
@@ -80,49 +83,90 @@ function history(env: FlowEnv, card: string, r: RunRecord, outcome: HistoryRow['
   });
 }
 
-/** Give the card back for one failed or stopped attempt. Order matters: the outcome of THIS run first (it counts toward
- *  the retry cap only when `count`), then a release that names the run. If the board cannot be reached, the record stays
- *  with `pending` and the next look or a restart tries again. Returns true when the board confirmed. */
+/** Give the card back for one failed or stopped attempt. Order matters: the build's work is saved first (keep-work.ts;
+ *  once per run, and whatever happens to it the card still goes back), then the outcome of THIS run (it counts toward the
+ *  retry cap only when `count`), then a release that names the run. Both carry where the work is. If the board cannot be
+ *  reached, the record stays with `pending` and the next look or a restart tries again. Returns true when the board
+ *  confirmed. */
 export async function settle(env: FlowEnv, card: string, r: RunRecord, reason: string, count: boolean, outcome: HistoryRow['outcome'] = count ? 'released' : 'error'): Promise<boolean> {
   env.update((s) => { if (s.running[card]) Object.assign(s.running[card], { phase: 'releasing', pending: { reason, count } }); });
+  if (r.saved === undefined && r.kind !== 'spec' && r.repo && r.base) {
+    // A run that lost the card (a runner back from the dead, say) leaves the branch to the run that holds it now.
+    const now = await env.api('GET', `/api/tasks/${card}?log=0`).catch(() => null);
+    const lost = now?.run_id && r.run_id && now.run_id !== r.run_id;
+    r.saved = lost ? '' : await saveWork({ repo: r.repo, dir: r.dir, branch: r.branch, base: r.base, card, machine: r.machine, reason, gitleaks: env.which('gitleaks') });
+    const saved = r.saved;
+    env.update((s) => { if (s.running[card]) s.running[card].saved = saved; });
+    if (saved) env.log(`${card}: ${saved}`);
+  }
+  const where = r.saved ? ` ${r.saved}` : '';
   if (count) {
     try {
-      await env.api('POST', `/api/tasks/${card}/outcome`, { state: 'failed', note: oneLine(`runner: ${reason}`, 1000), evidence: [r.log], job: r.job, run_id: r.run_id, attempt: r.attempt });
+      await env.api('POST', `/api/tasks/${card}/outcome`, { state: 'failed', note: `${oneLine(`runner: ${reason}`, 600)}${where}`, evidence: [r.log], job: r.job, run_id: r.run_id, attempt: r.attempt });
     } catch (e: any) {
       if (!(e instanceof BoardError) || e.status >= 500) { env.log(`${card}: outcome not recorded yet (${e.message}); will retry`); return false; }
       env.log(`${card}: outcome refused: ${e.message}`);
     }
   }
   try {
-    await env.api('POST', `/api/tasks/${card}/release`, { run_id: r.run_id, note: `claim: #${r.job} closed (runner: ${oneLine(reason, 200)}). The runner gave the card back: ${oneLine(reason, 400)}. Log: ${r.log}` });
+    await env.api('POST', `/api/tasks/${card}/release`, { run_id: r.run_id, note: `claim: #${r.job} closed (runner: ${oneLine(reason, 200)}). The runner gave the card back: ${oneLine(reason, 400)}.${where} Log: ${r.log}` });
   } catch (e: any) {
     if (e instanceof BoardError && e.status === 409 && e.body?.rule === 'run') env.log(`${card}: already on another run; nothing to release`);
     else if (e instanceof BoardError && e.status < 500) env.log(`${card}: release refused: ${e.message}`);
     else { env.log(`${card}: release failed (${e.message}); will retry`); return false; }
   }
-  // Commits stay on the branch for the next attempt; only a branch with nothing beyond its base is deleted.
+  // Commits stay on the local branch too; only a branch with nothing beyond its base is deleted.
   if (r.kind === 'spec') { if (r.dir) closeRepoView(r.repo, r.dir); }
   else if (r.repo && r.dir) {
     removeWorktree(r.repo, r.dir);
     if (r.base && commitsAfter(r.repo, r.base, r.branch) === 0) gitOk(r.repo, 'branch', '-D', r.branch);
   }
   env.log(`${card}: released (${reason})${count ? '; attempt counted' : ''}`);
-  history(env, card, r, outcome, reason);
+  history(env, card, r, outcome, `${oneLine(reason, 150)}${where}`);
   return true;
 }
 
-/** The hand-back after the draft PR is open: card to review with its context, claim closed, released. */
-export async function handBack(env: FlowEnv, card: string, r: RunRecord, pr: string, title: string, summary: string, reviewNote: string, open: string[]): Promise<boolean> {
-  env.update((s) => { if (s.running[card]) Object.assign(s.running[card], { phase: 'handing-back', handback: { pr, title, summary, review_note: reviewNote, open } }); });
+/** Not clean after the last pass: Spec block with the open findings and a message to the user. Safe to repeat: a card
+ *  already blocked is left as it is, and the message has one request id per run. */
+async function blockAtLimit(env: FlowEnv, card: string, r: RunRecord, pr: string, open: string[]): Promise<void> {
+  const findings = oneLine(open.join(' | '), 800);
+  const t = await env.api('GET', `/api/tasks/${card}?log=0`);
+  if (t?.spec_state !== 'blocked') {
+    let sp: any = null;
+    try { sp = await env.api('GET', `/api/tasks/${card}/spec`); } catch (e: any) { if (!(e instanceof BoardError) || e.status !== 404) throw e; }
+    await env.api('POST', `/api/tasks/${card}/spec/block`, {
+      expected_version: Number(t?.version ?? 0), expected_spec_version: Number(sp?.metadata?.version ?? 0),
+      block_note: oneLine(`NEEDS-SPEC (${env.actor}): not clean after ${REVIEW_PASSES} review passes: ${findings}`, 1000),
+    });
+  }
+  await env.api('POST', `/api/tasks/${card}/messages`, {
+    text: oneLine(`Review of ${card} is not clean after ${REVIEW_PASSES} passes; ${pr} stays a draft and the card is blocked. Open: ${findings}`, 1000),
+    to: 'user', kind: 'heads-up', request_id: `review-limit-${r.run_id}`.slice(0, 64),
+  });
+}
+
+/** The hand-back after the draft PR is open: card to review with its context, claim closed, released. Each skipped step
+ *  (`skipped`: HUMAN-STEP lines) gets a card note first. `blocked`: the review
+ *  stopped at the pass limit, so the card is also blocked and the user told. A retry may note a step twice; the summary
+ *  lists it once. */
+export async function handBack(env: FlowEnv, card: string, r: RunRecord, pr: string, title: string, summary: string, reviewNote: string, open: string[], blocked = false, skipped: string[] = []): Promise<boolean> {
+  env.update((s) => { if (s.running[card]) Object.assign(s.running[card], { phase: 'handing-back', handback: { pr, title, summary, review_note: reviewNote, open, blocked, skipped } }); });
   const tool = TOOL_NAME[r.tool];
+  try {
+    for (const note of skipped) await env.api('POST', `/api/tasks/${card}`, { note });
+  } catch (e: any) {
+    if (!(e instanceof BoardError) || e.status >= 500) { env.log(`${card}: PR ${pr} is open but a skipped step was not noted (${e.message}); will retry`); return false; }
+    env.log(`${card}: the board refused a skipped-step note: ${e.message}`);
+  }
+  const left = skipped.length ? `Do the ${skipped.length} step(s) the runner skipped (the card's HUMAN-STEP notes and the PR body). ` : '';
   try {
     await env.api('POST', `/api/tasks/${card}/finish`, {
       status: 'review', pr, pr_summary: `Draft PR for ${card}: ${summary}`, result: `runner (${r.tool}): PR ${pr}`, note: reviewNote,
-      summary: [`Runner build by ${tool}: ${summary}`, `Review: ${oneLine(reviewNote, 200)}`, `Draft PR: ${pr}`].join('\n'),
+      summary: [`Runner build by ${tool}: ${summary}`, `Review: ${oneLine(reviewNote, 190)}`, `Draft PR: ${pr}`, ...(left ? [`Not done: ${skipped.length} skipped step(s) wait for you`] : [])].join('\n'),
       what: `A draft PR for this card is open: ${title}`,
       why: `The runner built the card with ${tool}; ${oneLine(reviewNote, 200)}`,
-      do: 'Read the PR and its checks; merge it or ask for changes',
-      rec: open.length ? 'Check the P0/P1 findings listed in the PR body before merging' : 'Merge when the checks are green and the diff looks right',
+      do: blocked ? 'Read the open findings in the PR body, fix the spec or the design, then unblock the card' : `${left}Read the PR and its checks; merge it or ask for changes`,
+      rec: blocked ? `Do not merge: the review is not clean after ${REVIEW_PASSES} passes and gets no third pass` : open.length ? 'Check the findings listed in the PR body before merging' : 'Merge when the checks are green and the diff looks right',
       after: `After the merge, mark the card done (dask done ${card} --pr <url>)`,
     });
   } catch (e: any) {
@@ -130,6 +174,12 @@ export async function handBack(env: FlowEnv, card: string, r: RunRecord, pr: str
     env.log(`${card}: PR ${pr} is open but the board refused the move: ${e.message}`);
     history(env, card, r, 'error', `board: ${e.message}`, pr);
     return true;
+  }
+  if (blocked) {
+    try { await blockAtLimit(env, card, r, pr, open); } catch (e: any) {
+      if (!(e instanceof BoardError) || e.status >= 500) { env.log(`${card}: blocking at the review limit failed (${e.message}); will retry`); return false; }
+      env.log(`${card}: the board refused the block at the review limit: ${e.message}`);
+    }
   }
   try {
     await env.api('POST', `/api/tasks/${card}/release`, { run_id: r.run_id, note: `claim: #${r.job} closed (runner: review, ${pr}). The runner opened a draft PR and handed the card back for your review. Log: ${r.log}` });
@@ -142,19 +192,24 @@ export async function handBack(env: FlowEnv, card: string, r: RunRecord, pr: str
   return true;
 }
 
+/** The review passes stored for a card, oldest first; null when the board cannot say, so no pass may start. */
+export async function storedPasses(env: Pick<FlowEnv, 'api' | 'log'>, card: string): Promise<any[] | null> {
+  try { return (await env.api('GET', `/api/tasks/${card}/review-runs`))?.passes ?? []; }
+  catch (e: any) {
+    if (e instanceof BoardError && e.status === 404) return [];
+    env.log(`${card}: review passes not read (${oneLine(e.message, 200)})`);
+    return null;
+  }
+}
+
 /** The cross-model review as a board review-run row for the head it read, sent as <reviewer>@<machine> so the board
  *  records the reviewer's family itself (docs/captain.md: the captain merges only a head with a clean row whose reviewer
- *  is not a builder and of another family). The next free pass 1-3; past 3 nothing is recorded. Best effort: a failure
- *  is logged and the run goes on. */
-export async function recordReview(env: FlowEnv, card: string, r: RunRecord, builder: Tool, reviewer: Tool, model: string, text: string, open: number, noted: number, clean: boolean): Promise<void> {
+ *  is not a builder and of another family). Best effort: a failure is logged and the run goes on. */
+export async function recordReview(env: FlowEnv, card: string, r: RunRecord, pass: number, builder: Tool, reviewer: Tool, model: string, text: string, open: number, noted: number, clean: boolean): Promise<void> {
   try {
-    const passes: any[] = (await env.api('GET', `/api/tasks/${card}/review-runs`))?.passes ?? [];
-    const used = new Set(passes.map((x) => x.pass));
-    const pass = [1, 2, 3].find((n) => !used.has(n) && [1, 2, 3].filter((k) => k < n).every((k) => used.has(k)));
-    if (!pass) { env.log(`${card}: review not recorded (passes 1-3 are used)`); return; }
     const answer = text.length > 200_000 ? text.slice(-200_000) : text;
     await env.api('POST', `/api/tasks/${card}/review-runs`, {
-      pass, head: git(r.dir, 'rev-parse', 'HEAD'), base: r.base, merge_base: git(r.dir, 'merge-base', r.base, 'HEAD'), tier: 'normal', mode: pass === 3 ? 'narrow' : 'simple',
+      pass, head: git(r.dir, 'rev-parse', 'HEAD'), base: r.base, merge_base: git(r.dir, 'merge-base', r.base, 'HEAD'), tier: 'normal', mode: 'simple',
       reviewer: reviewer === 'claude' ? `claude ${model}`.trim() : 'codex', impl: builder, verdict: clean ? 'clean' : 'open', open: clean ? 0 : Math.max(open, 1), noted,
       at: new Date().toISOString(), log_sha256: createHash('sha256').update(Buffer.from(answer, 'utf8')).digest('hex'), answer,
     }, `${reviewer}@${env.machine}`);
@@ -175,6 +230,82 @@ async function phase(env: FlowEnv, card: string, r: RunRecord, cfg: RunnerConfig
   const res = await agent.done;
   env.track(card, null);
   return { ...res, text: agentText(res.raw) };
+}
+
+interface ReviewResult { note: string; open: string[]; followUps: string[]; blocked: boolean; fixTexts: string[] }
+
+/** A PR left by an earlier attempt: its follow-ups are brought up to date, and a card stopped at the review limit puts
+ *  it back to draft. False when that draft step failed: the card must not be handed back as a draft. A failed edit of the
+ *  follow-ups is only logged. */
+function updateOpenPr(env: FlowEnv, card: string, dir: string, pr: string, rv: ReviewResult): boolean {
+  const gh = (...args: string[]) => spawnSync('gh', args, { cwd: dir, encoding: 'utf8', timeout: 60_000 });
+  if (rv.blocked) {
+    const undo = gh('pr', 'ready', pr, '--undo');
+    if (undo.status !== 0) { env.log(`${card}: ${pr} not put back to draft: ${oneLine(undo.stderr || undo.stdout || String(undo.error), 200)}`); return false; }
+  }
+  if (!rv.followUps.length) return true;
+  const body = gh('pr', 'view', pr, '--json', 'body', '-q', '.body');
+  const edit = body.status === 0 ? gh('pr', 'edit', pr, '--body', withFollowUps(body.stdout, rv.followUps)) : body;
+  if (edit.status !== 0) env.log(`${card}: follow-ups not added to ${pr}: ${oneLine(edit.stderr || edit.stdout || String(edit.error), 200)}`);
+  return true;
+}
+
+/** The cross-model review: pass 1 on the whole change, one fix, pass 2 on the findings and the fixes. Passes already on
+ *  the board count (an earlier attempt of the card). Not clean after the last pass: `blocked`, and no further review.
+ *  Null when the run was settled here. */
+async function reviewStage(env: FlowEnv, card: string, r: RunRecord, cfg: RunnerConfig, tool: Tool, session: string, logFile: string, save: (p: Partial<RunRecord>) => void): Promise<ReviewResult | null> {
+  const reviewer: Tool = tool === 'claude' ? 'codex' : 'claude';
+  const out: ReviewResult = { note: `no cross-model review (${reviewer} is not installed)`, open: [], followUps: [], blocked: false, fixTexts: [] };
+  if (!env.which(reviewer)) return out;
+  const stored = await storedPasses(env, card);
+  if (!stored) { await settle(env, card, r, 'the board did not say which review passes are used, so no review ran', false); return null; }
+  const reads = stored.map((p) => readCodeReview(String(p.answer ?? '')));
+  const last = stored[stored.length - 1];
+  let previous = reads.at(-1)?.blockers.map((f) => f.line) ?? [];
+  let since = last ? String(last.head ?? '') : '';
+  out.followUps = [...new Set(reads.flatMap((x) => x.followUps.map((f) => f.line)))];
+  if (stored.length >= REVIEW_PASSES) {
+    if (last.verdict === 'clean' && last.head === git(r.dir, 'rev-parse', 'HEAD')) return { ...out, note: `${TOOL_NAME[reviewer]} review: already clean at this head` };
+    return { ...out, note: `no review of this head: its ${REVIEW_PASSES} passes are used`, open: previous.length ? previous : ['this head has no clean review'], blocked: true };
+  }
+  const notes: string[] = [];
+  for (let pass = stored.length + 1; pass <= REVIEW_PASSES; pass++) {
+    if (env.stopping()) return out;
+    save({ phase: 'reviewing' });
+    const prompt = pass === 1 ? reviewPrompt(card, r.base, tool) : recheckPrompt(card, r.base, tool, previous, since);
+    const rlog = logFile.replace(/\.log$/, `.review-${pass}.log`);
+    const run = await phase(env, card, r, cfg, reviewer, agentCommand(reviewer, 'review', { model: cfg.model, prompt, dir: r.dir, session: randomUUID() }), rlog);
+    if (run.stopped) { await settle(env, card, r, env.stopping() ? 'the runner was stopped' : `timeout during the review: ${run.stopped}`, !env.stopping()); return null; }
+    const read = readCodeReview(run.text);
+    if (run.code !== 0 && !read.findings.length && !read.verdict) {
+      out.note = [...notes, `the ${TOOL_NAME[reviewer]} review did not finish (pass ${pass}, exit ${run.code}; log ${rlog})`].join('; ');
+      env.log(`${card}: ${out.note}`);
+      if (pass < REVIEW_PASSES) return { ...out, open: previous };
+      // The last pass gave no answer: it still counts, and the head has no clean review.
+      await recordReview(env, card, r, pass, tool, reviewer, cfg.model, run.text, previous.length, 0, false);
+      return { ...out, open: previous.length ? previous : [`review pass ${pass} gave no answer`], blocked: true };
+    }
+    const bad = read.blockers.map((f) => f.line);
+    out.followUps = [...new Set([...out.followUps, ...read.followUps.map((f) => f.line)])];
+    notes.push(`${TOOL_NAME[reviewer]} review pass ${pass}: ${bad.length} blocking, ${read.followUps.length} follow-up(s)`);
+    out.note = notes.join('; ');
+    env.log(`${card}: ${out.note}`);
+    await recordReview(env, card, r, pass, tool, reviewer, cfg.model, run.text, bad.length, read.followUps.length, read.clean);
+    if (read.clean) return { ...out, open: [] };
+    const left = bad.length ? bad : ['the reviewer did not say clean and listed nothing that blocks'];
+    if (pass === REVIEW_PASSES) return { ...out, open: left, blocked: true };
+    if (!bad.length) return { ...out, open: left };   // nothing to fix, so a second pass would read the same head
+    previous = bad;
+    since = git(r.dir, 'rev-parse', 'HEAD');
+    save({ phase: 'fixing' });
+    const before = commitsAfter(r.repo, r.start_sha, r.branch);
+    const fx = await phase(env, card, r, cfg, tool, agentCommand(tool, 'fix', { model: cfg.model, prompt: fixPrompt(card, r.branch, bad), dir: r.dir, session, resume: true }), logFile.replace(/\.log$/, '.fix.log'));
+    if (fx.stopped) { await settle(env, card, r, env.stopping() ? 'the runner was stopped' : `timeout during the fix pass: ${fx.stopped}`, !env.stopping()); return null; }
+    out.fixTexts.push(fx.text);
+    notes.push(`fix by ${TOOL_NAME[tool]} (exit ${fx.code}, ${commitsAfter(r.repo, r.start_sha, r.branch) - before} new commit(s))`);
+    out.open = bad;
+  }
+  return out;
 }
 
 export async function runCard(env: FlowEnv, p: Picked, cfg: RunnerConfig, title: string): Promise<void> {
@@ -202,13 +333,21 @@ export async function runCard(env: FlowEnv, p: Picked, cfg: RunnerConfig, title:
   env.log(`${card}: claimed as ${env.actor} (run ${r.run_id}, attempt ${r.attempt}); ${tool} builds in ${dir}; log ${logFile}`);
   const save = (patch: Partial<RunRecord>) => { Object.assign(r, patch); env.update((s) => { if (s.running[card]) Object.assign(s.running[card], patch); }); };
 
+  let resume = '';
   try {
     gitOk(repo, 'fetch', '-q', 'origin');
     const base = defaultBase(repo);
     fs.mkdirSync(env.worktreesDir, { recursive: true });
     removeWorktree(repo, dir);
-    if (gitOk(repo, 'rev-parse', '-q', '--verify', `refs/heads/${branch}`)) git(repo, 'worktree', 'add', dir, branch);
-    else git(repo, 'worktree', 'add', '-b', branch, dir, base);
+    // An earlier attempt's saved branch, here or on origin, is the start; docs/runner.md "Stopped builds keep their work".
+    const start = await pickStart(repo, branch, base, card);
+    if (start.aside) env.log(`${card}: an earlier local tip of ${branch} is not part of this run's start; kept at ${start.aside}`);
+    if (start.from === 'local') git(repo, 'worktree', 'add', dir, branch);
+    else git(repo, 'worktree', 'add', '-B', branch, dir, start.from === 'origin' ? originRef(branch) : base);
+    if (start.from !== 'base') {
+      resume = resumeLine(branch, start.from, start.sha, base);
+      env.log(`${card}: continuing from ${start.from === 'origin' ? 'origin\'s' : 'the local'} ${branch} @ ${start.sha.slice(0, 7)}`);
+    }
     save({ base, start_sha: git(dir, 'rev-parse', 'HEAD'), phase: 'worktree' });
   } catch (e: any) {
     fs.appendFileSync(logFile, `worktree: ${e.message}\n`);
@@ -221,7 +360,7 @@ export async function runCard(env: FlowEnv, p: Picked, cfg: RunnerConfig, title:
     fs.appendFileSync(logFile, why + '\n');
     await settle(env, card, r, why, false); return;
   }
-  const prompt = `${ds.stdout.trim()}\n\n${runnerRules(card, branch, r.base)}`;
+  const prompt = `${ds.stdout.trim()}\n\n${runnerRules(card, branch, r.base)}${resume ? `\n\n${resume}` : ''}`;
   const session = randomUUID();
 
   // build
@@ -237,6 +376,7 @@ export async function runCard(env: FlowEnv, p: Picked, cfg: RunnerConfig, title:
     build = await phase(env, card, r, cfg, tool, agentCommand(tool, 'build', { model: cfg.model, prompt: continuePrompt(card, branch), dir, session, resume: true }), logFile);
   }
   const result = resultLine(build.text);
+  let humanSteps = humanStepsOf(build.text);
   const newCommits = commitsAfter(repo, r.start_sha, branch);
   env.log(`${card}: ${tool} ended (exit ${build.code}${build.stopped ? `, stopped: ${build.stopped}` : ''}); ${newCommits} new commit(s); ${result || 'no RESULT line'}`);
 
@@ -249,42 +389,21 @@ export async function runCard(env: FlowEnv, p: Picked, cfg: RunnerConfig, title:
       await settle(env, card, r, `${tool} hit a usage or rate limit; the runner waits ${cfg.backoff_min} min (until ${until})`, false, 'rate-limited');
       return;
     }
+    // A reported step is listed for the human even when the run built nothing.
+    try { for (const s of humanSteps) await env.api('POST', `/api/tasks/${card}`, { note: humanStepLine(s) }); }
+    catch (e: any) { env.log(`${card}: a human step was not noted: ${oneLine(e.message, 200)}`); }
     await settle(env, card, r, verdict.reason, true); return;
   }
 
-  // cross-model review, one fix pass for P0/P1
-  const reviewer: Tool = tool === 'claude' ? 'codex' : 'claude';
-  let reviewNote = `no cross-model review (${reviewer} is not installed)`;
-  let open: string[] = [];
-  if (env.which(reviewer)) {
-    save({ phase: 'reviewing' });
-    const rlog = logFile.replace(/\.log$/, '.review.log');
-    const rv = await phase(env, card, r, cfg, reviewer, agentCommand(reviewer, 'review', { model: cfg.model, prompt: reviewPrompt(card, r.base, tool), dir, session: randomUUID() }), rlog);
-    if (rv.stopped) { await settle(env, card, r, env.stopping() ? 'the runner was stopped' : `timeout during the review: ${rv.stopped}`, !env.stopping()); return; }
-    const findings = reviewFindings(rv.text);
-    const bad = blocking(findings);
-    reviewNote = rv.code !== 0 && !findings.length && !/VERDICT:/.test(rv.text)
-      ? `the ${TOOL_NAME[reviewer]} review did not finish (exit ${rv.code}; log ${rlog})`
-      : `${TOOL_NAME[reviewer]} review: ${findings.length} finding(s), ${bad.length} P0/P1`;
-    env.log(`${card}: ${reviewNote}`);
-    const finished = rv.code === 0 || findings.length > 0 || /VERDICT:/.test(rv.text);
-    if (finished) await recordReview(env, card, r, tool, reviewer, cfg.model, rv.text, bad.length, findings.length - bad.length, !bad.length && /VERDICT:\s*clean\b/.test(rv.text));
-    if (bad.length) {
-      save({ phase: 'fixing' });
-      const before = commitsAfter(repo, r.start_sha, branch);
-      const fx = await phase(env, card, r, cfg, tool, agentCommand(tool, 'fix', { model: cfg.model, prompt: fixPrompt(card, branch, bad.map((x) => x.line)), dir, session, resume: true }), logFile.replace(/\.log$/, '.fix.log'));
-      if (fx.stopped) { await settle(env, card, r, env.stopping() ? 'the runner was stopped' : `timeout during the fix pass: ${fx.stopped}`, !env.stopping()); return; }
-      const added = commitsAfter(repo, r.start_sha, branch) - before;
-      reviewNote += `; one fix pass by ${TOOL_NAME[tool]} (exit ${fx.code}, ${added} new commit(s), not re-reviewed)`;
-      open = bad.map((x) => x.line);
-    }
-  }
+  const rv = await reviewStage(env, card, r, cfg, tool, session, logFile, save);
+  if (!rv) return;
+  humanSteps = mergeHumanSteps([...humanSteps, ...rv.fixTexts.flatMap(humanStepsOf)]);
   if (env.stopping()) { await settle(env, card, r, 'the runner was stopped', false); return; }
 
   // secret scan, push, draft PR
   save({ phase: 'pushing' });
   const baseName = r.base.replace(/^origin\//, '');
-  if (branch === baseName || !branch.startsWith('dasks/')) { await settle(env, card, r, 'refusing to push a default branch', false); return; }
+  if (!pushableBranch(branch, r.base)) { await settle(env, card, r, 'refusing to push a default branch', false); return; }
   const gl = env.which('gitleaks');
   if (!gl) { await settle(env, card, r, 'gitleaks is not installed (brew install gitleaks); nothing was pushed', false); return; }
   const scan = spawnSync(gl, ['git', '--no-banner', '--redact', '--log-opts', `${r.base}..${branch}`, dir], { encoding: 'utf8', timeout: 180_000 });
@@ -294,10 +413,10 @@ export async function runCard(env: FlowEnv, p: Picked, cfg: RunnerConfig, title:
     git(dir, 'push', '-u', 'origin', `refs/heads/${branch}:refs/heads/${branch}`);
     const have = spawnSync('gh', ['pr', 'view', branch, '--json', 'url', '-q', '.url'], { cwd: dir, encoding: 'utf8', timeout: 60_000 });
     pr = have.status === 0 ? have.stdout.trim() : '';
-    if (!pr) {
-      const body = [result.replace(/^RESULT:\s*/, '') || `Built by ${TOOL_NAME[tool]} for ${card}.`, '', `Card: ${card} (Dasks)`, `Review: ${reviewNote}.`,
-        ...(open.length ? ['P0/P1 findings the fix pass was asked to address:', ...open.map((l) => '  ' + l)] : []), '',
-        `Opened by the Dasks runner (${env.actor}) as a draft. Merging is the user's call.`].join('\n');
+    if (pr) {
+      if (!updateOpenPr(env, card, dir, pr, rv)) { await settle(env, card, r, `${pr} could not be put back to draft`, true); return; }
+    } else {
+      const body = prBody({ summary: result.replace(/^RESULT:\s*/, '') || `Built by ${TOOL_NAME[tool]} for ${card}.`, card, note: rv.note, open: rv.open, blocked: rv.blocked, followUps: rv.followUps, skipped: humanSteps.map((s) => `${s.step}${s.why ? `: ${s.why}` : ''}`), actor: env.actor });
       const c = spawnSync('gh', ['pr', 'create', '--draft', '--base', baseName, '--head', branch, '--title', `${card}: ${title}`.slice(0, 200), '--body', body], { cwd: dir, encoding: 'utf8', timeout: 120_000 });
       if (c.status !== 0) throw new Error(`gh pr create: ${oneLine(c.stderr || c.stdout || String(c.error), 300)}`);
       pr = c.stdout.trim().split('\n').pop() ?? '';
@@ -308,7 +427,7 @@ export async function runCard(env: FlowEnv, p: Picked, cfg: RunnerConfig, title:
     await settle(env, card, r, `push or PR failed: ${e.message}`, false); return;
   }
   const summary = oneLine(result.replace(/^RESULT:\s*/, '') || `${commitsAfter(repo, r.base, branch)} commit(s) by ${TOOL_NAME[tool]}`, 300);
-  await handBack(env, card, r, pr, title, summary, reviewNote, open);
+  await handBack(env, card, r, pr, title, summary, rv.note, rv.open, rv.blocked, humanSteps.map(humanStepLine));
 }
 
 

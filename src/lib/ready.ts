@@ -15,7 +15,7 @@ export function depsOf(t: Pick<Task, 'depends_on'>): string[] {
   return String(t.depends_on ?? '').split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
 }
 
-export interface ReadyItem { id: string; title: string; goal: string; priority: string; lane: string; kind: string; owner: string; unblocks: number; unblocks_direct: number; depends_on: string[]; missing_ignored?: string[]; pushed?: Push; push_note?: string; spec_state?: string; spec_by?: string | null; milestone?: string }
+export interface ReadyItem { id: string; title: string; goal: string; priority: string; lane: string; kind: string; owner: string; unblocks: number; unblocks_direct: number; depends_on: string[]; missing_ignored?: string[]; pushed?: Push; push_note?: string; spec_state?: string; spec_by?: string | null; milestone?: string; version_target?: string }
 /** Spec state and the current spec's writer of one task (lib/spec-state.ts). */
 export type SpecInfo = (t: Task) => { spec_state: string; spec_by: string | null };
 export interface BlockedItem { id: string; title: string; waiting_on: string[]; missing: string[]; cancelled: string[] }
@@ -33,7 +33,7 @@ export function doingAgeHours(t: Pick<Task, 'started_at' | 'claimed_at' | 'claim
   return Number.isFinite(at) ? Math.max(0, (now.getTime() - at) / 3600_000) : taskAgeHours(t, now);
 }
 
-export function readyQueue(board: Pick<Board, 'tasks'>, opts: { goal?: string[] | null; limit?: number; now?: Date; missing_hours?: number; spec?: SpecInfo; requireSpecReady?: boolean } = {}): { ready: ReadyItem[]; blocked: BlockedItem[]; cycles: string[] } {
+export function readyQueue(board: Pick<Board, 'tasks'>, opts: { goal?: string[] | null; limit?: number; now?: Date; missing_hours?: number; spec?: SpecInfo; requireSpecReady?: boolean; versionTargets?: ReadonlyMap<string, string> } = {}): { ready: ReadyItem[]; blocked: BlockedItem[]; cycles: string[] } {
   const now = opts.now ?? new Date();
   const missingHours = opts.missing_hours ?? DEFAULT_STUCK.missing_hours;
   const byId = new Map(board.tasks.map((t) => [t.id, t]));
@@ -76,7 +76,7 @@ export function readyQueue(board: Pick<Board, 'tasks'>, opts: { goal?: string[] 
     ready.push({ id: t.id, title: t.title, goal: t.goal, priority: t.priority, lane: t.lane, kind: t.kind, owner: t.owner, unblocks: reach(t.id).size, unblocks_direct: (rev.get(t.id) ?? []).length, depends_on: deps,
       ...(missingIgnored.length ? { missing_ignored: missingIgnored } : {}),
       ...(push ? { pushed: push, push_note: pushMarker(push) } : {}), ...(spec ?? {}),
-      milestone: t.milestone });
+      milestone: t.milestone, ...(opts.versionTargets?.has(t.goal) ? { version_target: opts.versionTargets.get(t.goal) } : {}) });
   }
   const created = (id: string) => byId.get(id)?.created ?? '';
   const pushAt = (r: ReadyItem) => (r.pushed ? Date.parse(r.pushed.at) : Infinity);

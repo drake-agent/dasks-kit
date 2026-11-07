@@ -48,18 +48,22 @@ test('content: finished in the window, what waits on the human, stuck machines a
   assert.deepEqual(s.stuck.cards.map((c) => [c.id, c.hours]), [['web.t-slow', 30]]);
   assert.deepEqual(s.failures, [{ id: 'web.t-x', at: '2026-11-03T01:00:00Z', note: 'tests failed', cause: 'infra' }]);
   assert.deepEqual([s.day, s.since, s.until], [s.day, since.toISOString(), now.toISOString()]);
+  assert.deepEqual(s.skipped, [], 'no skip notes');
   assert.match(s.text, /Finished: 1\n {2}web\.t-done {2}Done in window/);
   assert.match(s.text, /Failures: 2\n.*\[infra\] tests failed\n {2}board backup/);
 });
 
 test('server: a due summary is written on its own and read by the API and the CLI', async () => {
-  const { root, cleanup } = tempRepo([task({ id: 'beta.t-wait', status: 'blocked-on-user', needs_user: 'Pick a name', body: '\n## Context\nx\n' })]);
+  const { root, cleanup } = tempRepo([task({ id: 'beta.t-wait', status: 'blocked-on-user', needs_user: 'Pick a name', body: '\n## Context\nx\n' }), task({ id: 'beta.t-skip', status: 'review', body: '\n## Context\nx\n' })]);
+  fs.mkdirSync(path.join(root, 'data/activity/beta'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'data/activity/beta/t-skip.jsonl'), JSON.stringify({ at: '2026-10-20T01:00:00Z', actor: 'runner@one', action: 'note', note: 'HUMAN-STEP: Log in -- yours' }) + '\n');
   const srv = await serve(root, { DASKS_SUMMARY_TICK_MS: '300' }, undefined, { summary: { at: '00:00' } });
   try {
     let r: any;
     await until(async () => { r = await (await fetch(srv.url + '/api/summary')).json(); return !!r.summary; }, 10000);
     assert.equal(r.at, '00:00');
     assert.deepEqual(r.summary.waiting.blocked.map((c: any) => c.id), ['beta.t-wait']);
+    assert.deepEqual(r.summary.skipped.map((k: any) => [k.id, k.step, k.why]), [['beta.t-skip', 'Log in', 'yours']], 'read from the card activity');
     assert.ok(fs.existsSync(path.join(root, 'run/summary.json')), 'kept in run/: never committed');
     const cli = spawnSync(process.execPath, [path.join(ROOT, 'mcp/board-cli.mjs'), 'summary'], { encoding: 'utf8', env: { ...process.env, DASKS_URL: srv.url, DASKS_TOKEN: '' } });
     assert.equal(cli.status, 0, cli.stderr);

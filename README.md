@@ -91,7 +91,7 @@ Talk to your agent. These work in Claude Code and Codex once the MCP is register
 | "Make a card in web: a contact form that sends mail" / "web에 카드 만들어줘: 메일 보내는 문의 폼" | a new card with a title, milestone and done criteria |
 | "Work demo.t-hello" / "demo.t-hello 작업해줘" | the agent claims it, branches `human/demo.t-hello`, does the work, opens a draft PR and moves the card to review |
 | "What waits on me?" / "내가 결정할 거 뭐 있어?" | cards in review or blocked on you, each with What, Why, Do and Recommend |
-| "Have Codex review the PR for web.t-form" / "web.t-form PR을 Codex가 리뷰하게 해줘" | a cross-model review with findings by severity |
+| "Have Codex review the PR for web.t-form" / "web.t-form PR을 Codex가 리뷰하게 해줘" | a cross-model review: findings with a repro or a high-risk tag block, the rest are follow-ups |
 | "Leave a lesson for the next web card" / "다음 web 카드에 남길 교훈 적어줘" | a lesson proposal you confirm on the project page |
 
 From a shell:
@@ -123,8 +123,10 @@ The rules agents follow:
 ## Runner
 
 `dasks-runner` works ready cards while you are away. It claims a card, builds it in a worktree with `claude -p` or
-`codex exec`, has the other model review it, gives the builder one fix pass for P0/P1 findings, scans with gitleaks,
-pushes `dasks/<card>`, opens a **draft** PR and hands the card back to you in review. It never merges.
+`codex exec`, has the other model review it (at most 2 passes, with one fix pass between them; only a finding with a repro, or one
+tagged security, data-loss, approval or money, blocks), scans with gitleaks, pushes `dasks/<card>`, opens a **draft** PR
+and hands the card back to you in review. Not clean after pass 2: the PR stays a draft, the card is blocked and you are
+told. It never merges.
 A run that is still writing is kept past its time limit; a quiet one is stopped (12 h at most). A repo with more than
 10 open PRs gets no new cards until you merge or close some. Bug fixes start before other cards, after the ones you
 pushed. On a fleet Mac the runner keeps its kit current between cards.
@@ -217,6 +219,7 @@ flowchart LR
 | Connection and token | `~/.dasks/client.json` (mode 600), read by every client |
 | HTTP API | [docs/api.md](docs/api.md) |
 | Cards, specs, touches, messages | [docs/cards.md](docs/cards.md) |
+| Build one version at a time | [docs/versions.md](docs/versions.md) |
 | Login and tokens | [docs/auth.md](docs/auth.md) |
 | Fleet and captain | [docs/fleet.md](docs/fleet.md), [docs/captain.md](docs/captain.md) |
 | Upgrade, backup to a remote, restore, roll back | [docs/upgrade.md](docs/upgrade.md) |

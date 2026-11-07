@@ -126,6 +126,7 @@ export function loadBoard(root: string, withTasks = true): Board {
       goals.push({
         id: str(g?.id), parent: str(g?.parent), title: str(g?.title), ...i18nTitles(g), why: str(g?.why), owner: str(g?.owner),
         ...(g?.repo ? { repo: str(g.repo) } : {}),
+        ...(g?.version_target ? { version_target: str(g.version_target) } : {}),
         ...(g?.profile != null ? { profile: g.profile } : {}),
         milestones: Array.isArray(g?.milestones)
           ? g.milestones.map((m: any) => ({

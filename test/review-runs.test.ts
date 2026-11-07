@@ -15,10 +15,10 @@ const ACTOR = 'claude-code@laptop';
 
 const HEAD_A = 'a'.repeat(40), HEAD_B = 'b'.repeat(40), MB = 'c'.repeat(40);
 
-/** A review row (pass 1-3) with its answer and the answer's sha256. */
+/** A review row with its answer and the answer's sha256. */
 function passRow(pass: number, over: Record<string, unknown> = {}) {
   const answer = (over.answer as string | undefined) ?? `## Review pass ${pass}\nNo findings.\n`;
-  return { pass, head: HEAD_A, base: 'main', merge_base: MB, tier: 'normal', mode: pass === 3 ? 'narrow' : 'simple', reviewer: 'codex example-model', impl: 'claude',
+  return { pass, head: HEAD_A, base: 'main', merge_base: MB, tier: 'normal', mode: 'simple', reviewer: 'codex example-model', impl: 'claude',
     verdict: 'clean', open: 0, noted: 0, at: '2026-10-28 08:20:00', log_sha256: sha(Buffer.from(answer, 'utf8')), answer, ...over };
 }
 
@@ -65,7 +65,7 @@ async function expectStatus(r: Response, status: number): Promise<any> {
   return text ? JSON.parse(text) : null;
 }
 
-test('1 append: pass 1, 2 and a narrow 3 -> 201 each; GET returns the 3 rows in order with answers, actor and ts; 3 commits', () => withBoard(async ({ root, id, post, get }) => {
+test('1 append: pass 1 and 2 -> 201 each; GET returns the 2 rows in order with answers, actor and ts; 2 commits', () => withBoard(async ({ root, id, post, get }) => {
   const before = commits(root);
   const r1 = await expectStatus(await post(passRow(1)), 201);
   assert.equal(r1.card, id);
@@ -73,23 +73,21 @@ test('1 append: pass 1, 2 and a narrow 3 -> 201 each; GET returns the 3 rows in 
   assert.equal(r1.row.actor, ACTOR);
   assert.match(r1.row.ts, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}([+-]\d{2}:\d{2}|Z)$/);
   assert.equal('answer' in r1.row, false, 'the 201 row leaves the answer out');
-  await expectStatus(await post(passRow(2, { verdict: 'open', open: 2, noted: 1, answer: 'two findings\n' })), 201);
-  const { noted: _n, ...three } = passRow(3);
-  await expectStatus(await post(three), 201);
+  const { noted: _n, ...two } = passRow(2, { verdict: 'open', open: 2, answer: 'two findings\n' });
+  await expectStatus(await post(two), 201);
   const g = await expectStatus(await get(), 200);
   assert.equal(g.card, id);
-  assert.deepEqual(g.passes.map((p: any) => p.pass), [1, 2, 3]);
-  assert.equal(g.passes[2].noted, 0, 'noted defaults to 0');
-  assert.equal(g.passes[2].mode, 'narrow');
+  assert.deepEqual(g.passes.map((p: any) => p.pass), [1, 2]);
+  assert.equal(g.passes[1].noted, 0, 'noted defaults to 0');
   assert.equal(g.passes[0].answer, passRow(1).answer);
   assert.equal(g.passes[1].answer, 'two findings\n');
   assert.equal(g.passes[1].log_sha256, sha(Buffer.from('two findings\n')));
   for (const p of g.passes) { assert.equal(p.actor, ACTOR); assert.match(p.ts, /([+-]\d{2}:\d{2}|Z)$/); }
-  assert.equal(commits(root), before + 3);
-  assert.match(git(root, 'log', '-1', '--format=%s'), new RegExp(`^${ACTOR}: review-run ${id.replace('.', '\\.')} pass 3$`));
+  assert.equal(commits(root), before + 2);
+  assert.match(git(root, 'log', '-1', '--format=%s'), new RegExp(`^${ACTOR}: review-run ${id.replace('.', '\\.')} pass 2$`));
   const lines = fs.readFileSync(fileOf(root, id), 'utf8').split('\n');
-  assert.equal(lines.length, 4); assert.equal(lines[3], '');
-  assert.deepEqual(lines.slice(0, 3).map((l) => JSON.parse(l).pass), [1, 2, 3]);
+  assert.equal(lines.length, 3); assert.equal(lines[2], '');
+  assert.deepEqual(lines.slice(0, 2).map((l) => JSON.parse(l).pass), [1, 2]);
 }));
 
 test('2 409 replay: same pass-1 body, pass 1 with another head -> 409 with passes; nothing committed', () => withBoard(async ({ root, id, post }) => {
@@ -105,18 +103,31 @@ test('2 409 replay: same pass-1 body, pass 1 with another head -> 409 with passe
   assert.deepEqual(snap(root, id), s);
 }));
 
-test('3 pass order: pass 2 without pass 1 -> 409; narrow pass 3 after 1 and 2 -> 201; mode narrow with pass 2 -> 400', () => withBoard(async ({ root, id, post }) => {
+test('3 pass order and limit: pass 2 without pass 1 -> 409; a third pass -> 400 at any stage, nothing stored; mode narrow -> 400', () => withBoard(async ({ root, id, post, get }) => {
   const s = snap(root, id);
   const j = await expectStatus(await post(passRow(2)), 409);
   assert.deepEqual(j.passes, []);
   assert.deepEqual(snap(root, id), s);
   await expectStatus(await post(passRow(2, { mode: 'narrow' })), 400);
-  await expectStatus(await post(passRow(3, { mode: 'simple' })), 400);
   await expectStatus(await post(passRow(1)), 201);
-  await expectStatus(await post(passRow(3)), 409);
   await expectStatus(await post(passRow(2, { verdict: 'open', open: 1 })), 201);
-  const r = await expectStatus(await post(passRow(3, { head: HEAD_B })), 201);
-  assert.equal(r.row.mode, 'narrow');
+  const after = snap(root, id);
+  const third = await expectStatus(await post(passRow(3, { head: HEAD_B })), 400);
+  assert.match(third.error, /at most 2 review passes/);
+  await expectStatus(await post(passRow(3, { head: HEAD_B, mode: 'narrow' })), 400);
+  assert.deepEqual(snap(root, id), after);
+  assert.equal((await expectStatus(await get(), 200)).passes.length, 2);
+}));
+
+test('3b rows stored under the old limit stay readable: GET shows a narrow pass 3, a new pass 3 is still refused', () => withBoard(async ({ root, id, post, get }) => {
+  await expectStatus(await post(passRow(1)), 201);
+  await expectStatus(await post(passRow(2)), 201);
+  const f = fileOf(root, id);
+  fs.appendFileSync(f, JSON.stringify({ ...passRow(3), mode: 'narrow', actor: ACTOR, ts: '2026-01-01T00:00:00Z' }) + '\n');
+  git(root, 'add', '-A'); git(root, 'commit', '-qm', 'an old row');
+  const g = await expectStatus(await get(), 200);
+  assert.deepEqual(g.passes.map((p: any) => [p.pass, p.mode]), [[1, 'simple'], [2, 'simple'], [3, 'narrow']]);
+  await expectStatus(await post(passRow(3, { head: HEAD_B })), 400);
 }));
 
 test('4 sha mismatch: log_sha256 that is not the sha256 of answer -> 400; nothing stored', () => withBoard(async ({ root, id, post, get }) => {
@@ -173,9 +184,9 @@ test('6 sizes: answer of exactly 262,144 UTF-8 bytes -> 201; one byte more -> 41
   assert.equal(g.passes[1].answer, ascii);
   const s = snap(root, id);
   const over = answer + 'x';
-  const j = await expectStatus(await post(passRow(3, { answer: over })), 413);
+  const j = await expectStatus(await post(passRow(1, { answer: over })), 413);
   assert.match(j.error, /262,?144|bytes/);
-  const big = JSON.stringify({ ...passRow(3), answer: 'x'.repeat(2_097_152) });
+  const big = JSON.stringify({ ...passRow(1), answer: 'x'.repeat(2_097_152) });
   await expectStatus(await post(null, { raw: big }), 413);
   assert.deepEqual(snap(root, id), s);
 }));
@@ -212,17 +223,16 @@ test('9 restart keeps rows; a torn last line is skipped and dropped by the next 
   assert.equal(after.includes('"torn"'), false, 'the torn line is gone');
   for (const l of after.split('\n').filter(Boolean)) JSON.parse(l);
   assert.equal(after.split('\n').length, 3);
-  await expectStatus(await post(passRow(3)), 201);
   await restart();
   const g = await expectStatus(await get(), 200);
-  assert.deepEqual(g.passes.map((p: any) => [p.pass, p.head]), [[1, HEAD_A], [2, HEAD_B], [3, HEAD_A]]);
+  assert.deepEqual(g.passes.map((p: any) => [p.pass, p.head]), [[1, HEAD_A], [2, HEAD_B]]);
   // A bad line before the last one: GET and POST answer 500 naming its line, nothing stored.
   const lines = fs.readFileSync(f, 'utf8').split('\n');
-  lines[1] = '[1]';
+  lines[0] = '[1]';
   fs.writeFileSync(f, lines.join('\n'));
   const headBefore = git(root, 'rev-parse', 'HEAD');
-  assert.match((await expectStatus(await get(), 500)).error, /line 2/);
-  assert.match((await expectStatus(await post(passRow(1)), 500)).error, /line 2/);
+  assert.match((await expectStatus(await get(), 500)).error, /line 1/);
+  assert.match((await expectStatus(await post(passRow(1)), 500)).error, /line 1/);
   assert.equal(git(root, 'rev-parse', 'HEAD'), headBefore);
 }));
 

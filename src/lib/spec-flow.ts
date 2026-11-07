@@ -1,5 +1,5 @@
 // Spec writing (docs/specs.md): one harness drafts a card's spec from the card and the real code, the other harness
-// attacks it, and the drafter revises on P0/P1 findings or blocking questions. The kit's one review rule: two full review
+// attacks it, and the drafter revises on P0/P1 findings or blocking questions. A spec gets two full review
 // passes, then at most one narrow pass on the fixes made after pass 2. The spec ends ready (a pass recorded under the reviewer's own name) or draft with the findings in a
 // card note. Both harnesses see the project only through a read-only view of its default branch (openRepoView): a spec
 // run writes the spec to the board and notes on the card, never the repo. Used by the runner's spec pass
@@ -176,7 +176,7 @@ export function reviewSpecPrompt(card: string, spec: string, author: Tool, view:
   ].join('\n');
 }
 
-/** Review passes per spec run: two full passes, then at most one narrow pass (the kit's one review rule). */
+/** Review passes per spec run: two full passes, then at most one narrow pass. */
 export const SPEC_REVIEW_PASSES = 3;
 
 /** The spec text an agent printed between the markers ('' when there is none). The last pair wins. */

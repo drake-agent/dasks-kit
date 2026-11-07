@@ -5,8 +5,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { localDate } from './rollup.ts';
+import { parseHumanStep } from './human-steps.ts';
 
 export interface SummaryCard { id: string; title: string; goal: string; pr?: string }
+export interface SkippedStep extends SummaryCard { step: string; why: string; at: string }
 export interface Summary {
   /** When it was written, and the window it covers: [since, until). */
   at: string;
@@ -17,6 +19,8 @@ export interface Summary {
   waiting: { asks: SummaryCard[]; approve: SummaryCard[]; blocked: SummaryCard[] };
   stuck: { machines: { machine: string; last_seen: string }[]; cards: (SummaryCard & { hours: number })[] };
   failures: { id: string; at: string; note: string; cause?: string }[];
+  /** Steps an unattended run left for the human, oldest first (skippedSteps). Absent in a summary from an older board. */
+  skipped: SkippedStep[];
   /** Board-level problems (a failing backup) at the time of writing. */
   warnings: string[];
   /** The same content as plain lines, for a terminal or an agent. */
@@ -26,8 +30,9 @@ export interface Summary {
 export interface SummaryInput {
   now: Date;
   since: Date;
-  /** Every card; done_at only where the card moved to done (from its activity). live_ask: an open user decision. */
-  tasks: { id: string; title: string; goal: string; status: string; pr?: string; needs_user?: string; done_at?: string | null; live_ask?: boolean }[];
+  /** Every card; done_at only where the card moved to done (from its activity). live_ask: an open user decision.
+   *  notes: its activity notes, needed only on cards that can still list a skipped step (skippedSteps). */
+  tasks: { id: string; title: string; goal: string; status: string; pr?: string; needs_user?: string; done_at?: string | null; live_ask?: boolean; notes?: { at: string; note?: string }[] }[];
   machines: { machine: string; state: string; last_seen: string }[];
   /** Cards in doing with no news past the stuck threshold. */
   stale: { id: string; title: string; goal: string; age_hours: number }[];
@@ -37,6 +42,23 @@ export interface SummaryInput {
 
 const card = (t: { id: string; title: string; goal: string; pr?: string }): SummaryCard => ({ id: t.id, title: t.title, goal: t.goal, ...(t.pr ? { pr: t.pr } : {}) });
 const inWindow = (at: string | null | undefined, a: number, b: number) => { const ms = Date.parse(at ?? ''); return Number.isFinite(ms) && ms >= a && ms < b; };
+
+/** Skipped steps stay on the list while their card is open, so one missed morning loses nothing. A done card's step is
+ *  listed only if it was noted in this window, so it is seen once and then closes; a cancelled card lists none. The same
+ *  step noted again (a retry) is one entry, the latest. */
+export function skippedSteps(tasks: SummaryInput['tasks'], since: number, until: number): SkippedStep[] {
+  const out = new Map<string, SkippedStep>();
+  for (const t of tasks) {
+    if (t.status === 'cancelled') continue;
+    for (const n of t.notes ?? []) {
+      const p = parseHumanStep(n.note);
+      const ms = Date.parse(n.at);
+      if (!p || !(ms < until) || (t.status === 'done' && ms < since)) continue;
+      out.set(JSON.stringify([t.id, p.step]), { ...card(t), ...p, at: n.at });
+    }
+  }
+  return [...out.values()].sort((p, q) => Date.parse(p.at) - Date.parse(q.at));
+}
 
 export function buildSummary(x: SummaryInput): Summary {
   const a = x.since.getTime(), b = x.now.getTime();
@@ -49,7 +71,7 @@ export function buildSummary(x: SummaryInput): Summary {
   const cards = x.stale.map((s) => ({ ...card(s), hours: Math.round(s.age_hours) }));
   const failures = x.outcomes.filter((o) => o.state === 'failed' && inWindow(o.at, a, b)).map((o) => ({ id: o.id, at: o.at, note: o.note.split('\n')[0].slice(0, 200), ...(o.cause ? { cause: o.cause } : {}) }));
   const s = { at: x.now.toISOString(), day: localDate(x.now), since: x.since.toISOString(), until: x.now.toISOString(), finished,
-    waiting: { asks, approve, blocked }, stuck: { machines, cards }, failures, warnings: x.warnings };
+    waiting: { asks, approve, blocked }, stuck: { machines, cards }, failures, skipped: skippedSteps(x.tasks, a, b), warnings: x.warnings };
   return { ...s, text: summaryText(s) };
 }
 
@@ -60,6 +82,9 @@ function summaryText(s: Omit<Summary, 'text'>): string {
   list('Waiting on you: decisions', s.waiting.asks);
   list('Waiting on you: approvals', s.waiting.approve);
   list('Waiting on you: blocked', s.waiting.blocked);
+  if (s.skipped.length) out.push(`Skipped, left for you: ${s.skipped.length}`);
+  for (const k of s.skipped.slice(0, 10)) out.push(`  ${k.id}  ${k.step}${k.why ? ` -- ${k.why}` : ''}`);
+  if (s.skipped.length > 10) out.push(`  … ${s.skipped.length - 10} more`);
   out.push(`Stuck: ${s.stuck.machines.length} machine(s), ${s.stuck.cards.length} card(s)`);
   for (const m of s.stuck.machines) out.push(`  ${m.machine}  quiet since ${m.last_seen}`);
   for (const c of s.stuck.cards.slice(0, 10)) out.push(`  ${c.id}  no news for ${c.hours} h  ${c.title}`);

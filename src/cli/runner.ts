@@ -1,7 +1,7 @@
 // dasks-runner: works ready cards on this machine without you. Each look takes the board's ready cards (open, unclaimed,
 // deps done, spec ready), keeps those in lane claude or codex whose project has a local repo (config.json
 // projects[].repo), and works each one (src/lib/run-flow.ts): claim, worktree on branch dasks/<card>, a headless build,
-// a review by the other model, one fix pass for P0/P1, a gitleaks scan, a push and a DRAFT PR, then the card goes back
+// a review by the other model (at most 2 passes, one fix between them), a gitleaks scan, a push and a DRAFT PR, then the card goes back
 // to you in review. It never merges, never pushes the default branch and never force-pushes.
 //   dasks-runner            loop: look every runner.poll_minutes
 //   dasks-runner --once     one look, work at most runner.max_parallel cards, then exit
@@ -19,6 +19,7 @@ import { familyOf } from '../lib/spec-state.ts';
 import { cardHash, specCacheDir, specViewsDir } from '../lib/spec-flow.ts';
 import { endGroup, type Supervised } from '../lib/supervise.ts';
 import { secretGate } from '../lib/secret-gate.ts';
+import { versionHolds } from '../lib/version-mode.ts';
 import { applyUpdate, mayUpdate, planUpdate } from '../lib/self-update.ts';
 import { execFileSync, spawn } from 'node:child_process';
 
@@ -174,7 +175,7 @@ let holdSaid = '';
 async function retryPending(env: FlowEnv): Promise<void> {
   for (const [card, r] of Object.entries(loadState().running)) {
     if (working.has(card) || (!r.pending && !r.handback)) continue;
-    if (r.handback) await handBack(env, card, r, r.handback.pr, r.handback.title, r.handback.summary, r.handback.review_note, r.handback.open);
+    if (r.handback) await handBack(env, card, r, r.handback.pr, r.handback.title, r.handback.summary, r.handback.review_note, r.handback.open, r.handback.blocked, r.handback.skipped);
     else await settle(env, card, r, r.pending!.reason, r.pending!.count);
   }
 }
@@ -220,11 +221,11 @@ async function look(): Promise<void> {
     titles.set(r.id, r.title ?? '');
     const eligible = (r.lane === 'claude' || r.lane === 'codex') && repos.has(r.goal);
     const info = eligible ? await cardInfo(env, r.id) : { text: '', authors: [] };
-    cands.push({ id: r.id, goal: r.goal, lane: r.lane, priority: r.priority, spec_state: r.spec_state, spec_by: r.spec_by ?? null, answer_key_by: info.authors, kind: r.kind, pushed: !!r.pushed, touches: eligible ? cardTouches(info.text) : [] });
+    cands.push({ id: r.id, goal: r.goal, lane: r.lane, priority: r.priority, spec_state: r.spec_state, spec_by: r.spec_by ?? null, answer_key_by: info.authors, kind: r.kind, pushed: !!r.pushed, milestone: r.milestone, version_target: r.version_target, touches: eligible ? cardTouches(info.text) : [] });
   }
   const specQueue = cfg.spec ? queue.filter((r) => (r.spec_state === 'none' || r.spec_state === 'draft') && (r.lane === 'claude' || r.lane === 'codex') && repos.has(r.goal)) : [];
   const held = await prFirst(cfg, [...cands, ...specQueue.map((r) => ({ id: r.id, goal: r.goal, lane: r.lane, priority: r.priority, touches: [] }))], repos);
-  update((s) => { s.held = Object.fromEntries(held); });
+  update((s) => { s.held = Object.fromEntries([...held, ...versionHolds(queue)]); });
   // Read after the PR counts: a card may have finished while gh answered.
   const state = loadState();
   const now = new Date();
@@ -260,7 +261,7 @@ async function look(): Promise<void> {
     } catch { continue; }
     const failed = state.spec_failures?.[r.id];
     titles.set(r.id, r.title ?? '');
-    specCands.push({ id: r.id, goal: r.goal, lane: r.lane, priority: r.priority, spec_state: r.spec_state, reviewed, authorFamily, hash, failures: failed && failed.hash === hash ? failed.count : 0 });
+    specCands.push({ id: r.id, goal: r.goal, lane: r.lane, priority: r.priority, spec_state: r.spec_state, reviewed, authorFamily, hash, failures: failed && failed.hash === hash ? failed.count : 0, milestone: r.milestone, version_target: r.version_target });
   }
   const after = loadState();
   const toolFamily = { claude: familyOf(`claude@${env.machine}`, families), codex: familyOf(`codex@${env.machine}`, families) };
@@ -329,7 +330,7 @@ async function recover(): Promise<void> {
   for (const [card, r] of Object.entries(loadState().running)) {
     if (r.pid > 0) await endGroup(r.pid, env.graceMs);
     const ok = r.handback
-      ? await handBack(env, card, r, r.handback.pr, r.handback.title, r.handback.summary, r.handback.review_note, r.handback.open)
+      ? await handBack(env, card, r, r.handback.pr, r.handback.title, r.handback.summary, r.handback.review_note, r.handback.open, r.handback.blocked, r.handback.skipped)
       : await settle(env, card, r, r.pending?.reason ?? 'the runner restarted mid-run', r.pending?.count ?? false);
     if (ok) log(`${card}: recovered after a runner restart`);
   }

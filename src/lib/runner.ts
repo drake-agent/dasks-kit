@@ -6,6 +6,8 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { parseTouches, touchesOverlap, touchesValue } from './touches.ts';
 import { toolIdentity } from './spec-state.ts';
+import { HUMAN_STEP_RULE } from './human-steps.ts';
+import { versionHold } from './version-mode.ts';
 
 export type Tool = 'claude' | 'codex';
 
@@ -95,6 +97,8 @@ export interface Candidate {
   answer_key_by?: string[];
   /** the card's kind (bug fixes start first) and whether the user pushed it */
   kind?: string; pushed?: boolean;
+  /** the card's milestone and its goal's version target (docs/versions.md) */
+  milestone?: string; version_target?: string;
 }
 export interface Running { card: string; tool: Tool; repo: string; touches: string[] }
 export interface PickInput {
@@ -130,6 +134,8 @@ export function pickCards(x: PickInput): { picked: Picked[]; skipped: { card: st
   const order = x.ready.map((c, i) => ({ c, i })).sort((a, b) => first(a.c) - first(b.c) || PRIO(a.c.priority) - PRIO(b.c.priority) || a.i - b.i).map((o) => o.c);
   for (const c of order) {
     if (busy.has(c.id)) continue;
+    const off = versionHold(c);
+    if (off) { skipped.push({ card: c.id, why: off }); continue; }
     if (c.spec_state !== undefined && c.spec_state !== 'ready') { skipped.push({ card: c.id, why: `spec is ${c.spec_state || 'none'}, not ready` }); continue; }
     const tool = c.lane === 'claude' || c.lane === 'codex' ? c.lane : null;
     if (!tool) { skipped.push({ card: c.id, why: `lane ${c.lane || 'none'} is not claude or codex` }); continue; }
@@ -167,6 +173,8 @@ export interface SpecCandidate {
   failures?: number;
   /** the card's content hash (src/lib/spec-flow.ts cardHash) */
   hash?: string;
+  /** the card's milestone and its goal's version target: a held card takes no spec slot */
+  milestone?: string; version_target?: string;
 }
 export interface SpecPickInput {
   cands: SpecCandidate[];
@@ -202,6 +210,8 @@ export function pickSpecCards(x: SpecPickInput): { picked: SpecPicked[]; skipped
   for (const c of order) {
     if (busy.has(c.id) || (c.spec_state !== 'none' && c.spec_state !== 'draft')) continue;
     if (c.lane !== 'claude' && c.lane !== 'codex') continue;
+    const off = versionHold(c);
+    if (off) { skipped.push({ card: c.id, why: `spec: ${off}` }); continue; }
     if (c.spec_state === 'draft' && c.reviewed) continue;   // reviewed and not passed: waits for a new version
     const lane = c.lane as Tool;
     const repo = x.repos.get(c.goal);
@@ -302,7 +312,8 @@ export function resultLine(text: string): string {
   return lines.length ? lines[lines.length - 1].slice(0, 300) : '';
 }
 
-/** Review findings by severity: lines like `- [P1] file.ts:12 ...`, `P0: ...` or `**P1** ...`. */
+/** Spec review findings by severity: lines like `- [P1] section ...`, `P0: ...` or `**P1** ...`. Code reviews are read
+ *  by readCodeReview. */
 export function reviewFindings(text: string): { severity: string; line: string }[] {
   const out: { severity: string; line: string }[] = [];
   for (const l of text.split('\n')) {
@@ -312,6 +323,56 @@ export function reviewFindings(text: string): { severity: string; line: string }
   return out;
 }
 export const blocking = <F extends { severity: string }>(f: F[]): F[] => f.filter((x) => x.severity === 'P0' || x.severity === 'P1');
+
+/** Tags that block a code review finding with or without a repro. */
+const ALWAYS_BLOCK = new Set(['security', 'data-loss', 'approval', 'money']);
+const FINDING_RE = /^\s*(?:[-*]\s*)?(?:\*\*)?(?:R\d+\s+)?\[?(P[0-3])\]?(?:\*\*)?(?:\s*\[([A-Za-z -]+)\])?\s*[:\-–]?\s+\S/;
+const REPRO_RE = /^\s*(?:[-*]\s*)?repro:\s*\S.*?\s(?:->|→)\s+\S/i;
+
+export interface CodeFinding { severity: string; tag: string; line: string; blocks: boolean }
+export interface CodeReview { findings: CodeFinding[]; blockers: CodeFinding[]; followUps: CodeFinding[]; verdict: string; clean: boolean }
+
+/** One code review answer. A finding blocks when a `repro:` line right under it gives a command or input and the wrong
+ *  result, or when it is tagged security, data-loss, approval or money. The P level only orders the list. Clean needs
+ *  the reviewer's own `VERDICT: clean` and nothing blocking; the last verdict line counts. */
+export function readCodeReview(text: string): CodeReview {
+  const lines = text.split('\n');
+  const findings: CodeFinding[] = [];
+  lines.forEach((l, i) => {
+    const m = FINDING_RE.exec(l);
+    if (!m) return;
+    const tag = (m[2] ?? '').trim().toLowerCase().replace(/ /g, '-').replace(/^approval-gate$/, 'approval');
+    const repro = REPRO_RE.test(lines[i + 1] ?? '') ? lines[i + 1].trim().replace(/^[-*]\s*/, '').slice(0, 400) : '';
+    findings.push({ severity: m[1], tag, line: l.trim().slice(0, 400) + (repro ? `\n  ${repro}` : ''), blocks: !!repro || ALWAYS_BLOCK.has(tag) });
+  });
+  const verdict = [...text.matchAll(/VERDICT:\s*(clean|changes)\b/g)].at(-1)?.[1] ?? '';
+  const blockers = findings.filter((f) => f.blocks);
+  return { findings, blockers, followUps: findings.filter((f) => !f.blocks), verdict, clean: !blockers.length && verdict === 'clean' };
+}
+
+/** The `## Follow-ups` section of a PR body, one list item per finding. */
+export function followUpSection(lines: string[]): string {
+  return ['## Follow-ups', '', ...lines.map((l) => `- ${l.replace(/^[-*]\s+/, '').replace(/\n\s*/g, ' ')}`)].join('\n');
+}
+
+/** A PR body with its `## Follow-ups` section replaced, or added at the end. */
+export function withFollowUps(body: string, lines: string[]): string {
+  const section = followUpSection(lines);
+  const at = body.search(/^## Follow-ups[ \t]*$/m);
+  if (at < 0) return `${body.trimEnd()}\n\n${section}\n`;
+  const rest = body.slice(at + 1);
+  const next = rest.search(/^## /m);
+  return `${body.slice(0, at)}${section}\n${next < 0 ? '' : `\n${rest.slice(next)}`}`;
+}
+
+/** A runner PR's body: open findings first when any are left, follow-ups in their own section. */
+export function prBody(o: { summary: string; card: string; note: string; open: string[]; blocked: boolean; followUps: string[]; skipped?: string[]; actor: string }): string {
+  const open = o.open.length ? [o.blocked ? 'Not clean after the last review pass; this PR stays a draft. Open findings:' : 'Findings still to check:', ...o.open.map((l) => '  ' + l), ''] : [];
+  return [...open, o.summary, '', `Card: ${o.card} (Dasks)`, `Review: ${o.note}.`, '',
+    ...(o.followUps.length ? [followUpSection(o.followUps), ''] : []),
+    ...(o.skipped?.length ? ['Not done, skipped for you to do:', ...o.skipped.map((s) => `- ${s}`), ''] : []),
+    `Opened by the Dasks runner (${o.actor}) as a draft. Merging is the user's call.`].join('\n');
+}
 
 // ---------- prompts ----------
 
@@ -329,29 +390,53 @@ export function runnerRules(card: string, branch: string, base: string): string 
     '----- runner rules (these override the claim and submit steps above) -----',
     `The card runner on this Mac already claimed ${card} and checked out branch ${branch} (from ${base}) in this worktree, your working directory.`,
     `Do not run \`dask begin\`, \`dask claim\`, \`dask submit\`, \`dask release\` or \`dask block\`, do not push, do not open a PR and never merge: the runner gets a cross-model review, pushes the branch and opens a draft PR after you stop.`,
-    `Do the card's work here and commit it on ${branch}; every commit message starts with "${card}: ". Uncommitted changes are lost.`,
+    `Do the card's work here and commit it on ${branch}; every commit message starts with "${card}: ". Commit often: if this run is stopped, the runner tries to save uncommitted changes as a WIP commit, but that can fail.`,
     'If the card cannot be done as written (a missing decision, a wrong spec), make no commits and say why in the RESULT line.',
+    HUMAN_STEP_RULE,
     HEADLESS_WAIT_RULE,
     helperRule(card),
     'End your final message with exactly one line: `RESULT: built <one-line summary>` or `RESULT: stopped <why>`.',
   ].join('\n');
 }
 
+/** How a code reviewer writes findings, for both passes. Examples stay inside sentences: the reader only takes whole lines. */
+const FINDING_RULES = [
+  'Write each finding on its own line, in this order: an id that runs on across passes (R1, R2, ...), a priority ([P0] to [P3]; it only orders the list and never blocks), a block tag if one applies, `<file>:<line>`, what is wrong, then `Expected: <the right result>`.',
+  'Block tags: [repro] when you can show it, with the very next line reading `repro: <exact command, input or failing test> -> <the wrong result it shows>`. [security], [data-loss], [approval] (a human approval gate is skipped) and [money] block with or without a repro.',
+  'Any other finding gets no tag: it is a follow-up, listed in the PR and not blocking. No style nits.',
+].join('\n');
+const VERDICT_RULE = 'End with exactly one line: `VERDICT: clean` (nothing blocks; follow-ups may remain) or `VERDICT: changes` (a finding blocks).';
+
+/** Pass 1: the whole change. */
 export function reviewPrompt(card: string, base: string, builder: Tool): string {
   return [
-    `Review the commits of Dasks card ${card} on the current branch (\`git log ${base}..HEAD\`, \`git diff ${base}...HEAD\`). ${builder === 'claude' ? 'Claude' : 'Codex'} wrote them; you are the cross-model reviewer.`,
+    `Review the commits of Dasks card ${card} on the current branch (\`git log ${base}..HEAD\`, \`git diff ${base}...HEAD\`). ${builder === 'claude' ? 'Claude' : 'Codex'} wrote them; you are the cross-model reviewer. Pass 1 of 2: review the whole change.`,
     'Read-only: do not edit files, commit, push or touch the board. Look for bugs, regressions, missing tests and anything the card asked for that is not done.',
-    'List each finding on its own line as `- [P0|P1|P2|P3] <file>:<line> <what is wrong and the fix>`. P0/P1 = must fix before merge; P2/P3 = notes. No style nits.',
+    FINDING_RULES,
     helperRule(card),
-    'End with exactly one line: `VERDICT: clean` (no P0/P1) or `VERDICT: changes` (any P0/P1).',
+    VERDICT_RULE,
+  ].join('\n');
+}
+
+/** Pass 2: only the pass-1 findings and what the fixes broke. They are quoted with `> ` so an echoed prompt reads as no finding. */
+export function recheckPrompt(card: string, base: string, builder: Tool, previous: string[], since: string): string {
+  return [
+    `Re-check the commits of Dasks card ${card} on the current branch (\`git diff ${since ? `${since}..HEAD` : `${base}...HEAD`}\` shows the fixes). ${builder === 'claude' ? 'Claude' : 'Codex'} wrote them; you are the cross-model reviewer. Pass 2 of 2, the last one: check only the findings below and regressions the fixes caused. Raise nothing else.`,
+    'Read-only: do not edit files, commit, push or touch the board.',
+    ...(previous.length ? ['Pass 1 findings:', ...previous.flatMap((f) => f.split('\n').map((l) => `> ${l.trim()}`))] : []),
+    'Answer each one on its own line: `<id> resolved`, or repeat its finding line, with its tag and a new `repro:` line, as it shows on this head.',
+    FINDING_RULES,
+    helperRule(card),
+    VERDICT_RULE,
   ].join('\n');
 }
 
 export function fixPrompt(card: string, branch: string, findings: string[]): string {
   return [
-    `The cross-model review of ${card} found these P0/P1 problems. Fix them on ${branch} and commit (messages start with "${card}: "). Do not push, open a PR or touch the board.`,
+    `The cross-model review of ${card} found these blocking problems. Fix them on ${branch} with the smallest change and commit (messages start with "${card}: "). Do not push, open a PR or touch the board.`,
     ...findings.map((f) => '  ' + f),
     'If a finding is wrong, leave the code and say why in your final message.',
+    HUMAN_STEP_RULE,
     HEADLESS_WAIT_RULE,
     helperRule(card),
     'End with exactly one line: `RESULT: fixed <summary>` or `RESULT: stopped <why>`.',
@@ -362,8 +447,19 @@ export function fixPrompt(card: string, branch: string, findings: string[]): str
 export function continuePrompt(card: string, branch: string): string {
   return [
     `Your run for ${card} ended without a RESULT line, so the runner cannot tell whether the work is done. Continue where you stopped: finish the card's work on ${branch} and commit it (messages start with "${card}: "). Do not push, open a PR or touch the board.`,
+    `${HUMAN_STEP_RULE} Repeat any such line from earlier in this run: only your final message counts.`,
     HEADLESS_WAIT_RULE,
     'End your final message with exactly one line: `RESULT: built <one-line summary>` or `RESULT: stopped <why>`.',
+  ].join('\n');
+}
+
+/** The prompt line of a build that starts from an earlier run's saved branch. */
+export function resumeLine(branch: string, from: 'origin' | 'local', sha: string, base: string): string {
+  const where = from === 'origin' ? `origin's ${branch} @ ${sha.slice(0, 7)}` : `the local ${branch} @ ${sha.slice(0, 7)}`;
+  return [
+    `You are continuing: an earlier run of this card stopped before it finished and this worktree starts from its work (${where}).`,
+    `Read \`git log ${base}..HEAD\` and \`git diff ${base}...HEAD\` first and carry on from there; do not start over. Commits with "wip:" in the title are unfinished saves, so check them before you rely on them. If ${base} has moved, merge it; never rebase or force.`,
+    'If nothing is left to do, make one empty commit that says so (`git commit --allow-empty`): the runner counts a run as built only by its new commits.',
   ].join('\n');
 }
 
@@ -431,10 +527,12 @@ export interface RunRecord {
   start_sha: string;
   pid: number;
   phase: Phase;
+  /** Where this run's work is, as the card's note says it. Set once the save ran, so a retried release says the same. */
+  saved?: string;
   /** Set when a release or hand-back failed: what the next look (or a restart) must still tell the board. */
   pending?: { reason: string; count: boolean };
   /** Set once the draft PR is open: what the hand-back needs if it has to be retried. */
-  handback?: { pr: string; title: string; summary: string; review_note: string; open: string[] };
+  handback?: { pr: string; title: string; summary: string; review_note: string; open: string[]; blocked?: boolean; skipped?: string[] };
 }
 
 export interface HistoryRow { card: string; tool: Tool; started: string; ended: string; outcome: 'review' | 'released' | 'rate-limited' | 'error' | 'spec-ready' | 'spec-draft'; detail: string; log: string; pr?: string }
@@ -445,7 +543,7 @@ export interface RunnerState {
   history: HistoryRow[];
   /** Cards started on one local day; kept apart from history so the cap holds whatever history keeps. */
   daily: { day: string; count: number };
-  /** Repos held at the last look (PR-first), with the reason, for `--status`. */
+  /** Repos held at the last look (PR-first) and goals held for their version, with the reason, for `--status`. */
   held?: Record<string, string>;
   /** Failed spec runs per card: the card text's hash and how many runs on it stored nothing and recorded no review. */
   spec_failures?: Record<string, { hash: string; count: number; at: string }>;
@@ -476,8 +574,7 @@ export type Verdict =
   | { ok: false; kind: 'stopped' | 'rate-limited' | 'failed'; reason: string };
 
 /** Did this attempt build the card? Only an agent that exited 0, was not stopped, ended with `RESULT: built …` and made
- *  commits after start_sha did. Commits of a failed attempt stay on the branch for the next one but do not make it a
- *  success. */
+ *  commits after start_sha did. Commits of a failed attempt are kept for the next one but do not make it a success. */
 export function attemptVerdict(a: { code: number | null; stopped: string; result: string; newCommits: number; raw: string }): Verdict {
   if (a.stopped) return { ok: false, kind: 'stopped', reason: `timeout: ${a.stopped}` };
   if (a.newCommits === 0 && RATE_LIMITED.test(a.raw)) return { ok: false, kind: 'rate-limited', reason: 'usage or rate limit' };

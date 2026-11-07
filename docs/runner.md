@@ -9,13 +9,16 @@ flowchart LR
   A[claim on the board] --> B[recovery record saved]
   B --> C[worktree on dasks/&lt;card&gt;]
   C --> D[build: claude -p or codex exec]
-  D -->|built| E[review by the other model]
-  E -->|P0/P1| F[one fix pass]
+  D -->|built| E[review pass 1 by the other model]
+  E -->|a finding blocks| F[one fix pass]
+  F --> P[review pass 2: findings and fixes only]
   E -->|clean| G[gitleaks scan]
-  F --> G
+  P --> G
   G --> H[push branch, draft PR]
   H --> I[card to review, handed back]
-  D -->|failed, stopped, limit| R[outcome, then release]
+  H -->|not clean after pass 2| B2[card blocked, you are told]
+  D -->|failed, stopped, limit| S[save the work: WIP commit, scan, push branch]
+  S --> R[outcome, then release]
 ```
 
 - **Claim.** The claim asks the board to refuse it while a card with overlapping `touches:` is being worked in the same
@@ -24,9 +27,13 @@ flowchart LR
   stops what it left running and gives the card back. A record goes away only after the board confirmed the release or
   the hand-back.
 - **Success** means: the agent exited 0, was not stopped, ended with `RESULT: built …` and made commits after the
-  branch tip it started from. Anything else is a failed attempt: its commits stay on the branch for the next one.
-- **Giving a card back:** the failed attempt's outcome is recorded for that run first (it counts toward the board's
-  retry cap), then the release names the run, so it can never release a later claim.
+  branch tip it started from. Anything else is a failed attempt, and its work is saved for the next one (below).
+- **Giving a card back:** the work is saved first (below), then the failed attempt's outcome is recorded for that run (it
+  counts toward the board's retry cap), then the release names the run, so it can never release a later claim. Both
+  notes say where the work is.
+- **Files the WIP commit cannot take** (unresolved conflicts, an oversized change, secret-shaped names) are not deleted:
+  the worktree moves to `<worktree>.kept-<time>` on that Mac, off the branch, and the card's note says where. Delete it
+  when you are done with it.
 - **Limits** count from the card's start, across build, review and fix: never stopped before `timeout_min`. Past it, a
   run that is still writing is kept: new log output or a change in its worktree (an edit, a new file, a commit; checked
   every 30 s, without blocking the runner; a worktree that cannot be read in time counts as activity) counts. A run
@@ -42,13 +49,41 @@ flowchart LR
   merge or close. It logs one line when a repo goes over (and when it is back under), each held card is logged as
   skipped with the reason, and `dask runner status` lists the held repos. If `gh` is missing, not logged in or fails, the
   count is skipped and cards start without the PR limit (one log line).
+- **Versions.** A goal with a `version_target` starts only that milestone's cards, `p0` cards apart; the others are logged
+  as skipped (`not in version <milestone>`), take no spec slot, and `dask runner status` counts them. Without a target
+  nothing is held. [versions.md](versions.md).
 - **Usage or rate limits:** that tool waits `backoff_min`; the attempt does not count.
-- **gitleaks is required.** Without it the runner builds but never pushes.
+- **Steps only you can do.** A build or fix prompt tells the agent to leave a login, signing, a paid purchase, a physical
+  device or an approval undone and finish the rest. It never tries, fakes or works around the step, and it writes one line
+  per step directly above its `RESULT:` line:
+
+  ```
+  HUMAN-STEP: <what is left undone> -- <why only you can do it>
+  ```
+
+  After a built run the runner writes each line as a card note (secrets redacted, cut to fit), lists the steps under "Not
+  done" in the PR body and in the card's next steps, and the [daily summary](api.md#daily-summary) lists them. The card goes
+  to review with its PR as usual; nothing marks a skipped step as done. If a required check needs the step, or nothing
+  useful is left without it, the agent ends with `RESULT: stopped needs the human: <step>`. That is a failed attempt like any
+  other: no PR, the card goes back, and at `retry_cap` it is blocked on you with that reason. Steps it reported are still
+  noted, so the daily summary lists them. Only the lines
+  directly above the last `RESULT:` line count.
+- **gitleaks is required.** Without it the runner builds but never pushes, neither a finished branch nor saved work.
 - It **never merges**, never pushes the default branch and never force-pushes.
-- **Review record.** The cross-model review is also stored on the board for the head it read, sent as the reviewing
+- **Review.** At most 2 passes per PR, and passes an earlier attempt left on the board count. Pass 1 reviews the whole
+  change. If a finding blocks, the builder gets one fix pass and pass 2 re-checks only those findings and regressions
+  from the fixes. There is no pass 3.
+- **What blocks.** A finding blocks only if it carries a repro: a `repro:` line right under it with the exact command,
+  input or failing test and the wrong result it shows. A finding tagged `[security]`, `[data-loss]`, `[approval]` or
+  `[money]` always blocks. Everything else is a follow-up: it is listed under `## Follow-ups` in the PR body and blocks
+  nothing. The P level only orders the list; the line format is in the `review-loop` skill.
+- **Not clean after pass 2.** The PR stays a draft (a ready PR from an earlier attempt goes back to draft), the open
+  findings go on top of a new PR's body, the card gets a Spec block with those findings and you get a message on the
+  card. It stays in review with its PR; nothing picks it up until you unblock it.
+- **Review record.** Each pass is also stored on the board for the head it read, sent as the reviewing
   tool (`codex@<machine>`; the claim goes in as the build tool beside `runner@<machine>`)
-  (`GET /api/tasks/<card>/review-runs`), which is what `dask captain-merge` checks ([captain.md](captain.md)). A fix pass
-  moves the head, so a fixed card needs a new review before the captain may merge it.
+  (`GET /api/tasks/<card>/review-runs`), which is what `dask captain-merge` checks ([captain.md](captain.md)). A clean
+  pass 2 is the review of the fixed head.
 - **Spec pass.** When a look starts no ready card, its free slots draft and review specs of open cards that have none
   (or an unreviewed draft): one harness drafts from a read-only view of the default branch, the other reviews, at most
   two full review passes and at most one narrow one, then the card is given back ready or draft with a note. No branch, no commit, no PR. `spec: false` turns
@@ -57,6 +92,45 @@ flowchart LR
   ([fleet.md](fleet.md)). A runner silent for `fleet.dead_min` loses its cards to the pool.
 - **Order.** Cards you pushed start first, then bug fixes (cards of kind `bug`: `dasks new <app> "…" --kind bug`), then
   the rest by priority. `dask ready` and MCP `ready_tasks` list them in the same order.
+
+## Stopped builds keep their work
+
+A build that stops before it finishes (timeout, idle stop, `max_min`, a failed attempt, a usage limit, the runner being
+stopped or dying) keeps its work, so the next attempt on any Mac continues from it instead of starting over.
+
+**Saving, before the card goes back:**
+
+1. Uncommitted changes become one commit, `<card>: wip: unfinished work saved by the runner (<reason>)`, built in a
+   temporary index with no hooks. Files with secret-shaped names (`.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`,
+   `*.mobileprovision`, `id_rsa*`, `id_ed25519*`) stay out even when staged. Ignored files are not saved. No WIP commit
+   is made when the worktree is not on the card branch, has unresolved conflicts, has more than 1000 changed paths or a
+   file over 50 MiB; earlier commits are still saved and the note says why.
+2. gitleaks scans `<default branch>..<tip>`, the WIP commit included, before anything leaves the Mac.
+3. The card branch `dasks/<card>` is pushed to origin. Never the default branch, never with force.
+
+| What happened | The note says | Where the work is |
+|---|---|---|
+| Clean scan, push worked | `Work saved: branch … on origin @ <sha>` | origin, and the local branch |
+| gitleaks is not installed | `Work not pushed: gitleaks is not installed` | the local branch on this Mac, WIP commit included |
+| gitleaks flagged something, or failed | `Work not pushed: gitleaks flagged …` | earlier commits on the local branch; the WIP commit on this Mac only, at `refs/dasks/kept/<card>/<sha>`, off the branch so the next run does not build on it |
+| Push failed | `Work not pushed: git push failed (…)` | the local branch on this Mac |
+
+A save that fails never holds up the hand-back: the card goes back with a note saying what was and was not saved. If the
+board cannot be reached, the release retries with the same note. If the runner dies mid-save, the next start saves again.
+
+**Continuing, before the next build.** The runner fetches `dasks/<card>` and starts from the first of these that fits:
+
+- origin's branch, when this Mac's local branch holds nothing beyond it;
+- this Mac's local branch, when it is ahead of origin's or origin has none (or the fetch failed);
+- otherwise the default branch, as for a first run.
+
+A saved branch counts only if it shares history with the default branch and adds something the default branch does not
+have, so a branch whose work was already squash-merged is not picked up. One that conflicts with the default branch is
+still used: the build merges. When a local branch and origin's have split, origin's wins, because every Mac can see it,
+and the local tip is kept at `refs/dasks/kept/<card>/<sha>` (one log line says so). A build that continues gets a prompt
+saying it is continuing and from where, and that `wip:` commits are unfinished saves.
+
+To look at a kept ref: `git log refs/dasks/kept/<card>/<sha>`. To drop it: `git update-ref -d <ref>`.
 
 ## Turn it on
 

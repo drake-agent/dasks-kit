@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- Code review rule: at most 2 passes per PR. Pass 1 reviews the whole change; pass 2 only re-checks pass-1 findings and
+  regressions from the fixes; the board and `dask review-record` refuse a third pass (older stored pass-3 rows stay
+  readable). A finding blocks only if it carries a repro (a `repro:` line with the command or input and the wrong
+  result) or is tagged `[security]`, `[data-loss]`, `[approval]` or `[money]`; the P level no longer blocks. Other
+  findings go under `## Follow-ups` in the PR body. The runner now runs pass 2 after its fix pass; not clean after it,
+  the PR stays a draft, the card is blocked with the open findings and you get a message. Spec reviews are unchanged.
+  See the `review-loop` skill and docs/runner.md.
+- Runner: a build that stops before it finishes keeps its work. Uncommitted changes become a WIP commit (secret-shaped
+  files stay out), gitleaks scans the new commits, and `dasks/<card>` is pushed to origin; a finding, a failed scan or a
+  missing gitleaks pushes nothing. The card's note says where the work is, or that it was not saved and why, and a failed
+  save never holds up the hand-back. The next run on any Mac starts from the saved branch when it is still usable, and
+  its prompt says it is continuing. See docs/runner.md.
+- Runner: an unattended build that meets a step only you can do (a login, signing, a paid purchase, a physical device, an
+  approval) skips that one step, never fakes it, and finishes the rest. It reports `HUMAN-STEP: <step> -- <why>` above its
+  `RESULT:` line; the runner writes that as a card note and in the PR body, and the daily summary (data, text and page, in
+  English and Korean) lists the step until its card ends. A card that is only that step stops as before and is never
+  reported as built. See docs/runner.md.
+- Version mode, opt-in per project: a goal's `version_target` (`POST /api/nodes/<goal>`, checked by `dasks check`) names
+  the milestone it builds now. New cards without a milestone go there, and the runner starts only its cards (`p0` apart),
+  logging the rest as skipped. `GET /api/versions` and the Goals page show progress. A ready version gets one gate card
+  that asks you to judge it; `launch_gate: <milestone>` marks cards that do not hold it back. No target, no change. See
+  docs/versions.md.
 - Captain: `dasks-captain` writes once in the captain chat when the watch has not looked at the board for
   `captain.watch_gap_sec` (default 600 s, 0 = off), and once more when it is back. The captain skill now says to stay
   light: short jobs only, anything longer goes to a background subagent. See docs/captain.md.

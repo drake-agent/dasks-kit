@@ -347,6 +347,31 @@ print(json.dumps({p: d.risk_hits(files, p) for p in ["src/auth/**", "*.sql", "in
   });
 });
 
+test('dask review-record: pass 1, then pass 2 (not clean says to block), a third is refused and nothing is sent', async () => {
+  const card = 'beta.t-rec';
+  const { root, cleanup } = tempRepo([task({ id: card, title: card, status: 'review', pr: PR } as any)]);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dasks-rec-'));
+  const s = await captainBoard(root, {}, { HOME: dir });
+  try {
+    const answer = path.join(dir, 'review.md');
+    fs.writeFileSync(answer, 'R1 [P1] [money] a.ts:1 charges twice\nVERDICT: changes\n');
+    const env = { ...clean(), HOME: dir, DASKS_URL: s.url, DASKS_MACHINE: 'two', PATH: '/usr/bin:/bin' };
+    const record = (head: string) => spawnSync('python3', [path.join(ROOT, 'bin/dask'), 'review-record', card, '--head', head, '--impl', 'claude', '--reviewer', 'codex', '--verdict', 'open', '--open', '1', '--answer-file', answer, '--tool', 'codex'], { env, encoding: 'utf8' });
+    let r = record('a'.repeat(40));
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.doesNotMatch(r.stdout, /not clean after the last pass/);
+    r = record('b'.repeat(40));
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /recorded review pass 2/);
+    assert.match(r.stdout, /not clean after the last pass: keep the PR draft, run dask block beta\.t-rec/);
+    r = record('c'.repeat(40));
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /already has its 2 review passes; there is no third/);
+    const rows = (await (await fetch(`${s.url}/api/tasks/${card}/review-runs`)).json()).passes;
+    assert.deepEqual(rows.map((x: any) => [x.pass, x.mode]), [[1, 'simple'], [2, 'simple']]);
+  } finally { await s.stop(); cleanup(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('captain-merge by default: a clean card goes to the human, whose merge OK at that head lets it merge', async () => {
   const card = 'beta.t-ready';
   const { root, cleanup } = tempRepo([task({ id: card, title: 'Ready', status: 'review', pr: PR } as any)]);
