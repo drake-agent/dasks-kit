@@ -39,7 +39,7 @@ carry `Authorization: Bearer <token>` (see [auth.md](auth.md)). The MCP server a
 | `PUT /api/tasks/<id>/spec` | store the next spec version (`text`, `expected_spec_version`) |
 | `POST /api/tasks/<id>/spec/review\|block\|unblock` | review the spec text, block it for Spec, lift a block |
 | `POST /api/tasks/<id>/messages` | send a card message |
-| `POST /api/tasks/<id>/review-runs` | record one cross-model review pass (`pass`, `head`, `reviewer`, `impl`, `verdict`, `open`, `answer`, …); the board adds the sender's family and the card's builders |
+| `POST /api/tasks/<id>/review-runs` | record one cross-model review pass, 1 or 2 (`pass`, `head`, `reviewer`, `impl`, `verdict`, `open`, `answer`, …); the board adds the sender's family and the card's builders |
 | `POST /api/nodes/<id>` | edit a goal, milestone or the north star (`title`, `title_ko`, `title_en`, `why`, …); a goal also takes `profile` ([cards.md](cards.md#project-profile)) |
 | `POST /api/fleet/heartbeat` | a runner's heartbeat |
 | `POST /api/backup/now` | push the data repo to `backup.remote` now; 200 with the status, 502 when the push failed, 409 when no remote is set |

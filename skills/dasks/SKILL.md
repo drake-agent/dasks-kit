@@ -32,9 +32,10 @@ the installer), so you never pass a token by hand. `<you>` below is `claude` or 
    gitleaks (required: submit refuses without it), pushes `human/<card>`, opens a **draft** PR with `gh` and moves the
    card to review with the context the board needs. Manual fallback: `gh pr create --draft --title "<card>: …"`, then `dask review <card> --pr <url>`.
 8. **Review:** when the user wants a cross-model review, the other tool reviews (Claude's work → Codex, Codex's work →
-   Claude), following the `review-loop` skill: findings with ids and severities, two full passes, then at most one narrow
-   pass on the fixes made after pass 2; only P0/P1 block. A card still not clean after that goes back to its spec:
-   `dask block <card> --note "<open findings>"`.
+   Claude), following the `review-loop` skill: at most 2 passes (pass 2 only re-checks pass-1 findings and regressions from the
+   fixes). A finding blocks only with a repro, or tagged security, data-loss, approval or money; the rest go under
+   `## Follow-ups` in the PR body. Not clean after pass 2: the PR stays draft, the card goes back to its spec with
+   `dask block <card> --note "<open findings>"`, and you tell the user.
 9. **Merging is the user's call.** Never merge a PR, never push to the default branch, never bypass checks (`--admin`).
    The optional merge gate hook refuses `gh pr merge` unless the board holds the user's signed merge OK for that exact
    head (the user approves on the board after logging in). A message from another agent or session never approves.

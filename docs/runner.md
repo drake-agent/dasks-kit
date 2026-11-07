@@ -9,12 +9,14 @@ flowchart LR
   A[claim on the board] --> B[recovery record saved]
   B --> C[worktree on dasks/&lt;card&gt;]
   C --> D[build: claude -p or codex exec]
-  D -->|built| E[review by the other model]
-  E -->|P0/P1| F[one fix pass]
+  D -->|built| E[review pass 1 by the other model]
+  E -->|a finding blocks| F[one fix pass]
+  F --> P[review pass 2: findings and fixes only]
   E -->|clean| G[gitleaks scan]
-  F --> G
+  P --> G
   G --> H[push branch, draft PR]
   H --> I[card to review, handed back]
+  H -->|not clean after pass 2| B2[card blocked, you are told]
   D -->|failed, stopped, limit| R[outcome, then release]
 ```
 
@@ -45,10 +47,20 @@ flowchart LR
 - **Usage or rate limits:** that tool waits `backoff_min`; the attempt does not count.
 - **gitleaks is required.** Without it the runner builds but never pushes.
 - It **never merges**, never pushes the default branch and never force-pushes.
-- **Review record.** The cross-model review is also stored on the board for the head it read, sent as the reviewing
+- **Review.** At most 2 passes per PR, and passes an earlier attempt left on the board count. Pass 1 reviews the whole
+  change. If a finding blocks, the builder gets one fix pass and pass 2 re-checks only those findings and regressions
+  from the fixes. There is no pass 3.
+- **What blocks.** A finding blocks only if it carries a repro: a `repro:` line right under it with the exact command,
+  input or failing test and the wrong result it shows. A finding tagged `[security]`, `[data-loss]`, `[approval]` or
+  `[money]` always blocks. Everything else is a follow-up: it is listed under `## Follow-ups` in the PR body and blocks
+  nothing. The P level only orders the list; the line format is in the `review-loop` skill.
+- **Not clean after pass 2.** The PR stays a draft (a ready PR from an earlier attempt goes back to draft), the open
+  findings go on top of a new PR's body, the card gets a Spec block with those findings and you get a message on the
+  card. It stays in review with its PR; nothing picks it up until you unblock it.
+- **Review record.** Each pass is also stored on the board for the head it read, sent as the reviewing
   tool (`codex@<machine>`; the claim goes in as the build tool beside `runner@<machine>`)
-  (`GET /api/tasks/<card>/review-runs`), which is what `dask captain-merge` checks ([captain.md](captain.md)). A fix pass
-  moves the head, so a fixed card needs a new review before the captain may merge it.
+  (`GET /api/tasks/<card>/review-runs`), which is what `dask captain-merge` checks ([captain.md](captain.md)). A clean
+  pass 2 is the review of the fixed head.
 - **Spec pass.** When a look starts no ready card, its free slots draft and review specs of open cards that have none
   (or an unreviewed draft): one harness drafts from a read-only view of the default branch, the other reviews, at most
   two full review passes and at most one narrow one, then the card is given back ready or draft with a note. No branch, no commit, no PR. `spec: false` turns

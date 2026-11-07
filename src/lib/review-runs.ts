@@ -1,5 +1,6 @@
 // Review run records: one row per cross-model review pass (`dask review-record`, the runner), kept on the board so the
-// pass limit (two full passes, then one narrow pass) and the clean-review proof survive a new clone or another Mac.
+// pass limit (two passes per PR) and the clean-review proof survive a new clone or another Mac. Rows stored under an
+// older limit (a pass 3, mode `narrow`) stay readable as they are; new ones are refused.
 // Append-only audit log:
 //   data/review-runs/<goal>/<slug>.jsonl   one JSON row per line, in append order
 // Each accepted append is one commit of the whole new file under the repo lock; a refusal writes nothing.
@@ -16,12 +17,14 @@ import { TASK_ID_RE, isTaskId } from './schema.ts';
 import { isoNow } from './specs.ts';
 import { familyOf, readClaimHistory } from './spec-state.ts';
 
+/** Review passes per card (one card, one PR): pass 1 reads the whole change, pass 2 re-checks its findings and the fixes. */
+export const REVIEW_PASSES = 2;
 export const REVIEW_ANSWER_MAX_BYTES = 262_144;   // answer text, UTF-8
 export const REVIEW_RUN_MAX_BODY = 2_097_152;     // raw JSON body (an answer at the cap written as \uXXXX is ~1.5 MiB)
 
 const FIELDS = ['pass', 'head', 'base', 'merge_base', 'tier', 'mode', 'reviewer', 'impl', 'verdict', 'open', 'noted', 'at', 'log_sha256', 'answer'] as const;
 const TIERS = ['normal'];
-const MODES = ['simple', 'narrow'];
+const MODES = ['simple'];
 const IMPLS = ['claude', 'codex'];
 const VERDICTS = ['clean', 'open'];
 const SHA1_RE = /^[0-9a-f]{40}$/;
@@ -61,7 +64,8 @@ function oneOf(body: Record<string, unknown>, k: string, allowed: string[]): str
 export function parseReviewRun(body: Record<string, unknown>): ReviewRow {
   const extra = Object.keys(body).filter((k) => !(FIELDS as readonly string[]).includes(k));
   if (extra.length) throw bad(`unknown field(s) for a review run: ${extra.join(', ')} (takes ${FIELDS.join(', ')})`);
-  const pass = int(body, 'pass', 3);
+  const pass = int(body, 'pass', 999);
+  if (pass < 1 || pass > REVIEW_PASSES) throw bad(`pass must be 1 or 2: a PR gets at most ${REVIEW_PASSES} review passes`);
   const head = body.head;
   if (typeof head !== 'string' || !SHA1_RE.test(head)) throw bad('head must be 40 lowercase hex (a commit sha)');
   const base = text(body, 'base', 200);
@@ -76,7 +80,6 @@ export function parseReviewRun(body: Record<string, unknown>): ReviewRow {
   const at = text(body, 'at', 40);
   const absent = (k: string) => body[k] === undefined || body[k] === null;
   let impl: string, log: string, answer: string;
-  if (pass < 1) throw bad('pass must be 1, 2 or 3');
   if (absent('impl')) throw bad('impl is required');
   impl = oneOf(body, 'impl', IMPLS);
   if (absent('log_sha256')) throw bad('log_sha256 is required');
@@ -86,7 +89,6 @@ export function parseReviewRun(body: Record<string, unknown>): ReviewRow {
   answer = body.answer as string;
   if (typeof answer !== 'string') throw bad('answer must be a string');
   if (!answer.isWellFormed()) throw bad('answer is not valid Unicode (lone surrogate)');
-  if ((mode === 'narrow') !== (pass === 3)) throw bad('mode narrow goes with pass 3 and only with it');
   if (verdict === 'clean' && open !== 0) throw bad('verdict clean needs open = 0');
   {
     const buf = Buffer.from(answer, 'utf8');
@@ -127,7 +129,7 @@ export function readReviewRuns(root: string, id: string): ReviewRow[] {
   return withRepoLock(root, () => readLines(root, id).rows);
 }
 
-/** POST after the shape and task checks: 409 on a taken pass 1-3, a gap before pass n, or a repeat of the last row;
+/** POST after the shape and task checks: 409 on a taken pass, a gap before pass n, or a repeat of the last row;
  *  else one commit of the file with the new row appended. Returns the stored row without its answer. */
 export function appendReviewRun(root: string, id: string, input: ReviewRow, actor: string, now = new Date(),
   board: { families?: Record<string, string>; claimedBy?: string; machine?: string } = {}): Record<string, unknown> {
@@ -135,7 +137,7 @@ export function appendReviewRun(root: string, id: string, input: ReviewRow, acto
     const { rows, lines } = readLines(root, id);
     const conflict = (msg: string) => new HttpError(409, msg, { passes: rows.map(withoutAnswer) });
     const n = input.pass;
-    if (rows.some((r) => r.pass === n)) throw conflict(`${id} already has a review pass ${n}; pass numbers 1-3 are used once per card`);
+    if (rows.some((r) => r.pass === n)) throw conflict(`${id} already has a review pass ${n}; each pass number is used once per card`);
     const missing = [];
     for (let k = 1; k < n; k++) if (!rows.some((r) => r.pass === k)) missing.push(k);
     if (missing.length) throw conflict(`${id} has no review pass ${missing.join(', ')} yet; pass ${n} comes after it`);

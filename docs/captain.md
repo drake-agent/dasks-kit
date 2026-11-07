@@ -132,9 +132,12 @@ have the other model's session record the review, so the board sees it come from
 dask review-record web.t-form --head <sha> --impl claude --reviewer "codex" --verdict clean --answer-file review.md
 ```
 
-A card gets two full review passes, then at most one narrow pass on the fixes made after pass 2 (`review-runs` passes
-1-3; pass 3 is recorded as `narrow`). The runner records its review as the next free pass. A card still not clean after that goes
-back to its spec (`dask block`), as the `review-loop` skill says.
+A PR gets at most 2 review passes (`review-runs` passes 1 and 2; a third is refused): pass 1 reviews the whole change,
+pass 2 only re-checks its findings and regressions from the fixes. A finding blocks only with a repro, or tagged
+security, data-loss, approval or money; other findings are follow-ups in the PR body under `## Follow-ups`. The runner
+records each review as the next free pass. A card not clean after pass 2 keeps its PR draft and goes back to its spec
+(`dask block`), and you are told, as the `review-loop` skill says. Rows from older kits (a pass 3 recorded as `narrow`)
+stay readable and count like any other row for their head.
 
 ## Captain chat
 

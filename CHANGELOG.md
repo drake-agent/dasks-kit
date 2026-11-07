@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Code review rule: at most 2 passes per PR. Pass 1 reviews the whole change; pass 2 only re-checks pass-1 findings and
+  regressions from the fixes; the board and `dask review-record` refuse a third pass (older stored pass-3 rows stay
+  readable). A finding blocks only if it carries a repro (a `repro:` line with the command or input and the wrong
+  result) or is tagged `[security]`, `[data-loss]`, `[approval]` or `[money]`; the P level no longer blocks. Other
+  findings go under `## Follow-ups` in the PR body. The runner now runs pass 2 after its fix pass; not clean after it,
+  the PR stays a draft, the card is blocked with the open findings and you get a message. Spec reviews are unchanged.
+  See the `review-loop` skill and docs/runner.md.
 - Captain: `dasks-captain` writes once in the captain chat when the watch has not looked at the board for
   `captain.watch_gap_sec` (default 600 s, 0 = off), and once more when it is back. The captain skill now says to stay
   light: short jobs only, anything longer goes to a background subagent. See docs/captain.md.

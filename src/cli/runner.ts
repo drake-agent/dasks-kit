@@ -1,7 +1,7 @@
 // dasks-runner: works ready cards on this machine without you. Each look takes the board's ready cards (open, unclaimed,
 // deps done, spec ready), keeps those in lane claude or codex whose project has a local repo (config.json
 // projects[].repo), and works each one (src/lib/run-flow.ts): claim, worktree on branch dasks/<card>, a headless build,
-// a review by the other model, one fix pass for P0/P1, a gitleaks scan, a push and a DRAFT PR, then the card goes back
+// a review by the other model (at most 2 passes, one fix between them), a gitleaks scan, a push and a DRAFT PR, then the card goes back
 // to you in review. It never merges, never pushes the default branch and never force-pushes.
 //   dasks-runner            loop: look every runner.poll_minutes
 //   dasks-runner --once     one look, work at most runner.max_parallel cards, then exit
@@ -174,7 +174,7 @@ let holdSaid = '';
 async function retryPending(env: FlowEnv): Promise<void> {
   for (const [card, r] of Object.entries(loadState().running)) {
     if (working.has(card) || (!r.pending && !r.handback)) continue;
-    if (r.handback) await handBack(env, card, r, r.handback.pr, r.handback.title, r.handback.summary, r.handback.review_note, r.handback.open);
+    if (r.handback) await handBack(env, card, r, r.handback.pr, r.handback.title, r.handback.summary, r.handback.review_note, r.handback.open, r.handback.blocked);
     else await settle(env, card, r, r.pending!.reason, r.pending!.count);
   }
 }
@@ -329,7 +329,7 @@ async function recover(): Promise<void> {
   for (const [card, r] of Object.entries(loadState().running)) {
     if (r.pid > 0) await endGroup(r.pid, env.graceMs);
     const ok = r.handback
-      ? await handBack(env, card, r, r.handback.pr, r.handback.title, r.handback.summary, r.handback.review_note, r.handback.open)
+      ? await handBack(env, card, r, r.handback.pr, r.handback.title, r.handback.summary, r.handback.review_note, r.handback.open, r.handback.blocked)
       : await settle(env, card, r, r.pending?.reason ?? 'the runner restarted mid-run', r.pending?.count ?? false);
     if (ok) log(`${card}: recovered after a runner restart`);
   }

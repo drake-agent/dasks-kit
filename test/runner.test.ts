@@ -4,10 +4,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
   RUNNER_DEFAULTS, agentText, attemptVerdict, blocking, cardTouches, countAllOpenPrs, countOpenPrs, countStart, emptyState, pickCards, prHolds, projectRepos, RATE_LIMITED, resultLine,
-  reviewFindings, runnerConfig, startedToday, type Candidate, type PickInput,
+  prBody, readCodeReview, recheckPrompt, reviewFindings, reviewPrompt, runnerConfig, withFollowUps, startedToday, type Candidate, type PickInput,
 } from '../src/lib/runner.ts';
 import { touchesOverlap } from '../src/lib/touches.ts';
 import { overrun, supervise, worktreeStamp } from '../src/lib/supervise.ts';
@@ -352,6 +353,57 @@ test('PR-first: a slow gh does not delay a heartbeat or a timer; repos are count
   } finally { delete process.env.FAKE_GH_SLEEP; fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('code review: a finding without a repro does not block, whatever its priority', () => {
+  const r = readCodeReview('R1 [P0] src/a.ts:3 looks wrong. Expected: right\n- R2 [P1] [repro] src/b.ts:9 no repro line follows\nR3 [P3] naming\nVERDICT: clean');
+  assert.deepEqual(r.findings.map((f) => f.severity), ['P0', 'P1', 'P3']);
+  assert.equal(r.blockers.length, 0);
+  assert.equal(r.followUps.length, 3);
+  assert.equal(r.clean, true);
+});
+
+test('code review: a tag of security, data-loss, approval or money blocks with no repro', () => {
+  for (const tag of ['security', 'data-loss', 'approval', 'money', 'Security', 'data loss', 'approval-gate']) {
+    const r = readCodeReview(`R1 [P2] [${tag}] src/a.ts:3 the token is logged. Expected: redacted\nVERDICT: changes`);
+    assert.equal(r.blockers.length, 1, tag);
+    assert.equal(r.clean, false, tag);
+  }
+  assert.equal(readCodeReview('R1 [P2] [style] src/a.ts:3 x\nVERDICT: clean').blockers.length, 0, 'any other tag is a follow-up');
+});
+
+test('code review: a repro with the command and the wrong result blocks; half a repro does not', () => {
+  const r = readCodeReview('R3 [P3] [repro] bin/x.py:12 an empty name crashes. Expected: refused\nrepro: python3 bin/x.py --name "" -> Traceback (KeyError)\nVERDICT: changes');
+  assert.equal(r.blockers.length, 1, 'even at P3');
+  assert.match(r.blockers[0].line, /\n {2}repro: python3 bin\/x\.py/);
+  for (const half of ['repro: python3 bin/x.py', 'repro: -> it crashes', 'repro: python3 bin/x.py ->']) {
+    assert.equal(readCodeReview(`R3 [P1] [repro] bin/x.py:12 crash\n${half}\nVERDICT: clean`).blockers.length, 0, half);
+  }
+  assert.equal(readCodeReview('R3 [P1] bin/x.py:12 crash\n\nrepro: a -> b\nVERDICT: clean').blockers.length, 0, 'the repro sits right under its finding');
+  assert.equal(readCodeReview('R3 [P1] bin/x.py:12 crash\nrepro: a -> b').blockers.length, 1, 'a repro counts with or without the tag');
+});
+
+test('code review: clean needs the reviewer\'s own verdict; pass-2 lines; an echoed pass-2 prompt reads as no finding', () => {
+  assert.equal(readCodeReview('R1 [P3] x y').clean, false, 'no verdict line');
+  assert.equal(readCodeReview('VERDICT: changes').clean, false);
+  assert.equal(readCodeReview('VERDICT: changes\nVERDICT: clean').clean, true, 'the last verdict counts');
+  assert.equal(readCodeReview('R1 resolved\nR2 resolved\nVERDICT: clean').findings.length, 0);
+  const prompt = recheckPrompt('beta.t-a', 'origin/main', 'claude', ['R1 [P1] [security] a.ts:1 x\n  repro: a -> b'], 'abc');
+  assert.match(prompt, /Pass 2 of 2/);
+  assert.match(prompt, /git diff abc\.\.HEAD/);
+  assert.equal(readCodeReview(prompt).findings.length, 0);
+  assert.equal(readCodeReview(reviewPrompt('beta.t-a', 'origin/main', 'claude')).findings.length, 0);
+});
+
+test('PR body: follow-ups go under their own heading, open findings on top; an old section is replaced', () => {
+  const body = prBody({ summary: 'built it', card: 'beta.t-a', note: 'n', open: ['R1 [P1] [money] a.ts:1 x'], blocked: true, followUps: ['- R2 [P3] a.ts:2 y'], actor: 'runner@one' });
+  assert.ok(body.indexOf('R1 [P1] [money]') < body.indexOf('built it'));
+  assert.match(body, /stays a draft/);
+  assert.match(body, /^## Follow-ups\n\n- R2 \[P3\] a\.ts:2 y$/m);
+  assert.doesNotMatch(prBody({ summary: 's', card: 'c', note: 'n', open: [], blocked: false, followUps: [], actor: 'a' }), /Follow-ups/);
+  assert.equal(withFollowUps('Intro\n', ['R1 [P3] a']), 'Intro\n\n## Follow-ups\n\n- R1 [P3] a\n');
+  assert.equal(withFollowUps('Intro\n\n## Follow-ups\n\n- old\n\n## Notes\nkeep\n', ['R1 [P3] a']), 'Intro\n\n## Follow-ups\n\n- R1 [P3] a\n\n## Notes\nkeep\n');
+  assert.equal(withFollowUps('Intro\n\n## Follow-ups\n\n- old\n', ['R1 [P3] a']), 'Intro\n\n## Follow-ups\n\n- R1 [P3] a\n');
+});
+
 // ---------- end to end: temp board, temp repo + bare remote, fake agents ----------
 
 const FAKE_AGENT = `#!/bin/bash
@@ -361,9 +413,17 @@ printf '%s\\n' "$*" >> "$FAKE_DIR/$me.args"
 prompt="\${@: -1}"
 case "$prompt" in
   *"cross-model reviewer"*)
-    if [ "\${FAKE_REVIEW:-clean}" = p1 ]; then echo "- [P1] src/a/built.txt:1 says hi, should say hello"; echo "VERDICT: changes"; else echo "- [P3] fine"; echo "VERDICT: clean"; fi
+    pass2=; case "$prompt" in *"Pass 2 of 2"*) pass2=1 ;; esac
+    finding() { echo "- R1 [P1] [repro] src/a/built.txt:1 says hi. Expected: hello"; echo "  repro: cat src/a/built.txt -> hi"; echo "VERDICT: changes"; }
+    case "\${FAKE_REVIEW:-clean}" in
+      p1) if [ -n "$pass2" ]; then echo "R1 resolved"; echo "- R2 [P3] src/a/built.txt:1 no newline policy"; echo "VERDICT: clean"; else finding; fi ;;
+      stuck) finding ;;
+      security) echo "- R1 [P2] [security] src/a/built.txt:1 prints a token. Expected: redacted"; echo "VERDICT: changes" ;;
+      followup) echo "- R1 [P0] src/a/built.txt:1 might be wrong, not shown"; echo "VERDICT: clean" ;;
+      *) echo "- [P3] fine"; echo "VERDICT: clean" ;;
+    esac
     exit 0 ;;
-  *"review of "*"found these P0/P1"*)
+  *"review of "*"found these blocking"*)
     echo hello > src/a/built.txt && git add -A && git -c user.name=t -c user.email=t@example.invalid commit -qm "fix" && echo "RESULT: fixed"
     exit 0 ;;
   *"ended without a RESULT line"*)
@@ -383,7 +443,8 @@ esac
 const FAKE_GH = `#!/bin/bash
 printf '%s\\n' "$*" >> "$FAKE_DIR/gh.args"
 case "$1 $2" in
-  "pr view") exit 1 ;;
+  "pr view") if [ -n "\${FAKE_PR_OPEN:-}" ]; then case "$*" in *body*) echo "From the last attempt" ;; *) echo "https://github.com/example/proj/pull/7" ;; esac; else exit 1; fi ;;
+  "pr ready"|"pr edit") exit 0 ;;
   "pr list") case "\${FAKE_PRS:-0}" in fail) echo "HTTP 401: Bad credentials" >&2; exit 1 ;; *) echo "\${FAKE_PRS:-0}" ;; esac ;;
   "pr create") echo "Creating draft pull request"; echo "https://github.com/example/proj/pull/7" ;;
   *) exit 1 ;;
@@ -439,7 +500,7 @@ async function world(env: Record<string, string> = {}) {
   };
 }
 
-test('e2e success: Claude builds, Codex reviews (P1), one fix pass, branch pushed, draft PR, card in review; main untouched', async () => {
+test('e2e success: Claude builds, Codex reviews (a repro blocks), one fix, a clean pass 2, branch pushed, draft PR, card in review; main untouched', async () => {
   const w = await world({ FAKE_AGENT: 'success', FAKE_REVIEW: 'p1' });
   try {
     const r = await w.runner('--once');
@@ -452,8 +513,11 @@ test('e2e success: Claude builds, Codex reviews (P1), one fix pass, branch pushe
     assert.match(w.read('gitleaks.args'), /^git --no-banner --redact --log-opts/m, 'scanned before the push');
     const gh = w.read('gh.args');
     assert.match(gh, /^pr create --draft --base main --head dasks\/beta\.t-build --title beta\.t-build: Build me --body /m);
-    assert.match(gh, /P1/);
+    assert.match(gh, /## Follow-ups/, 'the pass-2 follow-up is in the PR body');
+    assert.match(gh, /R2 \[P3\]/);
     assert.ok(!/merge/.test(gh), 'never merges');
+    assert.doesNotMatch(gh, /stays a draft/);
+    assert.notEqual(t.spec_state, 'blocked');
     // The review is sent by the reviewer's own name and the claim by the builder's, so the board knows both families.
     const rows = (await (await fetch(`${w.url}/api/tasks/${w.card}/review-runs`)).json()).passes;
     assert.deepEqual([rows[0].actor, rows[0].reviewer_family, rows[0].builders, rows[0].builder_families],
@@ -462,6 +526,10 @@ test('e2e success: Claude builds, Codex reviews (P1), one fix pass, branch pushe
     assert.match(claude, /^-p --session-id [0-9a-f-]{36} --permission-mode auto --output-format stream-json --verbose /m);
     assert.match(claude, /--resume/, 'the builder got one fix pass');
     assert.match(w.read('codex.args'), /^exec --sandbox read-only/m);
+    assert.deepEqual(rows.map((x: any) => [x.pass, x.mode, x.verdict, x.open, x.noted]), [[1, 'simple', 'open', 1, 0], [2, 'simple', 'clean', 0, 1]]);
+    assert.notEqual(rows[0].head, rows[1].head, 'pass 2 read the fixed head');
+    assert.equal(w.g(w.bare, 'rev-parse', 'dasks/beta.t-build').trim(), rows[1].head);
+    assert.match(w.read('codex.args'), /Pass 2 of 2[\s\S]*> - R1 \[P1\] \[repro\][\s\S]*> repro: cat src\/a\/built\.txt -> hi/, 'pass 2 is told the pass-1 finding');
     assert.match(claude, /Headless run/);
     assert.match(claude, /Helpers stay read-only on the board/);
     assert.equal(w.g(w.bare, 'rev-parse', 'main').trim(), w.mainBefore, 'the default branch is never pushed');
@@ -470,6 +538,82 @@ test('e2e success: Claude builds, Codex reviews (P1), one fix pass, branch pushe
     const st = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(ROOT, 'src/cli/runner.ts'), '--status'], { env: { ...process.env, HOME: w.home }, encoding: 'utf8' });
     assert.match(st.stdout, /beta\.t-build {2}claude {2}review/);
     assert.match(st.stdout, /today: 1 card/);
+  } finally { await w.stop(); }
+});
+
+test('e2e: a finding without a repro blocks nothing: no fix, one pass, clean, listed as a follow-up', async () => {
+  const w = await world({ FAKE_AGENT: 'success', FAKE_REVIEW: 'followup' });
+  try {
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    const t = await w.get();
+    assert.equal(t.status, 'review', r.out);
+    assert.doesNotMatch(w.read('claude.args'), /--resume/, 'nothing to fix');
+    const rows = (await (await fetch(`${w.url}/api/tasks/${w.card}/review-runs`)).json()).passes;
+    assert.deepEqual(rows.map((x: any) => [x.pass, x.verdict, x.open, x.noted]), [[1, 'clean', 0, 1]]);
+    assert.match(w.read('gh.args'), /## Follow-ups[\s\S]*R1 \[P0\]/);
+  } finally { await w.stop(); }
+});
+
+test('e2e: a [security] finding with no repro stays open after pass 2: no third pass, PR draft, card blocked, user told', async () => {
+  const w = await world({ FAKE_AGENT: 'success', FAKE_REVIEW: 'security' });
+  try {
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    const t = await w.get();
+    assert.equal(t.status, 'review', r.out);
+    assert.equal(t.spec_state, 'blocked');
+    assert.match(t.block_note, /not clean after 2 review passes: - R1 \[P2\] \[security\]/);
+    assert.equal(t.claimed_by, '');
+    assert.equal(t.pr, 'https://github.com/example/proj/pull/7');
+    const gh = w.read('gh.args');
+    assert.match(gh, /^pr create --draft /m);
+    assert.match(gh, /stays a draft\. Open findings:/);
+    assert.doesNotMatch(gh, /^pr ready/m);
+    const rows = (await (await fetch(`${w.url}/api/tasks/${w.card}/review-runs`)).json()).passes;
+    assert.deepEqual(rows.map((x: any) => [x.pass, x.verdict]), [[1, 'open'], [2, 'open']]);
+    assert.equal(w.read('codex.args').split('cross-model reviewer').length - 1, 2, 'two reviewer runs, no third');
+    const msgs = (await (await fetch(`${w.url}/api/tasks/${w.card}/messages`)).json()).messages;
+    assert.equal(msgs.filter((m: any) => m.to === 'user' && m.kind === 'heads-up' && /not clean after 2 passes/.test(m.text)).length, 1);
+    assert.deepEqual(w.state().running, {}, 'the hand-back finished');
+  } finally { await w.stop(); }
+});
+
+test('e2e: an open PR from an earlier attempt goes back to draft at the limit, and its body gets the follow-ups', async () => {
+  const w = await world({ FAKE_AGENT: 'success', FAKE_REVIEW: 'stuck', FAKE_PR_OPEN: '1' });
+  try {
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    const gh = w.read('gh.args');
+    assert.match(gh, /^pr ready https:\/\/github\.com\/example\/proj\/pull\/7 --undo$/m);
+    assert.doesNotMatch(gh, /^pr create/m);
+    assert.equal((await w.get()).spec_state, 'blocked');
+  } finally { await w.stop(); }
+  const f = await world({ FAKE_AGENT: 'success', FAKE_REVIEW: 'followup', FAKE_PR_OPEN: '1' });
+  try {
+    assert.equal((await f.runner('--once')).status, 0);
+    const gh = f.read('gh.args');
+    assert.match(gh, /^pr edit https:\/\/github\.com\/example\/proj\/pull\/7 --body From the last attempt\n\n## Follow-ups\n\n- R1 \[P0\]/m);
+    assert.doesNotMatch(gh, /^pr ready/m);
+  } finally { await f.stop(); }
+});
+
+test('e2e: passes an earlier attempt stored count: with both used and no clean head the run gets no review and the card blocks', async () => {
+  const w = await world({ FAKE_AGENT: 'success', FAKE_REVIEW: 'clean' });
+  try {
+    const answer = 'R1 [P1] [money] a.ts:1 charges twice\nVERDICT: changes\n';
+    const row = (pass: number) => ({ pass, head: 'a'.repeat(40), base: 'main', merge_base: '', tier: 'normal', mode: 'simple', reviewer: 'codex', impl: 'claude', verdict: 'open', open: 1, noted: 0,
+      at: '2026-01-01T00:00:00Z', log_sha256: createHash('sha256').update(answer).digest('hex'), answer });
+    for (const pass of [1, 2]) {
+      const res = await fetch(`${w.url}/api/tasks/${w.card}/review-runs`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Dasks-Actor': 'codex@testbox', Authorization: `Bearer ${w.token}` }, body: JSON.stringify(row(pass)) });
+      assert.equal(res.status, 201, await res.text());
+    }
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    assert.equal(w.read('codex.args'), '', 'no third reviewer run');
+    const t = await w.get();
+    assert.equal(t.spec_state, 'blocked', r.out);
+    assert.match(t.block_note, /charges twice/);
   } finally { await w.stop(); }
 });
 

@@ -37,7 +37,7 @@ flowchart LR
    `- [Q] often=N bad=N kind=K …`, and a `VERDICT:` line. The review is recorded with `review_spec` under the
    reviewer's own name (`claude@<machine>` or `codex@<machine>`): pass when there is no P0/P1 finding and no blocking
    question, fail otherwise.
-4. **Two full passes, then at most one narrow pass** (the kit's one review rule, as for code). On a fail the drafter
+4. **Two full passes, then at most one narrow pass.** On a fail the drafter
    gets the findings and writes the next version; the reviewer looks again in full. Still failing after pass 2: one more
    revision, and pass 3 checks only whether the pass-2 findings are fixed and the changed text broke nothing. Still open after that: the spec stays draft, the failing review stays on that
    version, and the findings go into a card note. A reviewed draft is not picked again until someone writes a new version.

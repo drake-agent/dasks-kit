@@ -302,7 +302,8 @@ export function resultLine(text: string): string {
   return lines.length ? lines[lines.length - 1].slice(0, 300) : '';
 }
 
-/** Review findings by severity: lines like `- [P1] file.ts:12 ...`, `P0: ...` or `**P1** ...`. */
+/** Spec review findings by severity: lines like `- [P1] section ...`, `P0: ...` or `**P1** ...`. Code reviews are read
+ *  by readCodeReview. */
 export function reviewFindings(text: string): { severity: string; line: string }[] {
   const out: { severity: string; line: string }[] = [];
   for (const l of text.split('\n')) {
@@ -312,6 +313,55 @@ export function reviewFindings(text: string): { severity: string; line: string }
   return out;
 }
 export const blocking = <F extends { severity: string }>(f: F[]): F[] => f.filter((x) => x.severity === 'P0' || x.severity === 'P1');
+
+/** Tags that block a code review finding with or without a repro. */
+const ALWAYS_BLOCK = new Set(['security', 'data-loss', 'approval', 'money']);
+const FINDING_RE = /^\s*(?:[-*]\s*)?(?:\*\*)?(?:R\d+\s+)?\[?(P[0-3])\]?(?:\*\*)?(?:\s*\[([A-Za-z -]+)\])?\s*[:\-–]?\s+\S/;
+const REPRO_RE = /^\s*(?:[-*]\s*)?repro:\s*\S.*?\s(?:->|→)\s+\S/i;
+
+export interface CodeFinding { severity: string; tag: string; line: string; blocks: boolean }
+export interface CodeReview { findings: CodeFinding[]; blockers: CodeFinding[]; followUps: CodeFinding[]; verdict: string; clean: boolean }
+
+/** One code review answer. A finding blocks when a `repro:` line right under it gives a command or input and the wrong
+ *  result, or when it is tagged security, data-loss, approval or money. The P level only orders the list. Clean needs
+ *  the reviewer's own `VERDICT: clean` and nothing blocking; the last verdict line counts. */
+export function readCodeReview(text: string): CodeReview {
+  const lines = text.split('\n');
+  const findings: CodeFinding[] = [];
+  lines.forEach((l, i) => {
+    const m = FINDING_RE.exec(l);
+    if (!m) return;
+    const tag = (m[2] ?? '').trim().toLowerCase().replace(/ /g, '-').replace(/^approval-gate$/, 'approval');
+    const repro = REPRO_RE.test(lines[i + 1] ?? '') ? lines[i + 1].trim().replace(/^[-*]\s*/, '').slice(0, 400) : '';
+    findings.push({ severity: m[1], tag, line: l.trim().slice(0, 400) + (repro ? `\n  ${repro}` : ''), blocks: !!repro || ALWAYS_BLOCK.has(tag) });
+  });
+  const verdict = [...text.matchAll(/VERDICT:\s*(clean|changes)\b/g)].at(-1)?.[1] ?? '';
+  const blockers = findings.filter((f) => f.blocks);
+  return { findings, blockers, followUps: findings.filter((f) => !f.blocks), verdict, clean: !blockers.length && verdict === 'clean' };
+}
+
+/** The `## Follow-ups` section of a PR body, one list item per finding. */
+export function followUpSection(lines: string[]): string {
+  return ['## Follow-ups', '', ...lines.map((l) => `- ${l.replace(/^[-*]\s+/, '').replace(/\n\s*/g, ' ')}`)].join('\n');
+}
+
+/** A PR body with its `## Follow-ups` section replaced, or added at the end. */
+export function withFollowUps(body: string, lines: string[]): string {
+  const section = followUpSection(lines);
+  const at = body.search(/^## Follow-ups[ \t]*$/m);
+  if (at < 0) return `${body.trimEnd()}\n\n${section}\n`;
+  const rest = body.slice(at + 1);
+  const next = rest.search(/^## /m);
+  return `${body.slice(0, at)}${section}\n${next < 0 ? '' : `\n${rest.slice(next)}`}`;
+}
+
+/** A runner PR's body: open findings first when any are left, follow-ups in their own section. */
+export function prBody(o: { summary: string; card: string; note: string; open: string[]; blocked: boolean; followUps: string[]; actor: string }): string {
+  const open = o.open.length ? [o.blocked ? 'Not clean after the last review pass; this PR stays a draft. Open findings:' : 'Findings still to check:', ...o.open.map((l) => '  ' + l), ''] : [];
+  return [...open, o.summary, '', `Card: ${o.card} (Dasks)`, `Review: ${o.note}.`, '',
+    ...(o.followUps.length ? [followUpSection(o.followUps), ''] : []),
+    `Opened by the Dasks runner (${o.actor}) as a draft. Merging is the user's call.`].join('\n');
+}
 
 // ---------- prompts ----------
 
@@ -337,19 +387,41 @@ export function runnerRules(card: string, branch: string, base: string): string 
   ].join('\n');
 }
 
+/** How a code reviewer writes findings, for both passes. Examples stay inside sentences: the reader only takes whole lines. */
+const FINDING_RULES = [
+  'Write each finding on its own line, in this order: an id that runs on across passes (R1, R2, ...), a priority ([P0] to [P3]; it only orders the list and never blocks), a block tag if one applies, `<file>:<line>`, what is wrong, then `Expected: <the right result>`.',
+  'Block tags: [repro] when you can show it, with the very next line reading `repro: <exact command, input or failing test> -> <the wrong result it shows>`. [security], [data-loss], [approval] (a human approval gate is skipped) and [money] block with or without a repro.',
+  'Any other finding gets no tag: it is a follow-up, listed in the PR and not blocking. No style nits.',
+].join('\n');
+const VERDICT_RULE = 'End with exactly one line: `VERDICT: clean` (nothing blocks; follow-ups may remain) or `VERDICT: changes` (a finding blocks).';
+
+/** Pass 1: the whole change. */
 export function reviewPrompt(card: string, base: string, builder: Tool): string {
   return [
-    `Review the commits of Dasks card ${card} on the current branch (\`git log ${base}..HEAD\`, \`git diff ${base}...HEAD\`). ${builder === 'claude' ? 'Claude' : 'Codex'} wrote them; you are the cross-model reviewer.`,
+    `Review the commits of Dasks card ${card} on the current branch (\`git log ${base}..HEAD\`, \`git diff ${base}...HEAD\`). ${builder === 'claude' ? 'Claude' : 'Codex'} wrote them; you are the cross-model reviewer. Pass 1 of 2: review the whole change.`,
     'Read-only: do not edit files, commit, push or touch the board. Look for bugs, regressions, missing tests and anything the card asked for that is not done.',
-    'List each finding on its own line as `- [P0|P1|P2|P3] <file>:<line> <what is wrong and the fix>`. P0/P1 = must fix before merge; P2/P3 = notes. No style nits.',
+    FINDING_RULES,
     helperRule(card),
-    'End with exactly one line: `VERDICT: clean` (no P0/P1) or `VERDICT: changes` (any P0/P1).',
+    VERDICT_RULE,
+  ].join('\n');
+}
+
+/** Pass 2: only the pass-1 findings and what the fixes broke. They are quoted with `> ` so an echoed prompt reads as no finding. */
+export function recheckPrompt(card: string, base: string, builder: Tool, previous: string[], since: string): string {
+  return [
+    `Re-check the commits of Dasks card ${card} on the current branch (\`git diff ${since ? `${since}..HEAD` : `${base}...HEAD`}\` shows the fixes). ${builder === 'claude' ? 'Claude' : 'Codex'} wrote them; you are the cross-model reviewer. Pass 2 of 2, the last one: check only the findings below and regressions the fixes caused. Raise nothing else.`,
+    'Read-only: do not edit files, commit, push or touch the board.',
+    ...(previous.length ? ['Pass 1 findings:', ...previous.flatMap((f) => f.split('\n').map((l) => `> ${l.trim()}`))] : []),
+    'Answer each one on its own line: `<id> resolved`, or repeat its finding line, with its tag and a new `repro:` line, as it shows on this head.',
+    FINDING_RULES,
+    helperRule(card),
+    VERDICT_RULE,
   ].join('\n');
 }
 
 export function fixPrompt(card: string, branch: string, findings: string[]): string {
   return [
-    `The cross-model review of ${card} found these P0/P1 problems. Fix them on ${branch} and commit (messages start with "${card}: "). Do not push, open a PR or touch the board.`,
+    `The cross-model review of ${card} found these blocking problems. Fix them on ${branch} with the smallest change and commit (messages start with "${card}: "). Do not push, open a PR or touch the board.`,
     ...findings.map((f) => '  ' + f),
     'If a finding is wrong, leave the code and say why in your final message.',
     HEADLESS_WAIT_RULE,
@@ -434,7 +506,7 @@ export interface RunRecord {
   /** Set when a release or hand-back failed: what the next look (or a restart) must still tell the board. */
   pending?: { reason: string; count: boolean };
   /** Set once the draft PR is open: what the hand-back needs if it has to be retried. */
-  handback?: { pr: string; title: string; summary: string; review_note: string; open: string[] };
+  handback?: { pr: string; title: string; summary: string; review_note: string; open: string[]; blocked?: boolean };
 }
 
 export interface HistoryRow { card: string; tool: Tool; started: string; ended: string; outcome: 'review' | 'released' | 'rate-limited' | 'error' | 'spec-ready' | 'spec-draft'; detail: string; log: string; pr?: string }
