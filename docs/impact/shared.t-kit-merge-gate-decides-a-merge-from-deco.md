@@ -28,6 +28,10 @@
 ## Risks
 - Approval hole: a spelling the reader decodes differently from bash. Mitigated by failing closed on anything it does
   not fully know (expansions, globs, `$"…"`, unknown or version-dependent escapes, non-ASCII bytes) and the differential.
+- Reading further than bash: a quote or expansion the gate closes later than bash would hide the next command (review
+  R1-R3 and the same kind found after it). Any unclosed quote, substitution or escape, a single quote or bare `{`/`[`
+  inside `${…}`/`$[…]`, and a `case` pattern inside `$(…)` make the whole command unreadable (refused); `<<` inside
+  arithmetic is a shift, not a here-document.
 - Agents stalled: a new refusal on ordinary commands. New refusals need gh-like words next to unreadable ones (a
   variable or glob as the command word followed by `pr`/`api`/merge text, `gh $X …`, a wrapper with such words), or a
   compound command whose parts mention a merge (as on main).

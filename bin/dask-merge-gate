@@ -75,15 +75,18 @@ class Simple:
         self.words, self.redirect, self.cont, self.nested, self.start, self.raw = [], False, False, nested, None, ""
 
 class Parsed:
-    def __init__(self): self.cmds, self.compound = [], False
+    # broken: a quote, substitution or escape is not closed, so the gate cannot know where the next command starts
+    def __init__(self): self.cmds, self.compound, self.broken = [], False, False
 
 class Reader:
     """Splits shell text into simple commands (on separators, newlines, subshells, substitutions) and decodes words."""
     def __init__(self, src, out):
         self.s, self.i, self.out, self.heredocs = src, 0, out, []
 
-    def commands(self, nested, stop):
-        s, cmd = self.s, Simple(nested)
+    def commands(self, nested, stop, arith=False):
+        """Read simple commands up to the end, or up to the `)` that closes this level when `stop`. In arithmetic
+        (`((…))`, `$((…))`) `<<` is a shift, not a here-document."""
+        s, cmd, saw_case = self.s, Simple(nested), False
         def finish():
             nonlocal cmd
             if cmd.words or cmd.redirect:
@@ -100,10 +103,13 @@ class Reader:
                 finish(); self.out.compound = True; self.i += 1; self.heredoc_bodies(); continue
             if c == ")":
                 finish(); self.i += 1
-                if stop: return
+                if stop:
+                    if saw_case: self.out.broken = True  # a `pat)` of case: the gate cannot tell where this level ends
+                    return
                 self.out.compound = True; continue
             if c == "(":
-                finish(); self.out.compound = True; self.i += 1; self.commands(nested, True); continue
+                finish(); self.out.compound = True; self.i += 1
+                self.commands(nested, True, arith or s[self.i:self.i + 1] == "("); continue
             if cmd.start is None: cmd.start = self.i
             if s.startswith(("<(", ">("), self.i):
                 st = self.i; self.i += 2; self.out.compound = True; self.commands(True, True)
@@ -114,7 +120,7 @@ class Reader:
                 while self.i < len(s) and s[self.i] in " \t": self.i += 1
                 if self.i < len(s) and s[self.i] not in "\n;&|()<>":
                     w = self.word(cmd)
-                    if op in ("<<", "<<-"):
+                    if op in ("<<", "<<-") and not arith:
                         self.heredocs.append((w.value if w.value is not None else w.raw, op == "<<-", not any(q in w.raw for q in "'\"\\")))
                 continue
             op = next((o for o in SEPARATORS if s.startswith(o, self.i)), None)
@@ -122,8 +128,10 @@ class Reader:
                 finish(); self.out.compound = True; self.i += len(op); continue
             w = self.word(cmd)
             if w.raw.isdigit() and self.i < len(s) and s[self.i] in "<>": continue  # the fd number of a redirect
+            saw_case = saw_case or w.value in ("case", "esac")
             cmd.words.append(w)
         finish()
+        if stop: self.out.broken = True  # no closing `)`
 
     def word(self, cmd):
         s, st, buf, ok = self.s, self.i, [], True
@@ -137,7 +145,7 @@ class Reader:
                 self.i += 2 if nx else 1; continue
             if c == "'":
                 j = s.find("'", self.i + 1)
-                if j < 0: ok = False; self.i = len(s); break
+                if j < 0: ok = False; self.i = len(s); self.out.broken = True; break
                 buf.append(s[self.i + 1:j]); self.i = j + 1; continue
             if c == '"':
                 self.i += 1; v = self.dquote(cmd, '"')
@@ -179,73 +187,80 @@ class Reader:
                 buf.append("$"); self.i += 1; continue
             if c == "`": self.backtick(); ok = False; continue
             buf.append(c); self.i += 1
-        return None if term else ("".join(buf) if ok else None)
+        if term: self.out.broken = True; return None
+        return "".join(buf) if ok else None
 
     def expansion(self):
         """At a `$`: skip a parameter, command or arithmetic expansion (reading commands inside); False if `$` is literal."""
         s, nx = self.s, self.s[self.i + 1:self.i + 2]
         if nx == "(":
-            self.i += 2; self.out.compound = True; self.commands(True, True); return True
+            arith = s[self.i + 2:self.i + 3] == "("
+            self.i += 2; self.out.compound = True; self.commands(True, True, arith); return True
         if nx == "{":
-            self.i += 2; self.braced(); return True
+            self.i += 2; self.braced("{", "}"); return True
         if nx == "[":
-            j = s.find("]", self.i); self.i = len(s) if j < 0 else j + 1; return True
+            self.i += 2; self.braced("[", "]"); return True
         m = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-]").match(s, self.i + 1)
         if m: self.i = m.end(); return True
         return False
 
-    def braced(self):
-        s, depth = self.s, 1
+    def braced(self, open_, close):
+        """Inside ${…} or $[…]: find the end and read every substitution inside. Where bash's reading depends on the
+        context (a single quote is quoting outside "…" but not inside, a bare `{` may nest), the gate cannot be sure
+        where the expansion ends, so the command is unreadable."""
+        s = self.s
         while self.i < len(s):
             c = s[self.i]
             if c == "\\": self.i += 2; continue
-            if c == "'":
-                j = s.find("'", self.i + 1); self.i = len(s) if j < 0 else j + 1; continue
             if c == '"': self.i += 1; self.dquote(None, '"'); continue
             if c == "`": self.backtick(); continue
             if c == "$" and self.expansion(): continue
-            if c == "{": depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0: self.i += 1; return
+            if c == "'" or c == open_: self.out.broken = True
+            elif c == close: self.i += 1; return
             self.i += 1
+        self.out.broken = True
 
     def backtick(self):
         s, j, buf = self.s, self.i + 1, []
         while j < len(s) and s[j] != "`":
             if s[j] == "\\" and s[j + 1:j + 2] in ("$", "`", "\\"): buf.append(s[j + 1]); j += 2; continue
             buf.append(s[j]); j += 1
+        if j >= len(s): self.out.broken = True
         self.i = min(j + 1, len(s)); self.out.compound = True
         Reader("".join(buf), self.out).commands(True, False)
 
     def ansi_c(self):
-        """At `$'`: the decoded text as bash 5 does it, or None for an unterminated quote, an escape the gate does not
-        know (refusing beats guessing), a NUL (bash cuts the word there) or a byte that is not ASCII."""
-        s, i, buf, ok = self.s, self.i + 2, [], True
-        while i < len(s):
-            c = s[i]
-            if c == "'": self.i = i + 1; return "".join(buf) if ok else None
+        """At `$'`: the decoded text as bash 5 does it, or None for an escape the gate does not know (refusing beats
+        guessing), a NUL (bash cuts the word there) or a byte that is not ASCII. Like bash, the end of the quote is
+        found first (a backslash always takes the next character with it), then the text inside is decoded."""
+        s, j = self.s, self.i + 2
+        while j < len(s) and s[j] != "'": j += 2 if s[j] == "\\" else 1
+        if j >= len(s): self.i = len(s); self.out.broken = True; return None
+        body, self.i = s[self.i + 2:j], j + 1
+        buf, ok, i = [], True, 0
+        while i < len(body):
+            c = body[i]
             if c != "\\": buf.append(c); i += 1; continue
-            e = s[i + 1:i + 2]; i += 2
-            if not e: break
+            e = body[i + 1:i + 2]; i += 2
+            if not e: ok = False; continue
             code = None
             if e in ANSI_C: buf.append(ANSI_C[e]); continue
             if e in "01234567":
-                m = re.compile(r"[0-7]{1,3}").match(s, i - 1); i = m.end(); code = int(m.group(), 8)
+                m = re.compile(r"[0-7]{1,3}").match(body, i - 1); i = m.end(); code = int(m.group(), 8)
                 if code > 0x7F: ok = False; continue
             elif e in "xuU":
-                m = re.compile(r"[0-9a-fA-F]{1,%d}" % {"x": 2, "u": 4, "U": 8}[e]).match(s, i)
+                m = re.compile(r"[0-9a-fA-F]{1,%d}" % {"x": 2, "u": 4, "U": 8}[e]).match(body, i)
                 if not m: ok = False; continue
                 i = m.end(); code = int(m.group(), 16)
                 if e == "x" and code > 0x7F: ok = False; continue
             elif e == "c":
-                x = s[i:i + 1]; i += 1
-                if not x or x in "\\'?": ok = False; continue  # \c? differs between bash versions
+                x = body[i:i + 1]; i += 1
+                if not x or x in "\\?": ok = False; continue  # \c? differs between bash versions
                 code = ord(x.upper()) & 0x1F
             else: ok = False; continue
             if code == 0 or code > 0x10FFFF or 0xD800 <= code <= 0xDFFF: ok = False; continue
             buf.append(chr(code))
-        self.i = len(s); return None
+        return "".join(buf) if ok else None
 
     def heredoc_bodies(self):
         s = self.s
@@ -303,6 +318,7 @@ def fail_closed(c):
 def decide(cmd):
     """The decoded words of the one merge in `cmd`, or None when `cmd` is not a merge. Refuses what it cannot check."""
     p = read(cmd)
+    if p.broken: refuse("cannot read the command: a quote, substitution or escape is not closed")
     for c in p.cmds: fail_closed(c)
     if p.compound or len(p.cmds) > 1:
         if MERGE_TEXT.search(cmd) or any(merge_text(c) for c in p.cmds):
@@ -324,7 +340,8 @@ def decide(cmd):
             refuse("gh options before the subcommand of a merge; run a plain `gh pr merge <n> [-R owner/repo]`")
         if merge_text(c): refuse("a merge the gate cannot read; run a plain `gh pr merge <n> [-R owner/repo]`")
         return None
-    if not k and words and name(words[0]) in READ_ONLY and not any(m in cmd for m in SUBST_SYNTAX): return None
+    # the bare name only: /tmp/x/echo may be a link to gh
+    if not k and words and words[0].value in READ_ONLY and not any(m in cmd for m in SUBST_SYNTAX): return None
     if merge_text(c) or MERGE_TEXT.search(cmd):
         if INDIRECT.search(cmd): refuse("the merge command uses indirection the gate cannot read; run a plain `gh pr merge <n>`")
         refuse("the merge must start with gh (no prefixes or wrappers)")

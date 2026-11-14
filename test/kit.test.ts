@@ -208,7 +208,13 @@ test('merge gate: a merge is decided from decoded shell words of each simple com
     `python3 -c "import os; os.system('gh pr merge 12')"`, "git -c alias.x='!gh pr merge 12' x", 'eval "gh pr merge 12"',
     'echo "gh pr merge 12" | sh', 'echo $(gh pr merge 12)', 'cat <(gh pr merge 12)', 'gh pr merge 12 && true',
     // the compound rows of `merge gate: no merge passes without any call…`
-    'gh pr merge 1 && gh pr merge 2', 'gh pr merge 1; gh pr merge 2', 'gh pr merge 1 | cat', 'gh pr merge 1 & gh pr merge 2', '(gh pr merge 1)'];
+    'gh pr merge 1 && gh pr merge 2', 'gh pr merge 1; gh pr merge 2', 'gh pr merge 1 | cat', 'gh pr merge 1 & gh pr merge 2', '(gh pr merge 1)',
+    // review R1-R3 (Real case: a merge hidden in $[…], in '…' inside "${…}", or after a $'\c' that ate its own quote)
+    'echo $[$(gh pr m""erge 12)+1]', `echo "\${x:-'$(gh pr m""erge 12)'}"`, "echo $'\\c'; gh pr m\"\"erge 12",
+    // the same kind, where the gate would read further than bash and hide the next command: a bare `{` in ${…}, a shift
+    // `<<` in arithmetic taken as a here-document, a case pattern's `)` in $(…), $'\c\\', a read-only name by path
+    'echo ${x:-{} ; gh pr m""erge 12 ; echo }', 'echo $((1<<2))\ngh pr m""erge 12', '(( x = 1<<2 ))\ngh pr m""erge 12',
+    "x=$(case a in a) echo ';; esac); gh pr m\"\"erge 12 #'", "echo $'\\c\\\\'; gh pr m\"\"erge 12", '/tmp/x/echo pr merge 12'];
   const passes = [`grep -F 'gh pr m""erge' test/kit.test.ts`, "grep -n 'gh pr merge' README.md", 'echo "gh pr merge 12"',
     'git status && npm test', 'gh pr view 12', 'gh pr list', 'grep -n merge README.md', '"$HOME/bin/tool" run'];
   const closed = 'http://127.0.0.1:9';
