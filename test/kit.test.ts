@@ -193,6 +193,60 @@ test('merge gate: the PR is looked up in the repo the command names (-R, gh api 
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('merge gate: quoted or escaped spellings of a merge are checked like the literal command', () => {
+  // Real case: an agent, or a prompt-injected command, splits the merge word with quotes or a backslash so the
+  // raw text no longer reads "merge"; bash still runs `gh pr merge 12`, so the gate must check it the same way.
+  const pr = ['gh pr m""erge 12', 'gh pr mer\\ge 12', "gh pr 'mer'ge 12", 'gh pr "merge" 12', 'g""h pr merge 12', '\\gh pr merge 12'];
+  const api = ['gh api -X PUT repos/o/r/pulls/12/m""erge', 'gh api -X PUT repos/o/r/pulls/12/mer\\ge'];
+  const ansiC = "gh pr $'merge' 12";
+  const closed = 'http://127.0.0.1:9';
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dasks-gate-'));
+  try {
+    // gh off PATH, board on a closed port: every spelling is refused, never let through
+    const offline = (command: string) => spawnSync('python3', [path.join(ROOT, 'bin/dask-merge-gate')], { input: JSON.stringify({ tool_input: { command } }), env: { ...process.env, PATH: '/usr/bin:/bin', DASKS_URL: closed }, encoding: 'utf8' });
+    for (const c of [...pr, ...api, ansiC]) {
+      const r = offline(c);
+      assert.equal(r.status, 2, `${c} exited ${r.status}: ${r.stderr}`);
+      assert.match(r.stderr, /^dask-merge-gate: refused:/, c);
+    }
+    // a stub gh that names a card: each split spelling makes the literal command's `pr view` call, then asks the board
+    const log = path.join(dir, 'gh.args');
+    fs.writeFileSync(path.join(dir, 'gh'), `#!/bin/bash\nprintf '%s\\n' "$*" >> "${log}"\necho '{"headRefOid":"${'a'.repeat(40)}","headRefName":"human/demo.t-x","title":"demo.t-x: x","url":"u"}'\n`, { mode: 0o755 });
+    const stubbed = (command: string) => {
+      fs.rmSync(log, { force: true });
+      const r = spawnSync('python3', [path.join(ROOT, 'bin/dask-merge-gate')], { input: JSON.stringify({ tool_input: { command } }), env: { ...process.env, PATH: `${dir}:/usr/bin:/bin`, DASKS_URL: closed }, encoding: 'utf8' });
+      return { r, calls: fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n') : [] };
+    };
+    for (const [literal, spellings] of [['gh pr merge 12', pr], ['gh api -X PUT repos/o/r/pulls/12/merge', api]] as const) {
+      const want = stubbed(literal);
+      assert.equal(want.r.status, 2);
+      assert.match(want.r.stderr, /board could not confirm/);
+      assert.equal(want.calls.length, 1);
+      for (const c of spellings) {
+        const got = stubbed(c);
+        assert.equal(got.r.status, 2, c);
+        assert.deepEqual(got.calls, want.calls, c);
+        assert.match(got.r.stderr, /board could not confirm/, c);
+      }
+    }
+    // ANSI-C quoting: refused as unreadable (no gh call) or checked like the literal; never exit 0 unchecked
+    const a = stubbed(ansiC);
+    assert.equal(a.r.status, 2, a.r.stderr);
+    assert.ok(a.calls.length === 0 || a.calls[0] === 'pr view 12 --json headRefOid,headRefName,title,url', a.calls.join('|'));
+    // a command the gate cannot tokenize that still holds gh and merge fragments is refused (fail closed)
+    const broken = stubbed('gh pr m""erge 12 "unterminated');
+    assert.equal(broken.r.status, 2);
+    assert.match(broken.r.stderr, /^dask-merge-gate: refused:/);
+    // commands that are not merges still pass silently with no gh call
+    for (const c of ['git status && npm test', 'gh pr view 12', 'grep -n merge README.md', 'gh pr list']) {
+      const r = stubbed(c);
+      assert.equal(r.r.status, 0, c);
+      assert.equal(r.r.stderr, '', c);
+      assert.deepEqual(r.calls, [], c);
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 // ---------- installer ----------
 
 function fakeTools(dir: string, claudeHasForeignMcp: boolean) {
