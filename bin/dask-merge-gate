@@ -128,7 +128,7 @@ class Reader:
                 finish(); self.out.compound = True; self.i += len(op); continue
             w = self.word(cmd)
             if w.raw.isdigit() and self.i < len(s) and s[self.i] in "<>": continue  # the fd number of a redirect
-            saw_case = saw_case or w.value in ("case", "esac")
+            saw_case = saw_case or (not cmd.words and w.value == "case")  # the keyword, not an argument
             cmd.words.append(w)
         finish()
         if stop: self.out.broken = True  # no closing `)`
@@ -207,7 +207,8 @@ class Reader:
     def braced(self, open_, close):
         """Inside ${…} or $[…]: find the end and read every substitution inside. Where bash's reading depends on the
         context (a single quote is quoting outside "…" but not inside, a bare `{` may nest), the gate cannot be sure
-        where the expansion ends, so the command is unreadable."""
+        where the expansion ends, so the command is unreadable. A '…' holding only plain characters ends in the same
+        place either way, so it is skipped."""
         s = self.s
         while self.i < len(s):
             c = s[self.i]
@@ -215,7 +216,11 @@ class Reader:
             if c == '"': self.i += 1; self.dquote(None, '"'); continue
             if c == "`": self.backtick(); continue
             if c == "$" and self.expansion(): continue
-            if c == "'" or c == open_: self.out.broken = True
+            if c == "'":
+                j = s.find("'", self.i + 1)
+                if j >= 0 and not any(x in s[self.i + 1:j] for x in "{}[]()$`\"\\"): self.i = j + 1; continue
+                self.out.broken = True
+            elif c == open_: self.out.broken = True
             elif c == close: self.i += 1; return
             self.i += 1
         self.out.broken = True
@@ -340,8 +345,7 @@ def decide(cmd):
             refuse("gh options before the subcommand of a merge; run a plain `gh pr merge <n> [-R owner/repo]`")
         if merge_text(c): refuse("a merge the gate cannot read; run a plain `gh pr merge <n> [-R owner/repo]`")
         return None
-    # the bare name only: /tmp/x/echo may be a link to gh
-    if not k and words and words[0].value in READ_ONLY and not any(m in cmd for m in SUBST_SYNTAX): return None
+    if not k and words and name(words[0]) in READ_ONLY and not any(m in cmd for m in SUBST_SYNTAX): return None
     if merge_text(c) or MERGE_TEXT.search(cmd):
         if INDIRECT.search(cmd): refuse("the merge command uses indirection the gate cannot read; run a plain `gh pr merge <n>`")
         refuse("the merge must start with gh (no prefixes or wrappers)")
