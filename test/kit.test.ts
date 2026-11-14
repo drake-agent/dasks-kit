@@ -198,13 +198,14 @@ test('merge gate: quoted or escaped spellings of a merge are checked like the li
   // raw text no longer reads "merge"; bash still runs `gh pr merge 12`, so the gate must check it the same way.
   const pr = ['gh pr m""erge 12', 'gh pr mer\\ge 12', "gh pr 'mer'ge 12", 'gh pr "merge" 12', 'g""h pr merge 12', '\\gh pr merge 12'];
   const api = ['gh api -X PUT repos/o/r/pulls/12/m""erge', 'gh api -X PUT repos/o/r/pulls/12/mer\\ge'];
-  const ansiC = "gh pr $'merge' 12";
+  // $'…' cut inside the word too (review R1): bash runs `gh pr merge 12`, shlex reads `m$erge`
+  const ansiC = ["gh pr $'merge' 12", "gh pr m$'er'ge 12", 'gh pr m$"er"ge 12'];
   const closed = 'http://127.0.0.1:9';
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dasks-gate-'));
   try {
     // gh off PATH, board on a closed port: every spelling is refused, never let through
     const offline = (command: string) => spawnSync('python3', [path.join(ROOT, 'bin/dask-merge-gate')], { input: JSON.stringify({ tool_input: { command } }), env: { ...process.env, PATH: '/usr/bin:/bin', DASKS_URL: closed }, encoding: 'utf8' });
-    for (const c of [...pr, ...api, ansiC]) {
+    for (const c of [...pr, ...api, ...ansiC]) {
       const r = offline(c);
       assert.equal(r.status, 2, `${c} exited ${r.status}: ${r.stderr}`);
       assert.match(r.stderr, /^dask-merge-gate: refused:/, c);
@@ -230,9 +231,11 @@ test('merge gate: quoted or escaped spellings of a merge are checked like the li
       }
     }
     // ANSI-C quoting: refused as unreadable (no gh call) or checked like the literal; never exit 0 unchecked
-    const a = stubbed(ansiC);
-    assert.equal(a.r.status, 2, a.r.stderr);
-    assert.ok(a.calls.length === 0 || a.calls[0] === 'pr view 12 --json headRefOid,headRefName,title,url', a.calls.join('|'));
+    for (const c of ansiC) {
+      const a = stubbed(c);
+      assert.equal(a.r.status, 2, `${c}: ${a.r.stderr}`);
+      assert.ok(a.calls.length === 0 || a.calls[0] === 'pr view 12 --json headRefOid,headRefName,title,url', a.calls.join('|'));
+    }
     // a command the gate cannot tokenize that still holds gh and merge fragments is refused (fail closed)
     const broken = stubbed('gh pr m""erge 12 "unterminated');
     assert.equal(broken.r.status, 2);

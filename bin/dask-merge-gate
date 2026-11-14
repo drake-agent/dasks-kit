@@ -61,17 +61,16 @@ def words_of(cmd):
     return words
 
 def is_merge(cmd):
-    """True when the raw text or the shell words (quotes and backslashes removed) read as a gh merge."""
-    if MERGE_TEXT.search(cmd) and "gh" in cmd: return True
+    """True when the raw text, the text with quotes, backslashes and `$` taken out ($'…' and $"…" quoting), or the
+    shell words read as a gh merge."""
+    reads = lambda text: bool(MERGE_TEXT.search(text) and "gh" in text)
+    flat = re.sub(r"[\"'\\$]", "", cmd)
+    if reads(cmd) or reads(flat): return True
     try:
         lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
         lex.whitespace_split = True
-        text = " ".join(lex)
-    except ValueError:
-        text = re.sub(r"[\"'\\$]", "", cmd)
-        if MERGE_TEXT.search(text) and "gh" in text: refuse("cannot split the command into words; run a plain `gh pr merge <n>`")
-        return False
-    return bool(MERGE_TEXT.search(text) and "gh" in text)
+        return reads(" ".join(lex))
+    except ValueError: return False
 
 def target(cmd):
     """(repo or '', PR selector or '') of the one merge in `cmd`."""
