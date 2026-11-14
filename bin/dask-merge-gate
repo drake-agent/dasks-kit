@@ -5,7 +5,9 @@ the human user's signed merge OK for that PR's card at exactly the PR's head.
   dask-merge-gate        reads the hook JSON on stdin; exit 0 = allow (silent), exit 2 = refuse (reason on stderr)
   DASK_MERGE_GATE=0      turns it off
 
-What counts as a merge: `gh pr merge …` and `gh api …/pulls/<n>/merge`. Commands with no merge pass with no gh call.
+What counts as a merge: `gh pr merge …` and `gh api …/pulls/<n>/merge`, read from the command's shell words (after quote
+and backslash removal, as the shell runs them), so `gh pr m""erge` counts too; text with gh and merge fragments that
+cannot be split into words is refused. Commands with no merge pass with no gh call.
 Fail closed: a merge command must be one plain command. Indirection (eval, source, `sh -c`, xargs, a variable as the
 command word) and compound commands (`;`, `&&`, `||`, `|`, `&`, subshells, newlines) are refused, since the gate checks
 exactly one PR and could not see what else would run. The PR is looked up in the repo the command names (`-R`/`--repo`,
@@ -58,6 +60,19 @@ def words_of(cmd):
         refuse("a merge must be a single plain command (no ;, &&, ||, |, &, redirects or subshells): run `gh pr merge <n>` on its own")
     return words
 
+def is_merge(cmd):
+    """True when the raw text or the shell words (quotes and backslashes removed) read as a gh merge."""
+    if MERGE_TEXT.search(cmd) and "gh" in cmd: return True
+    try:
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        text = " ".join(lex)
+    except ValueError:
+        text = re.sub(r"[\"'\\$]", "", cmd)
+        if MERGE_TEXT.search(text) and "gh" in text: refuse("cannot split the command into words; run a plain `gh pr merge <n>`")
+        return False
+    return bool(MERGE_TEXT.search(text) and "gh" in text)
+
 def target(cmd):
     """(repo or '', PR selector or '') of the one merge in `cmd`."""
     words = words_of(cmd)
@@ -90,7 +105,7 @@ def main():
     except Exception: return
     cmd = ((payload or {}).get("tool_input") or {}).get("command")
     if isinstance(cmd, list): cmd = " ".join(map(str, cmd))
-    if not isinstance(cmd, str) or not MERGE_TEXT.search(cmd) or "gh" not in cmd: return
+    if not isinstance(cmd, str) or not is_merge(cmd): return
     if INDIRECT.search(cmd): refuse("the merge command uses indirection the gate cannot read; run a plain `gh pr merge <n>`")
     repo, sel = target(cmd)
     info = json.loads(gh("pr", "view", *([sel] if sel else []), *(["-R", repo] if repo else []), "--json", "headRefOid,headRefName,title,url"))

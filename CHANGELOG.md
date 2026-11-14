@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Merge gate (`bin/dask-merge-gate`): a merge spelled with quotes or a backslash (`m""erge`, `mer\ge`, `g""h`) is now
+  checked like the plain command, since the gate reads the shell words; text it cannot split into words is refused.
 - Code review rule: at most 2 passes per PR. Pass 1 reviews the whole change; pass 2 only re-checks pass-1 findings and
   regressions from the fixes; the board and `dask review-record` refuse a third pass (older stored pass-3 rows stay
   readable). A finding blocks only if it carries a repro (a `repro:` line with the command or input and the wrong
