@@ -210,7 +210,12 @@ export async function recordPrFiles(env: Pick<FlowEnv, 'api' | 'log'>, card: str
   const after = head();
   const rows = list.status === 0 ? list.stdout.split('\n').filter(Boolean) : [];
   const why = !before || list.status !== 0 ? 'GitHub did not answer' : !SHA_RE.test(before.sha) || before.sha !== after?.sha ? 'the head moved while it was read' : rows.length !== before.count ? `${rows.length} of ${before.count} files listed` : '';
-  if (why) { env.log(`${card}: ${pr} file list not stored (${why}); its touches line holds`); return; }
+  if (why) {
+    // A list from an older head no longer says what the PR changes: drop it, so the planned line holds.
+    env.log(`${card}: ${pr} file list not stored (${why}); its touches line holds`);
+    try { await env.api('POST', `/api/tasks/${card}`, { touches_actual: '' }); } catch (e: any) { env.log(`${card}: the old file list was not cleared (${e.message})`); }
+    return;
+  }
   try {
     await env.api('POST', `/api/tasks/${card}`, { touches_actual: rows.flatMap((r) => r.split('\t')).filter(Boolean), touches_sha: before!.sha });
   } catch (e: any) { env.log(`${card}: ${pr} file list not stored (${e.message}); its touches line holds`); }

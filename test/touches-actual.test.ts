@@ -66,6 +66,7 @@ test('write: the two fields are stored and checked; a files-only write keeps `up
     updateTask(root, 'beta.t-one', { touches_actual: 'src/a.ts', touches_sha: SHA }, 'runner@box');
     const c = updateTask(root, 'beta.t-one', { pr: 'https://github.com/example-org/my-app/pull/2' }, 'runner@box');
     assert.equal(c.touches_actual ?? '', ''); assert.equal(c.touches_sha ?? '', '');
+    assert.equal(updateTask(root, 'beta.t-one', { touches_actual: '' }, 'runner@box').version, c.version, 'clearing nothing is no write');
   } finally { cleanup(); }
 });
 
@@ -88,6 +89,9 @@ test('write: a long PR list never makes a write fail on the size limit', () => {
     const files = Array.from({ length: 200 }, (_, i) => `src/f${i}.ts`);
     const t = updateTask(root, 'beta.t-big', { touches_actual: files, touches_sha: SHA }, 'runner@box', { body: '\n## Context\n' + 'x'.repeat(7000) + '\n' });
     assert.ok(t.touches_actual!.length > 1000);
+    // A job's failure block still fits: the list is left out of that size too.
+    const u = updateTask(root, 'beta.t-big', {}, 'runner@box', { appendBlock: { heading: 'Job failure', lines: ['build failed: see job log'] } });
+    assert.match(u.body, /## Job failure[\s\S]*build failed/);
   } finally { cleanup(); }
 });
 
@@ -98,6 +102,9 @@ test('claim check: a doing card holds its PR files, not its plan', () => {
   const { root, cleanup } = tempRepo([other, mine]);
   try {
     assert.throws(() => assertTouchesFree(root, mine, [other], projects as any), (e: any) => e.status === 409 && /beta\.t-other/.test(e.message));
+    // Each side counts its own PR files (a card worked again has its own list too).
+    const reworked = { ...mine, body: 'touches: docs/\n', touches_actual: 'src/shared.ts' };
+    assert.throws(() => assertTouchesFree(root, reworked, [{ ...other, body: 'touches: src/shared.ts\n' }], projects as any), (e: any) => e.status === 409);
     const narrowed = { ...other, touches_actual: 'src/b/y.ts' };
     assert.doesNotThrow(() => assertTouchesFree(root, mine, [narrowed], projects as any), 'the PR changes other files');
     assert.throws(() => assertTouchesFree(root, mine, [{ ...other, body: 'touches: docs/\n', touches_actual: 'src/a/x.ts' }], projects as any), (e: any) => e.status === 409);
@@ -125,9 +132,10 @@ esac`);
     assert.deepEqual(calls, [{ method: 'POST', route: '/api/tasks/beta.t-one', body: { touches_actual: ['src/new.ts', 'src/old.ts', 'README.md'], touches_sha: SHA } }]);
     process.env.FAKE_COUNT = '3';
     await recordPrFiles(env, 'beta.t-one', PR);
-    assert.equal(calls.length, 1, 'a list shorter than the PR is not stored');
+    assert.equal(calls.length, 2, 'a list shorter than the PR is not stored');
     assert.match(logs.join('\n'), /2 of 3 files listed/);
+    assert.deepEqual(calls[1].body, { touches_actual: '' }, 'a list from an older head is dropped, so the plan holds');
     await recordPrFiles(env, 'beta.t-one', 'https://example.invalid/pr/1');
-    assert.equal(calls.length, 1, 'not a GitHub PR: nothing read');
+    assert.equal(calls.length, 2, 'not a GitHub PR: nothing read');
   } finally { delete process.env.FAKE_COUNT; gh.restore(); }
 });

@@ -635,7 +635,7 @@ export function notesArchiveRelPath(id: string): string {
 /** If the task would pass the write limit, move its oldest "## Notes" lines to the archive file (keeping the newest 3).
  *  Returns the archive file to commit with the task, or null when nothing had to move. */
 function compactNotes(root: string, t: Task): { rel: string; content: string } | null {
-  const size = () => Buffer.byteLength(serializeTask(t));
+  const size = () => sizeOf(t);
   if (size() <= WRITE_LIMIT) return null;
   const m = /(^|\n)## Notes[ \t]*\n([\s\S]*?)(?=\n## |$)/.exec(t.body);
   if (!m) return null;
@@ -749,6 +749,8 @@ export function updateTask(root: string, id: string, patch: TaskPatch, actor: st
         opts.warnings?.push(`done_at: live: ${id} waits in review (lane ${LIVE_CHECK_LANE}) until someone checks the end state after the merge (dask verify ${id} --evidence "…" --commit <sha>)`);
       } else if (cur.lane === LIVE_CHECK_LANE && fields.lane === undefined) fields.lane = 'none';
     }
+    // Clearing a list the card does not have changes nothing (no version bump).
+    for (const k of TOUCHES_FIELDS) if (fields[k] === '' && !(cur as any)[k]) delete fields[k];
     // A new PR link drops the old PR's file list: it described another head.
     if (fields.pr !== undefined && fields.pr !== (cur.pr ?? '') && fields.touches_actual === undefined && (cur.touches_actual || cur.touches_sha)) { fields.touches_actual = ''; fields.touches_sha = ''; }
     const next: Task = { ...cur, ...fields } as Task;
@@ -951,9 +953,9 @@ function fitBlock(t: Task, block: { heading: string; lines: string[] }): string 
   const heading = String(block.heading).replace(/[\r\n]+/g, ' ').slice(0, 120);
   let lines = (Array.isArray(block.lines) ? block.lines : []).map((l) => String(l).replace(/```/g, "'''").slice(0, 300)).slice(-40);
   const build = (ls: string[]) => `${t.body.replace(/\s+$/, '')}\n\n## ${heading}\n\`\`\`\n${ls.join('\n') || '(no log output)'}\n\`\`\`\n`;
-  while (lines.length && Buffer.byteLength(serializeTask({ ...t, body: build(lines) })) > WRITE_LIMIT) lines = lines.slice(1);
+  while (lines.length && sizeOf({ ...t, body: build(lines) }) > WRITE_LIMIT) lines = lines.slice(1);
   const out = build(lines);
-  return Buffer.byteLength(serializeTask({ ...t, body: out })) > WRITE_LIMIT ? t.body : out;
+  return sizeOf({ ...t, body: out }) > WRITE_LIMIT ? t.body : out;
 }
 
 /** Note lines written as the human ("- YYYY-MM-DD HH:MM user: …"): a reader takes them as the user's own words, so only
