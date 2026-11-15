@@ -44,11 +44,13 @@ export interface RunnerConfig {
   /** Between cards, fast-forward the kit checkout to its remote's default branch and restart (src/lib/self-update.ts).
    *  Unset = on for a Mac that joined a fleet (settings in ~/.dasks/runner.json), off on the board's own Mac. */
   update?: boolean;
+  /** Rethink cards one line of cards gets when its review is not clean after the last pass (src/lib/rethink.ts); 0 = off. */
+  rethinks: number;
 }
 
 export const RUNNER_DEFAULTS: RunnerConfig = {
   enabled: false, max_parallel: 1, daily_cap: 10, poll_minutes: 10, model: '',
-  timeout_min: 180, idle_min: 150, max_min: 720, backoff_min: 60, nudge: true, pr_limit: 10, spec: true,
+  timeout_min: 180, idle_min: 150, max_min: 720, backoff_min: 60, nudge: true, pr_limit: 10, spec: true, rethinks: 3,
 };
 
 /** The runner settings from a parsed config.json (missing keys take the defaults); throws one message per bad value. */
@@ -63,7 +65,7 @@ export function runnerConfig(doc: unknown): RunnerConfig {
   if (typeof c.nudge !== 'boolean') errs.push('runner.nudge must be true or false');
   if (typeof c.spec !== 'boolean') errs.push('runner.spec must be true or false');
   if (c.update !== undefined && typeof c.update !== 'boolean') errs.push('runner.update must be true or false');
-  int('max_parallel', 1); int('daily_cap', 1); int('pr_limit', 0);
+  int('max_parallel', 1); int('daily_cap', 1); int('pr_limit', 0); int('rethinks', 0);
   num('poll_minutes', 0, true); num('timeout_min', 0, true); num('idle_min', 0, false); num('max_min', 0, true); num('backoff_min', 0, false);
   if (typeof c.model !== 'string' || !/^[A-Za-z0-9._:\[\]-]{0,80}$/.test(c.model)) errs.push('runner.model must be a model name, or empty for the CLI default');
   if (c.machine !== undefined && (typeof c.machine !== 'string' || !/^[a-z0-9-]{1,16}$/.test(c.machine))) errs.push('runner.machine must be 1-16 lowercase letters, digits or -');
