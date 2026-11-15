@@ -31,7 +31,8 @@ export function rethinkGen(id: string, body: string | null | undefined): number 
 export function rethinkId(card: string, gen: number): string {
   const [goal, slug] = card.split('.t-');
   const tail = `-rethink-${gen}`;
-  const root = (gen > 1 ? slug.replace(SUFFIX, '') : slug).slice(0, MAX_ID_LEN - goal.length - 3 - tail.length).replace(/-+$/, '');
+  let root = (gen > 1 ? slug.replace(SUFFIX, '') : slug).slice(0, MAX_ID_LEN - goal.length - 3 - tail.length).replace(/-+$/, '');
+  if (`${goal}.t-${root}${tail}` === card) root = root.slice(0, -1).replace(/-+$/, '');   // a cut look-alike: never its own id
   return `${goal}.t-${root || 'card'}${tail}`;
 }
 
@@ -147,16 +148,17 @@ export async function closeSuperseded(env: Pick<FlowEnv, 'api'>, io: PrIo, finis
   return lines;
 }
 
-/** Finish one old card `b` for the done rethink card `r`. ok: done, walk on; held: leave it and the cards above it;
- *  retry: a step failed, the next look tries again. */
+/** Finish one old card `b` for the done rethink card `r`. ok: done, walk on; held: for good (cancelled for another
+ *  reason, PR merged), leave it and the cards above it; retry: not now (a step failed, or the card is held or was
+ *  unblocked), the next look looks again. */
 async function supersede(env: Pick<FlowEnv, 'api'>, io: PrIo, b: any, r: any, all: any[], say: (s: string) => void): Promise<'ok' | 'held' | 'retry'> {
   const pr = String(b.pr ?? '').trim();
   try {
     if (b.status === 'cancelled') {
       if (!String(b.result ?? '').startsWith(`superseded by ${r.id}`)) return 'held';   // cancelled for another reason
     } else {
-      if (b.spec_state !== 'blocked' || b.claimed_by || b.status === 'doing') { say(`left alone for done rethink ${r.id}: no longer blocked at the review limit, or someone holds it`); return 'held'; }
-      if (pr && !PR_URL.test(pr)) { say(`left alone for done rethink ${r.id}: its pr field is not a GitHub PR (${oneLine(pr, 100)})`); return 'held'; }
+      if (b.spec_state !== 'blocked' || b.claimed_by || b.status === 'doing') { say(`left alone for done rethink ${r.id}: no longer blocked at the review limit, or someone holds it`); return 'retry'; }
+      if (pr && !PR_URL.test(pr)) { say(`left alone for done rethink ${r.id}: its pr field is not a GitHub PR (${oneLine(pr, 100)})`); return 'retry'; }
       if (pr) {
         const v = await io.view(pr);
         if (!v) { say(`not finished yet: ${pr} could not be read`); return 'retry'; }

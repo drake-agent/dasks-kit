@@ -9,6 +9,8 @@ test('ids: one line of cards counts up from its first card; a long id is cut to 
   assert.equal(rethinkId('web.t-login', 1), 'web.t-login-rethink-1');
   assert.equal(rethinkId('web.t-login-rethink-1', 2), 'web.t-login-rethink-2');
   assert.equal(rethinkId('web.t-login-rethink-1', 1), 'web.t-login-rethink-1-rethink-1', 'a plain card that looks like a rethink id gets a new id');
+  const edge = `web.t-${'a'.repeat(MAX_ID_LEN - 16)}-rethink-1`;
+  assert.ok(isTaskId(edge) && rethinkId(edge, 1) !== edge && isTaskId(rethinkId(edge, 1)), 'a cut look-alike of full length still gets a new id');
   const long = `web.t-${'a'.repeat(MAX_ID_LEN - 6)}`;
   const id = rethinkId(long, 3);
   assert.ok(isTaskId(id) && id.endsWith('-rethink-3') && id.length <= MAX_ID_LEN, id);
@@ -151,6 +153,11 @@ test('close: nothing is written for a merged PR, an unreadable PR, an unblocked 
   await closeSuperseded(left.env, left.io);
   assert.ok(left.gh.includes('close https://github.com/o/r/pull/1'), 'a PR left open by an earlier try is closed now');
   assert.deepEqual(left.writes().map(([, r, b]) => [r, b.depends_on]), [['/api/tasks/web.t-next', 'web.t-login-rethink-1']]);
+  // A card left alone for now (unblocked, held) is looked at again on a later look, not marked finished.
+  const fin = new Set<string>();
+  const held = closeWorld({ ...base, spec_state: 'ready' }, { state: 'OPEN' });
+  await closeSuperseded(held.env, held.io, fin);
+  assert.ok(!fin.has('web.t-login-rethink-1'));
   const other = closeWorld({ ...base, status: 'cancelled', result: 'not wanted' }, { state: 'OPEN' });
   await closeSuperseded(other.env, other.io);
   assert.deepEqual(other.writes(), [], 'a card cancelled for another reason is left alone');
