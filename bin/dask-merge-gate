@@ -183,46 +183,60 @@ class Reader:
                 if nx and nx in '$`"\\': buf.append(nx); self.i += 2; continue
                 buf.append("\\"); self.i += 1; continue
             if c == "$":
-                if self.expansion(): ok = False; continue
+                if self.expansion(True): ok = False; continue
                 buf.append("$"); self.i += 1; continue
             if c == "`": self.backtick(); ok = False; continue
             buf.append(c); self.i += 1
         if term: self.out.broken = True; return None
         return "".join(buf) if ok else None
 
-    def expansion(self):
-        """At a `$`: skip a parameter, command or arithmetic expansion (reading commands inside); False if `$` is literal."""
+    def expansion(self, dq=False):
+        """At a `$`: skip a parameter, command or arithmetic expansion (reading commands inside); False if `$` is literal.
+        `dq`: the `$` stands inside "…"."""
         s, nx = self.s, self.s[self.i + 1:self.i + 2]
         if nx == "(":
             arith = s[self.i + 2:self.i + 3] == "("
             self.i += 2; self.out.compound = True; self.commands(True, True, arith); return True
         if nx == "{":
-            self.i += 2; self.braced("{", "}"); return True
+            self.i += 2; self.braced("{", "}", dq); return True
         if nx == "[":
-            self.i += 2; self.braced("[", "]"); return True
+            self.i += 2; self.braced("[", "]", dq); return True
         m = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-]").match(s, self.i + 1)
         if m: self.i = m.end(); return True
         return False
 
-    def braced(self, open_, close):
-        """Inside ${…} or $[…]: find the end and read every substitution inside. Where bash's reading depends on the
-        context (a single quote is quoting outside "…" but not inside, a bare `{` may nest), the gate cannot be sure
-        where the expansion ends, so the command is unreadable. A '…' holding only plain characters ends in the same
-        place either way, so it is skipped."""
-        s = self.s
+    def braced(self, open_, close, dq):
+        """Inside ${…} or $[…]: find the end and read every substitution inside. Outside "…" a '…' quotes (nothing in it
+        runs); inside "…" bash pairs the quotes but still runs the substitutions in them (R2), and a lone ' is plain
+        text to some bash versions. A bare open bracket nests in some versions and not in others: the text between the
+        two possible ends must be plain, or the gate cannot know where the next command starts (unreadable)."""
+        s, depth, first_end = self.s, 0, None
         while self.i < len(s):
             c = s[self.i]
             if c == "\\": self.i += 2; continue
             if c == '"': self.i += 1; self.dquote(None, '"'); continue
             if c == "`": self.backtick(); continue
-            if c == "$" and self.expansion(): continue
+            if c == "$" and self.expansion(dq): continue
             if c == "'":
                 j = s.find("'", self.i + 1)
-                if j >= 0 and not any(x in s[self.i + 1:j] for x in "{}[]()$`\"\\"): self.i = j + 1; continue
-                self.out.broken = True
-            elif c == open_: self.out.broken = True
-            elif c == close: self.i += 1; return
+                if not dq:
+                    if j < 0: self.out.broken = True; self.i = len(s); return
+                    self.i = j + 1; continue
+                if j < 0: self.i += 1; continue  # a lone ' inside "…": plain text, or bash stops with a syntax error
+                body = s[self.i + 1:j]
+                if '"' in body: self.out.broken = True  # where the "…" ends depends on the bash version
+                Reader(body, self.out).dquote(None, None)  # its substitutions run
+                self.i = j + 1; continue
+            if c == open_: depth += 1
+            elif c == close:
+                if not depth:
+                    if first_end is not None and any(x in s[first_end:self.i] for x in " \t\n;&|()<>'\"`$\\#"):
+                        self.out.broken = True
+                    self.i += 1; return
+                depth -= 1
+                if first_end is None: first_end = self.i + 1
             self.i += 1
+        if first_end is not None: self.i = first_end; return  # it closes only where nesting is not counted
         self.out.broken = True
 
     def backtick(self):

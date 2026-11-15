@@ -219,7 +219,7 @@ test('merge gate: a merge is decided from decoded shell words of each simple com
     'echo "${x:-$(gh pr m""erge 12)}"', 'echo $[1+$(g""h pr merge 12)]', "echo \"`gh pr m$'\\x65'rge 12`\"",
     'case x in x) gh pr m""erge 12;; esac', 'echo "$(echo "$(gh pr merge 12)")"',
     // Real case: R2 with brackets in the quoted default, and a nested `{` whose two readings split the command apart
-    `echo "\${x:-'(x)$(gh pr m""erge 12)'}"`, 'echo ${x:-{a} ; gh pr m""erge 12 ; echo }'];
+    `echo "\${x:-'(x)$(gh pr m""erge 12)'}"`, 'echo ${x:-{a} ; gh pr m""erge 12 ; echo }', `echo "\${x:-'(x)$(gh pr mer\\ge 12)'}"`];
   const passes = [`grep -F 'gh pr m""erge' test/kit.test.ts`, "grep -n 'gh pr merge' README.md", 'echo "gh pr merge 12"',
     'git status && npm test', 'gh pr view 12', 'gh pr list', 'grep -n merge README.md', '"$HOME/bin/tool" run',
     // review R4-R6 (Real case: an agent searches for `case`, prints a default in quotes, or calls echo by its path)

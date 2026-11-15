@@ -5,8 +5,9 @@
 - Merge gate: decides on what bash will run. It splits the command into simple commands and decodes each word like
   bash (quotes, backslashes, `$'…'` escapes), so `gh pr m$'\x65'rge 12` is checked like `gh pr merge 12`; a gh
   command or gh-like command word with words it cannot read (`$X`, globs, `$"…"`) is refused, so is a command whose
-  quotes or substitutions it cannot close for sure; and `grep`, `echo`,
-  `cat`, `head`, `tail` and `wc` on their own pass whatever text they search or print.
+  quotes or substitutions it cannot close for sure; a merge hidden in a substitution inside `${…}`, `$[…]` or `"…"` is
+  refused, while a quoted or bracketed default such as `"${x:-'(default)'}"` or `${x:-{}}` passes; and `grep`, `echo`,
+  `cat`, `head`, `tail` and `wc` (also by path, like `/bin/echo`) on their own pass whatever text they search or print.
 - Code review rule: at most 2 passes per PR. Pass 1 reviews the whole change; pass 2 only re-checks pass-1 findings and
   regressions from the fixes; the board and `dask review-record` refuse a third pass (older stored pass-3 rows stay
   readable). A finding blocks only if it carries a repro (a `repro:` line with the command or input and the wrong
