@@ -27,17 +27,48 @@ export function scan(text: string, hide = false): { code: string; strings: strin
     const c = text[i], n = text[i + 1];
     if (c === '/' && n === '/') { while (i < text.length && text[i] !== '\n') i++; continue; }
     if (c === '/' && n === '*') { const end = text.indexOf('*/', i + 2); i = end < 0 ? text.length : end + 2; out += ' '; continue; }
-    if (c === '"' || c === "'" || c === '`') {
-      let j = i + 1;
-      while (j < text.length && text[j] !== c && (c === '`' || text[j] !== '\n')) j += text[j] === '\\' ? 2 : 1;
+    if (c === '`') {
+      const j = templateEnd(text, i);
+      out += hide ? '``' + '\n'.repeat(text.slice(i, j).split('\n').length - 1) : text.slice(i, j);
+      i = j; continue;
+    }
+    if (c === '"' || c === "'") {
+      const j = quoteEnd(text, i);
       if (!hide) out += text.slice(i, j + 1);
-      else if (c === '`') out += '``' + '\n'.repeat(text.slice(i, j).split('\n').length - 1);
       else { out += `${c}\u0001${strings.length}${c}`; strings.push(text.slice(i + 1, j)); }
       i = j + 1; continue;
     }
     out += c; i++;
   }
   return { code: out, strings };
+}
+/** The index of the closing quote of the '…' or "…" string at `i` (a string ends at a newline). */
+function quoteEnd(text: string, i: number): number {
+  let j = i + 1;
+  while (j < text.length && text[j] !== text[i] && text[j] !== '\n') j += text[j] === '\\' ? 2 : 1;
+  return j;
+}
+/** The index after the template literal at `i`, nested `${ … }` and templates inside them included. */
+function templateEnd(text: string, i: number): number {
+  let j = i + 1;
+  while (j < text.length) {
+    if (text[j] === '\\') { j += 2; continue; }
+    if (text[j] === '`') return j + 1;
+    if (text[j] === '$' && text[j + 1] === '{') {
+      let depth = 1;
+      j += 2;
+      while (j < text.length && depth > 0) {
+        const c = text[j];
+        if (c === '`') { j = templateEnd(text, j); continue; }
+        if (c === '"' || c === "'") { j = quoteEnd(text, j) + 1; continue; }
+        if (c === '{') depth++; else if (c === '}') depth--;
+        j++;
+      }
+      continue;
+    }
+    j++;
+  }
+  return text.length;
 }
 /** The text without `//` and block comments; strings are kept. */
 export const stripComments = (text: string) => scan(text).code;
@@ -47,8 +78,8 @@ export const stripComments = (text: string) => scan(text).code;
 // On scan(…, true) output: a specifier is `'\u0001<n>'`. Static forms start a statement; the lazy span is bounded so a
 // long run of "import" words cannot make the match quadratic.
 const JS_SPEC = [
-  /(?:^|[;}])\s*(?:import|export)\s[^;'"`]{0,2000}?\bfrom\s*(['"])\u0001(\d+)\1/gm,
-  /(?:^|[;}])\s*import\s*(['"])\u0001(\d+)\1/gm,
+  /(?:^|[;}])[ \t]*(?:import|export)\s[^;'"`]{0,2000}?\bfrom\s*(['"])\u0001(\d+)\1/gm,
+  /(?:^|[;}])[ \t]*import\s*(['"])\u0001(\d+)\1/gm,
   /\b(?:require|import)\s*\(\s*(['"])\u0001(\d+)\1\s*\)/g,
 ];
 
@@ -77,10 +108,27 @@ function pyRoot(file: string, tree: Tree): string {
 const pyModule = (tree: Tree, dir: string, dotted: string) =>
   first(tree, [join(dir, dotted.replace(/\./g, '/') + '.py'), join(dir, dotted.replace(/\./g, '/'), '__init__.py')]);
 
+/** Python text with every string's contents ('…', "…", '''…''', """…""") and every `#` comment blanked; newlines kept. */
+function pyCode(text: string): string {
+  let out = '', i = 0;
+  const blank = (s: string) => s.replace(/[^\n]/g, ' ');
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '#') { const e = text.indexOf('\n', i); const j = e < 0 ? text.length : e; out += blank(text.slice(i, j)); i = j; continue; }
+    if (c !== '"' && c !== "'") { out += c; i++; continue; }
+    const q = text.startsWith(c.repeat(3), i) ? c.repeat(3) : c;
+    let j = i + q.length;
+    while (j < text.length && !text.startsWith(q, j) && (q.length === 3 || text[j] !== '\n')) j += text[j] === '\\' ? 2 : 1;
+    j = Math.min(text.length, j + (text.startsWith(q, j) ? q.length : 0));
+    out += blank(text.slice(i, j)); i = j;
+  }
+  return out;
+}
+
 function pyImports(file: string, text: string, tree: Tree): string[] {
   const out: string[] = [];
-  // docstrings ("""…""", '''…''') are blanked (their lines kept); a parenthesised name list becomes one line
-  const lines = text.replace(/("""|''')[\s\S]*?(\1|$)/g, (s) => s.replace(/[^\n]/g, ' ')).replace(/\(([^()]*)\)/g, (_m, inner: string) => inner.replace(/\s*\n\s*/g, ' ')).split('\n');
+  // string contents and # comments are blanked (lines kept); a parenthesised name list becomes one line
+  const lines = pyCode(text).replace(/\(([^()]*)\)/g, (_m, inner: string) => inner.replace(/\s*\n\s*/g, ' ')).split('\n');
   const roots = [...new Set([pyRoot(file, tree), ''])];
   const names = (s: string) => s.split('#')[0].split(',').map((n) => n.trim().split(/\s+as\s+/)[0].trim()).filter((n) => /^[\w.]+$/.test(n));
   for (const line of lines) {
@@ -124,11 +172,11 @@ function rsImports(file: string, text: string, tree: Tree): string[] {
   const src = crateSrc(file, tree);
   if (!src) return [];
   const code = stripComments(text), out: string[] = [];
-  for (const m of code.matchAll(/^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;/gm)) {
+  for (const m of code.matchAll(/^[ \t]*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;/gm)) {
     const hit = rsModule(tree, childDir(file), [m[1]]);
     if (hit) out.push(hit);
   }
-  for (const m of code.matchAll(/^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+([^;]+);/gm)) {
+  for (const m of code.matchAll(/(?:^|[;{}])[ \t]*(?:pub(?:\([^)]*\))?\s+)?use\s+([^;]{1,2000});/gm)) {
     for (const segs of useTree(m[1].replace(/\s+as\s+\w+/g, '').replace(/\s+/g, ''))) {
       let dir: string;
       if (segs[0] === 'crate') dir = src;
@@ -181,7 +229,7 @@ export function swiftTargets(pkgFile: string, text: string): SwiftTarget[] {
 
 function swiftImports(file: string, text: string, tree: Tree): string[] {
   const out: string[] = [];
-  for (const m of stripComments(text).matchAll(/^\s*(?:@\w+\s+)*import\s+(?:(?:struct|class|enum|protocol|func|var|let|typealias)\s+)?(\w+)/gm)) {
+  for (const m of stripComments(text).matchAll(/^[ \t]*(?:@\w+\s+)*import\s+(?:(?:struct|class|enum|protocol|func|var|let|typealias)\s+)?(\w+)/gm)) {
     const named = tree.swift.filter((t) => t.name === m[1]);
     // the importing file's own package wins; else the name must be unique in the repo
     const own = named.filter((t) => !t.pkg || file.startsWith(t.pkg + '/'));

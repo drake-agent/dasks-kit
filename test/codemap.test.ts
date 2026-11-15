@@ -45,6 +45,15 @@ test('review R3: Rust nested use groups keep their module paths', () => {
   assert.equal(importWarning('c1', ['src/b.rs'], 'c2', ['src/a/y.rs'], { map: m, stale: false }).startsWith('warning: c1 is one import from c2: src/b.rs imports src/a/y.rs'), true);
 });
 
+test('review pass 2: blank lines stay linear, nested templates, a quote run in a Python string, a Rust use inside a block', () => {
+  const t0 = Date.now();
+  mapOf({ 'a.ts': '\n'.repeat(64000), 'b.rs': '\n'.repeat(64000), 'Cargo.toml': '' });
+  assert.ok(Date.now() - t0 < 1500, `took ${Date.now() - t0} ms`);
+  assert.deepEqual(edges(mapOf({ 'a.ts': 'const doc = `outer ${`import("./b")`} tail`;\nimport "./c";\n', 'b.ts': '', 'c.ts': '' })), ['a.ts -> c.ts']);
+  assert.deepEqual(edges(mapOf({ 'p.py': "marker = '\"\"\"'\nimport q  # import r\n", 'q.py': '', 'r.py': '' })), ['p.py -> q.py']);
+  assert.deepEqual(edges(mapOf({ 'Cargo.toml': '', 'src/main.rs': 'fn main() { use crate::a::A; }\n', 'src/a.rs': '' })), ['src/main.rs -> src/a.rs']);
+});
+
 test('Python: absolute from the top package dir or the root, from-import of a submodule, relative imports', () => {
   const m = mapOf({
     'pkg/__init__.py': '',
