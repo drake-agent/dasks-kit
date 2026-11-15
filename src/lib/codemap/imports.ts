@@ -17,9 +17,12 @@ const dirOf = (f: string) => { const d = path.posix.dirname(f); return d === '.'
 const join = (...parts: string[]) => { const p = path.posix.normalize(parts.filter(Boolean).join('/')); return p === '.' ? '' : p; };
 const first = (tree: Tree, cands: string[]) => cands.find((c) => c && !c.startsWith('..') && tree.files.has(c));
 
-/** The text without `//` and block comments; strings are kept (they hold the specifiers). `#` comments are not touched. */
-export function stripComments(text: string): string {
+/** One pass over the text: `//` and block comments dropped. With `hide`, each '…' or "…" string becomes `'\u0001<n>'`
+ *  (its text in `strings[n]`) and a template literal becomes an empty one, so code inside a string never looks like an
+ *  import; without it strings are kept as they are. `#` comments are not touched. */
+export function scan(text: string, hide = false): { code: string; strings: string[] } {
   let out = '', i = 0;
+  const strings: string[] = [];
   while (i < text.length) {
     const c = text[i], n = text[i + 1];
     if (c === '/' && n === '/') { while (i < text.length && text[i] !== '\n') i++; continue; }
@@ -27,25 +30,32 @@ export function stripComments(text: string): string {
     if (c === '"' || c === "'" || c === '`') {
       let j = i + 1;
       while (j < text.length && text[j] !== c && (c === '`' || text[j] !== '\n')) j += text[j] === '\\' ? 2 : 1;
-      out += text.slice(i, j + 1); i = j + 1; continue;
+      if (!hide) out += text.slice(i, j + 1);
+      else if (c === '`') out += '``' + '\n'.repeat(text.slice(i, j).split('\n').length - 1);
+      else { out += `${c}\u0001${strings.length}${c}`; strings.push(text.slice(i + 1, j)); }
+      i = j + 1; continue;
     }
     out += c; i++;
   }
-  return out;
+  return { code: out, strings };
 }
+/** The text without `//` and block comments; strings are kept. */
+export const stripComments = (text: string) => scan(text).code;
 
 // ---------- TS / JS ----------
 
+// On scan(…, true) output: a specifier is `'\u0001<n>'`. Static forms start a statement; the lazy span is bounded so a
+// long run of "import" words cannot make the match quadratic.
 const JS_SPEC = [
-  /\b(?:import|export)\s[^;'"]*?\bfrom\s*(['"])([^'"\n]+)\1/g,
-  /\bimport\s*(['"])([^'"\n]+)\1/g,
-  /\b(?:require|import)\s*\(\s*(['"])([^'"\n]+)\1\s*\)/g,
+  /(?:^|[;}])\s*(?:import|export)\s[^;'"`]{0,2000}?\bfrom\s*(['"])\u0001(\d+)\1/gm,
+  /(?:^|[;}])\s*import\s*(['"])\u0001(\d+)\1/gm,
+  /\b(?:require|import)\s*\(\s*(['"])\u0001(\d+)\1\s*\)/g,
 ];
 
 function jsImports(file: string, text: string, tree: Tree): string[] {
-  const code = stripComments(text), out: string[] = [];
+  const { code, strings } = scan(text, true), out: string[] = [];
   for (const re of JS_SPEC) for (const m of code.matchAll(re)) {
-    const spec = m[2];
+    const spec = strings[Number(m[2])] ?? '';
     if (!spec.startsWith('./') && !spec.startsWith('../')) continue;   // a package name, never a repo file
     const base = join(dirOf(file), spec);
     const swapped = base.replace(/\.(m|c)?js(x?)$/, (_s, mc = '', x = '') => `.${mc ?? ''}ts${x}`);
@@ -69,8 +79,8 @@ const pyModule = (tree: Tree, dir: string, dotted: string) =>
 
 function pyImports(file: string, text: string, tree: Tree): string[] {
   const out: string[] = [];
-  // a parenthesised name list becomes one line
-  const lines = text.replace(/\(([^()]*)\)/g, (_m, inner: string) => inner.replace(/\s*\n\s*/g, ' ')).split('\n');
+  // docstrings ("""…""", '''…''') are blanked (their lines kept); a parenthesised name list becomes one line
+  const lines = text.replace(/("""|''')[\s\S]*?(\1|$)/g, (s) => s.replace(/[^\n]/g, ' ')).replace(/\(([^()]*)\)/g, (_m, inner: string) => inner.replace(/\s*\n\s*/g, ' ')).split('\n');
   const roots = [...new Set([pyRoot(file, tree), ''])];
   const names = (s: string) => s.split('#')[0].split(',').map((n) => n.trim().split(/\s+as\s+/)[0].trim()).filter((n) => /^[\w.]+$/.test(n));
   for (const line of lines) {
@@ -118,22 +128,31 @@ function rsImports(file: string, text: string, tree: Tree): string[] {
     const hit = rsModule(tree, childDir(file), [m[1]]);
     if (hit) out.push(hit);
   }
-  for (const m of code.matchAll(/\buse\s+([^;]+);/g)) {
-    const flat = m[1].replace(/\s+/g, '');
-    const head = flat.replace(/::\{.*$/, '');
-    const tails = /::\{(.*)\}$/.exec(flat)?.[1].split(',').map((t) => t.split('::')) ?? [[]];
-    const segs = head.split('::');
-    let dir: string;
-    if (segs[0] === 'crate') dir = src;
-    else if (segs[0] === 'self') dir = childDir(file);
-    else if (segs[0] === 'super') { dir = dirOf(childDir(file)); while (segs[1] === 'super') { segs.shift(); dir = dirOf(dir); } }
-    else continue;   // another crate
-    for (const t of tails) {
-      const hit = rsModule(tree, dir, [...segs.slice(1), ...t].filter((s) => /^\w+$/.test(s) && s !== 'self'));
+  for (const m of code.matchAll(/^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+([^;]+);/gm)) {
+    for (const segs of useTree(m[1].replace(/\s+as\s+\w+/g, '').replace(/\s+/g, ''))) {
+      let dir: string;
+      if (segs[0] === 'crate') dir = src;
+      else if (segs[0] === 'self') dir = childDir(file);
+      else if (segs[0] === 'super') { dir = dirOf(childDir(file)); while (segs[1] === 'super') { segs.shift(); dir = dirOf(dir); } }
+      else continue;   // another crate
+      const hit = rsModule(tree, dir, segs.slice(1).filter((s) => /^\w+$/.test(s) && s !== 'self' && s !== 'super'));
       if (hit && hit !== file) out.push(hit);
     }
   }
   return out;
+}
+
+/** The paths of a Rust use tree without spaces: `crate::{a::{x::X, y}, b}` → crate/a/x/X, crate/a/y, crate/b. */
+export function useTree(s: string): string[][] {
+  const at = s.indexOf('{');
+  if (at < 0) return [s.split('::').filter(Boolean)];
+  const prefix = s.slice(0, at).split('::').filter(Boolean), inner = s.slice(at + 1, s.lastIndexOf('}')), parts: string[] = [];
+  let depth = 0, from = 0;
+  for (let i = 0; i <= inner.length; i++) {
+    if (inner[i] === '{') depth++; else if (inner[i] === '}') depth--;
+    else if (i === inner.length || (inner[i] === ',' && depth === 0)) { if (i > from) parts.push(inner.slice(from, i)); from = i + 1; }
+  }
+  return parts.flatMap((p) => useTree(p).map((t) => [...prefix, ...t]));
 }
 
 // ---------- Swift (SwiftPM) ----------

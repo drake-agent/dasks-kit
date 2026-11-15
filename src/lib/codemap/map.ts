@@ -15,9 +15,10 @@ export interface MapView { map: CodeMap; stale: boolean }
 
 export const LIMITS = { files: 20_000, blobBytes: 512 * 1024, totalBytes: 64 * 1024 * 1024, timeoutMs: 60_000 };
 
-/** The map from a tree's file list and a reader of its files. Pure. */
-export function mapFromTree(repo: string, sha: string, files: string[], read: (file: string) => string | undefined, builtAt: string, truncated = false): CodeMap {
-  const sorted = [...files].sort();
+type Read = (file: string) => string | undefined;
+
+/** The map's edges, one source file per step (a step yields nothing; the return value is the edge list). */
+function* edgeSteps(sorted: string[], read: Read): Generator<void, [string, string][]> {
   const tree: Tree = { files: new Set(sorted), swift: [] };
   for (const f of sorted) if (isPackageSwift(f)) tree.swift.push(...swiftTargets(f, read(f) ?? ''));
   const edges: [string, string][] = [];
@@ -25,8 +26,32 @@ export function mapFromTree(repo: string, sha: string, files: string[], read: (f
     if (!SOURCE.test(f) || isPackageSwift(f)) continue;
     const text = read(f);
     if (text) for (const to of importsOf(f, text, tree)) edges.push([f, to]);
+    yield;
   }
-  return { repo, sha, built_at: builtAt, files: sorted, edges, truncated };
+  return edges;
+}
+
+/** The map from a tree's file list and a reader of its files. Pure. */
+export function mapFromTree(repo: string, sha: string, files: string[], read: Read, builtAt: string, truncated = false): CodeMap {
+  const sorted = [...files].sort(), steps = edgeSteps(sorted, read);
+  let r = steps.next();
+  while (!r.done) r = steps.next();
+  return { repo, sha, built_at: builtAt, files: sorted, edges: r.value, truncated };
+}
+
+/** mapFromTree that gives the event loop a turn every 20 ms (heartbeats, kill timers) and throws past `until`. */
+async function mapFromTreeBounded(repo: string, sha: string, files: string[], read: Read, truncated: boolean, until: number): Promise<CodeMap> {
+  const sorted = [...files].sort(), steps = edgeSteps(sorted, read);
+  let r = steps.next(), slice = Date.now();
+  while (!r.done) {
+    if (Date.now() - slice > 20) {
+      await new Promise((ok) => setImmediate(ok));
+      if (Date.now() > until) throw new Error('timed out reading imports');
+      slice = Date.now();
+    }
+    r = steps.next();
+  }
+  return { repo, sha, built_at: new Date().toISOString(), files: sorted, edges: r.value, truncated };
 }
 
 /** The texts of `paths` at `sha` through one `git cat-file --batch`. Rejects on timeout or past `maxBytes`. */
@@ -90,7 +115,7 @@ export async function buildMap(dir: string, sha: string, limits = LIMITS): Promi
     read.push(m[3]); bytes += n;
   }
   const blobs = await readBlobs(dir, sha, read, Math.max(1, until - Date.now()), limits.totalBytes);
-  return mapFromTree(dir, sha, files, (f) => blobs.get(f), new Date().toISOString(), truncated);
+  return mapFromTreeBounded(dir, sha, files, (f) => blobs.get(f), truncated, until);
 }
 
 /** The runner's maps, one JSON file per clone in `stateDir`. refresh() looks at each clone's default-branch head and

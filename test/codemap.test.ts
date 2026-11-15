@@ -29,6 +29,22 @@ test('comments: a /* inside a // comment does not hide the imports after it; str
   assert.deepEqual(edges(m), ['a.ts -> b.ts']);
 });
 
+test('review R1/R2: code inside a string or docstring is not an import; a long run of "import" words stays fast', () => {
+  const m = mapOf({ 'a.ts': 'const doc = `import "./b"`;\nconst s = "import \'./b\'"; const t = "require(\'./b\')";\n', 'b.ts': '', 'p.py': '"""\nimport q\n"""\n', 'q.py': '' });
+  assert.deepEqual(edges(m), []);
+  const big = 'const docs = `' + 'import '.repeat(70000) + '`;\nimport ' + 'import '.repeat(70000) + "\nimport './b';\n";
+  const t0 = Date.now();
+  const m2 = mapOf({ 'a.ts': big, 'c.ts': big, 'b.ts': '' });
+  assert.ok(Date.now() - t0 < 3000, `took ${Date.now() - t0} ms`);
+  assert.deepEqual(edges(m2), ['a.ts -> b.ts', 'c.ts -> b.ts']);
+});
+
+test('review R3: Rust nested use groups keep their module paths', () => {
+  const m = mapOf({ 'Cargo.toml': '', 'src/lib.rs': '', 'src/a/mod.rs': '', 'src/a/x.rs': '', 'src/a/y.rs': '', 'src/b.rs': 'use crate::{a::{x::X, y::Y as Why}};\n' });
+  assert.deepEqual(edges(m), ['src/b.rs -> src/a/x.rs', 'src/b.rs -> src/a/y.rs']);
+  assert.equal(importWarning('c1', ['src/b.rs'], 'c2', ['src/a/y.rs'], { map: m, stale: false }).startsWith('warning: c1 is one import from c2: src/b.rs imports src/a/y.rs'), true);
+});
+
 test('Python: absolute from the top package dir or the root, from-import of a submodule, relative imports', () => {
   const m = mapOf({
     'pkg/__init__.py': '',
