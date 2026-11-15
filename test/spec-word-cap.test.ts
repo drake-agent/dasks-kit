@@ -33,7 +33,7 @@ test('word count: runs of non-whitespace, any script, any line break', () => {
   assert.equal(SPEC_MAX_WORDS, 1500);
 });
 
-test('word cap: exactly 1,500 words is stored, 1,501 is 422 with a fix message; an edit may not take a spec over it', () => {
+test('word cap: exactly 1,500 words is stored, 1,501 is 422 with a fix message; an edit may not take a spec over it, an auto-ok answer may', () => {
   const { root, cleanup } = tempRepo();
   try {
     const t = createTask(root, { goal: 'alpha', title: 'Word cap' }, 'helper');
@@ -45,6 +45,9 @@ test('word cap: exactly 1,500 words is stored, 1,501 is 422 with a fix message; 
     assert.equal(writeSpec(root, t.id, { text: cardOfWords(SPEC_MAX_WORDS), expected: 0, note: '' }, 'helper').metadata.version, 1);
     assert.equal(refusal(() => writeSpec(root, t.id, { text: cardOfWords(SPEC_MAX_WORDS + 5), expected: 1, note: '' }, 'helper')).status, 422);
     assert.equal(readSpec(root, t.id).metadata.version, 1, 'the refusal stored nothing');
+    const answer = setAutoOk(cardOfWords(SPEC_MAX_WORDS), 'the user chose A in a long answer note');
+    assert.ok(specWords(answer) > SPEC_MAX_WORDS);
+    assert.equal(writeSpec(root, t.id, { text: answer, expected: 1, note: '' }, 'user').metadata.version, 2, "the user's auto-ok answer on a spec at the cap goes through");
   } finally { cleanup(); }
 });
 

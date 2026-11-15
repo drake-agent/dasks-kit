@@ -109,15 +109,15 @@ export function specWords(text: string): number {
   return text.split(/\s+/u).filter(Boolean).length;
 }
 
-/** The word cap as card contract reasons ([] when the write is fine). Checked on write only: a spec stored over the cap
- *  before it existed stays readable and still takes a write that does not make it longer, or that changes only its
- *  auto-ok header lines (the user's answer to an ask). */
+/** The word cap as card contract reasons ([] when the write is fine). Checked on write only: a write that changes only
+ *  the auto-ok header lines (the user's answer to an ask) always goes through, and a spec stored over the cap before it
+ *  existed stays readable and still takes a write that does not make it longer. */
 export function specWordErrors(text: string, prevText: string | undefined): string[] {
   const n = specWords(text);
   if (n <= SPEC_MAX_WORDS) return [];
   if (prevText !== undefined) {
     const before = specWords(prevText);
-    if (before > SPEC_MAX_WORDS && (n <= before || autoOkOnlyChange(prevText, text))) return [];
+    if (autoOkOnlyChange(prevText, text) || (before > SPEC_MAX_WORDS && n <= before)) return [];
   }
   return [`spec is ${n} words; the cap is ${SPEC_MAX_WORDS}. Keep what to build, why, the done check and the tests that prove it; leave out how to build it (file-by-file plans, step lists, code to paste): the builder reads the code and decides`];
 }
