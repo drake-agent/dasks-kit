@@ -50,6 +50,11 @@ test('status: a cancelled dependency blocks; a missing one old enough to be igno
   assert.deepEqual(s.blocked_counts, { 'dep-cancelled': 1 });
 });
 
+test('status: a card with an ignored missing dependency still waits on its open one', () => {
+  const s = projectStatus('beta', input([t('parent'), t('child', { depends_on: 'beta.t-parent, beta.t-nowhere', updated: H(30), created: H(30) })]));
+  assert.deepEqual(s.blocked.map((b) => [b.id, b.reason, b.on]), [['beta.t-child', 'dep-open', ['beta.t-parent']]]);
+});
+
 test('status: blocked says on whom: the person, the dependency, the missing card, the claim holder; idle todo is not blocked', () => {
   const s = projectStatus('beta', input([
     t('ask', { status: 'blocked-on-user', needs_user: '\nWhich colour?\nDetails', next_owner: 'design-lead', updated: H(2) }),

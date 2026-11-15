@@ -82,15 +82,20 @@ export function projectStatus(app: string, inp: StatusInput): ProjectStatus {
     .map((t) => ({ ...card(t), claimed_by: t.claimed_by ?? '', now: t.now ?? '', age_hours: hours(t.status === 'doing' ? startedHours(t, inp.now) : taskAgeHours(t, inp.now)) }))
     .sort((a, b) => (a.status === b.status ? 0 : a.status === 'doing' ? -1 : 1) || b.age_hours - a.age_hours || a.id.localeCompare(b.id));
 
-  // A missing dependency old enough for the ready queue to ignore (all of them direct and ignored) blocks nothing.
+  // A missing dependency old enough for the ready queue to ignore (all of them direct and ignored) blocks nothing; the
+  // card still waits on any open dependency it has.
   const ignored = (i: StuckItem) => i.reason === 'dep-missing' && i.missing.every((d) => i.missing_ignored.includes(d));
-  const stuck = inp.stuck.items.filter((i) => i.goal === app && BLOCKING.has(i.reason) && byId.has(i.id) && !ignored(i));
+  const stuck = inp.stuck.items.filter((i) => i.goal === app && BLOCKING.has(i.reason) && byId.has(i.id));
   const listed = new Set(inp.stuck.items.filter((i) => i.reason === 'blocked-user').map((i) => i.id));
   const statusOf = new Map(inp.board.tasks.map((t) => [t.id, t.status]));
-  const rows: ProjectStatus['blocked'] = stuck.map((i) => {
+  const rows: ProjectStatus['blocked'] = stuck.flatMap((i) => {
     const t = byId.get(i.id)!;
+    if (ignored(i)) {
+      const open = depsOf(t).filter((d) => statusOf.has(d) && !CLOSED.has(statusOf.get(d)!));
+      return open.length ? [{ ...card(t), reason: 'dep-open' as const, on: open, age_hours: hours(i.age_hours) }] : [];
+    }
     const ask = i.reason === 'blocked-user' ? firstLine(t.needs_user) : '';
-    return { ...card(t), reason: i.reason, on: waitsOn(i, t), ...(ask ? { ask } : {}), age_hours: hours(i.age_hours) };
+    return [{ ...card(t), reason: i.reason, on: waitsOn(i, t), ...(ask ? { ask } : {}), age_hours: hours(i.age_hours) }];
   });
   for (const t of tasks) {
     if (CLOSED.has(t.status) || listed.has(t.id)) continue;
