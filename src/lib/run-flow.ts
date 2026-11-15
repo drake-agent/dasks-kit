@@ -17,6 +17,7 @@ import { humanStepLine, humanStepsOf, mergeHumanSteps } from './human-steps.ts';
 import { closeRepoView, openRepoView, repoSource, specLoop, TOOL_NAME as SPEC_TOOL_NAME, type AgentRun } from './spec-flow.ts';
 import { originRef, pickStart, pushableBranch, saveWork } from './keep-work.ts';
 import { SPEC_RETRIES, type SpecPicked } from './runner.ts';
+import { prFilesRoute, SHA_RE } from './touches-actual.ts';
 
 export class BoardError extends Error {
   status: number; body: any;
@@ -175,6 +176,7 @@ export async function handBack(env: FlowEnv, card: string, r: RunRecord, pr: str
     history(env, card, r, 'error', `board: ${e.message}`, pr);
     return true;
   }
+  await recordPrFiles(env, card, pr);
   if (blocked) {
     try { await blockAtLimit(env, card, r, pr, open); } catch (e: any) {
       if (!(e instanceof BoardError) || e.status >= 500) { env.log(`${card}: blocking at the review limit failed (${e.message}); will retry`); return false; }
@@ -190,6 +192,28 @@ export async function handBack(env: FlowEnv, card: string, r: RunRecord, pr: str
   env.log(`${card}: draft PR ${pr}; card moved to review`);
   history(env, card, r, 'review', summary, pr);
   return true;
+}
+
+/** Store the PR head's real file list on the card (touches_actual + touches_sha, docs/cards.md "touches"), so the board's
+ *  claim check holds the files the PR really changes when the card is worked again. Best effort: when GitHub cannot
+ *  say, the head moves while it is read, or the board refuses, the card keeps its planned `touches:` and the run goes on. */
+export async function recordPrFiles(env: Pick<FlowEnv, 'api' | 'log'>, card: string, pr: string): Promise<void> {
+  const route = prFilesRoute(pr);
+  if (!route) return;
+  const head = () => {
+    const v = spawnSync('gh', ['pr', 'view', pr, '--json', 'headRefOid,changedFiles'], { encoding: 'utf8', timeout: 60_000 });
+    try { const j = JSON.parse(v.stdout); return v.status === 0 ? { sha: String(j.headRefOid).toLowerCase(), count: Number(j.changedFiles) } : null; } catch { return null; }
+  };
+  const before = head();
+  // A rename changes two paths: its new name and the one it had.
+  const list = spawnSync('gh', ['api', '--paginate', route, '--jq', '.[] | .filename + "\\t" + (.previous_filename // "")'], { encoding: 'utf8', timeout: 120_000 });
+  const after = head();
+  const rows = list.status === 0 ? list.stdout.split('\n').filter(Boolean) : [];
+  const why = !before || list.status !== 0 ? 'GitHub did not answer' : !SHA_RE.test(before.sha) || before.sha !== after?.sha ? 'the head moved while it was read' : rows.length !== before.count ? `${rows.length} of ${before.count} files listed` : '';
+  if (why) { env.log(`${card}: ${pr} file list not stored (${why}); its touches line holds`); return; }
+  try {
+    await env.api('POST', `/api/tasks/${card}`, { touches_actual: rows.flatMap((r) => r.split('\t')).filter(Boolean), touches_sha: before!.sha });
+  } catch (e: any) { env.log(`${card}: ${pr} file list not stored (${e.message}); its touches line holds`); }
 }
 
 /** The review passes stored for a card, oldest first; null when the board cannot say, so no pass may start. */

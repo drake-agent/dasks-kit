@@ -6,6 +6,7 @@ import { expandHome } from './config.ts';
 import { HttpError } from './write.ts';
 import { readSpecUnlocked } from './specs.ts';
 import { parseTouches, touchesOverlap, touchesValue } from './touches.ts';
+import { lockTouches } from './touches-actual.ts';
 import type { Project } from './config.ts';
 import type { Task } from './schema.ts';
 
@@ -22,14 +23,15 @@ export function touchesOf(root: string, t: Pick<Task, 'id' | 'body'>): string[] 
   return parseTouches(touchesValue(text));
 }
 
-/** Throws 409 when `card` overlaps a claimed doing card in the same repo. Call it under the repo lock. */
+/** Throws 409 when `card` overlaps a claimed doing card in the same repo: that card's PR files when the runner stored
+ *  them (touches_actual), else its planned `touches:`. Call it under the repo lock. */
 export function assertTouchesFree(root: string, card: Task, tasks: Task[], projects: Project[]): void {
   const mine = touchesOf(root, card);
   if (!mine.length) return;
   const key = repoKey(card.goal, projects);
   for (const o of tasks) {
     if (o.id === card.id || o.status !== 'doing' || !o.claimed_by || repoKey(o.goal, projects) !== key) continue;
-    if (touchesOverlap(mine, touchesOf(root, o)))
+    if (touchesOverlap(mine, lockTouches(o, touchesOf(root, o))))
       throw new HttpError(409, `touches overlap ${o.id}, which ${o.claimed_by} is working in the same repo`, { rule: 'touches', with: o.id, claimed_by: o.claimed_by });
   }
 }

@@ -20,6 +20,7 @@ import { checkLine, doneLine, LIVE_CHECK_LANE } from './done-line.ts';
 import { lintNow, normNow } from './now-line.ts';
 import { type Activity, type Context, activityContent, activityRelPath, applyContext, contextErrors, contextExempt, holderOf, parseContext, readActivity, TERMINAL } from './collab.ts';
 import { holderSeenAt } from './lease.ts';
+import { normTouchesValue, SHA_RE } from './touches-actual.ts';
 import { cleanProfileInput } from './profile.ts';
 import { launchGateOf, versionTarget } from './version-mode.ts';
 
@@ -497,7 +498,7 @@ export function serializeTask(t: Partial<Task>): string {
   return `---\n${y}---\n${body}`;
 }
 
-const EDITABLE = ['title', 'title_ko', 'title_en', 'milestone', 'owner', 'lane', 'kind', 'status', 'priority', 'pr', 'pr_summary', 'result', 'needs_user', 'approvals', 'started_at', 'depends_on', 'next_owner', 'secrets', 'summary', 'now'] as const;
+const EDITABLE = ['title', 'title_ko', 'title_en', 'milestone', 'owner', 'lane', 'kind', 'status', 'priority', 'pr', 'pr_summary', 'result', 'needs_user', 'approvals', 'started_at', 'depends_on', 'next_owner', 'secrets', 'summary', 'now', 'touches_actual', 'touches_sha'] as const;
 
 export interface TaskPatch { [k: string]: unknown }
 
@@ -609,10 +610,15 @@ function readTaskRaw(root: string, id: string): { task: Task; raw: Buffer } {
   catch (e: any) { throw new HttpError(409, `task file is unparseable: ${e.message}`); }
 }
 
+const TOUCHES_FIELDS = ['touches_actual', 'touches_sha'];
+/** A task's size as the write limit judges it: the PR file list is left out (TOUCHES_CAP bounds it), so storing it never
+ *  makes a write fail. */
+const sizeOf = (t: Task) => Buffer.byteLength(serializeTask({ ...t, touches_actual: '', touches_sha: '' }));
+
 function validateOrThrow(t: Task, root: string, prevSize = 0, bodyReplace = true): void {
   const errs = checkTask(t, boardIndex(root));
   if (errs.length) throw new HttpError(400, errs.join('; '));
-  const size = Buffer.byteLength(serializeTask(t));
+  const size = sizeOf(t);
   // Refuse growth past the limit, but never block a write that does not make an oversized file bigger. Field writes
   // (status, claim, result, …; notes are compacted first) get 50% slack: every field is capped, so files stay bounded.
   const limit = bodyReplace ? WRITE_LIMIT : WRITE_LIMIT * 1.5;
@@ -662,6 +668,8 @@ function strPatch(patch: TaskPatch): Record<string, string> {
     if (!(EDITABLE as readonly string[]).includes(k)) throw new HttpError(400, `field "${k}" is not editable`);
     if (k === 'depends_on') v = normDeps(v);
     if (k === 'secrets') v = normDeps(v);
+    if (k === 'touches_actual') { const n = normTouchesValue(v); if (n === null) throw new HttpError(400, 'touches_actual must be a string or a list of paths'); v = n; }
+    if (k === 'touches_sha' && typeof v === 'string') { v = v.trim().toLowerCase(); if (v && !SHA_RE.test(v as string)) throw new HttpError(400, 'touches_sha must be a 40-hex commit or empty'); }
     if (v !== null && typeof v !== 'string') throw new HttpError(400, `field "${k}" must be a string`);
     out[k] = (v ?? '') as string;
     if (k === 'title_ko' || k === 'title_en') out[k] = cleanTitle(out[k], k);
@@ -669,6 +677,8 @@ function strPatch(patch: TaskPatch): Record<string, string> {
     if (k === 'now') out[k] = normNow(out[k]);
     capField(k, out[k]);
   }
+  // A cleared file list clears its commit too: it no longer describes any head.
+  if (out.touches_actual === '' && out.touches_sha === undefined) out.touches_sha = '';
   return out;
 }
 
@@ -739,6 +749,8 @@ export function updateTask(root: string, id: string, patch: TaskPatch, actor: st
         opts.warnings?.push(`done_at: live: ${id} waits in review (lane ${LIVE_CHECK_LANE}) until someone checks the end state after the merge (dask verify ${id} --evidence "…" --commit <sha>)`);
       } else if (cur.lane === LIVE_CHECK_LANE && fields.lane === undefined) fields.lane = 'none';
     }
+    // A new PR link drops the old PR's file list: it described another head.
+    if (fields.pr !== undefined && fields.pr !== (cur.pr ?? '') && fields.touches_actual === undefined && (cur.touches_actual || cur.touches_sha)) { fields.touches_actual = ''; fields.touches_sha = ''; }
     const next: Task = { ...cur, ...fields } as Task;
     const holder = holderOf(cur);
     // A claim lease: a claimed task with no update for staleHours (default 6) is up for grabs without force — its
@@ -837,7 +849,10 @@ export function updateTask(root: string, id: string, patch: TaskPatch, actor: st
     // A translation-only edit is not progress: it keeps `updated`, so "done in 24h" lists and the digest stay true.
     const i18nOnly = Object.keys(fields).length > 0 && Object.keys(fields).every((k) => I18N_ONLY.includes(k)) && !opts.claim
       && opts.body === undefined && !opts.context && !opts.appendNote?.trim() && !opts.appendBlock;
-    if (!i18nOnly && !opts.housekeeping) next.updated = isoLocal(opts.now);
+    // So is a write of only the PR file list: it says nothing about progress.
+    const filesOnly = Object.keys(fields).length > 0 && Object.keys(fields).every((k) => TOUCHES_FIELDS.includes(k)) && !opts.claim
+      && opts.body === undefined && !opts.context && !opts.appendNote?.trim() && !opts.appendBlock;
+    if (!i18nOnly && !filesOnly && !opts.housekeeping) next.updated = isoLocal(opts.now);
     if (typeof opts.body === 'string') next.body = opts.body;
     if (opts.context) next.body = applyContext(next.body, opts.context, fields.pr_summary);
     // Keep the block's "PR summary" line in step with the pr_summary field.
@@ -857,7 +872,7 @@ export function updateTask(root: string, id: string, patch: TaskPatch, actor: st
     // never get stuck on a long-lived task. Only a whole-body replace can still be refused as too big.
     assertNoForgedUserNote(actor, cur.body, next.body); // before notes move to the archive: judge what this write adds
     const archive = opts.specFields ? null : compactNotes(root, next); // a spec-field write leaves the body as it is
-    validateOrThrow(next, root, cur.bytes, typeof opts.body === 'string');
+    validateOrThrow(next, root, cur.touches_actual || cur.touches_sha ? sizeOf(cur) : cur.bytes, typeof opts.body === 'string');
     // Entering review/blocked-on-user (or writing a new context) needs the context block; exempt writers skip the check.
     // Same-status edits that replace the body or change the PR fields are re-checked too.
     const touchesCtx = typeof opts.body === 'string' || fields.pr !== undefined || fields.pr_summary !== undefined;
