@@ -6,8 +6,9 @@
   (`<card>-rethink-1`, its body starting `rethink: <card>`) with the open findings and the old card's text, asking to
   re-check the design and change the approach; as a new card it gets its own 2 review passes. A rethink card stopped at
   the limit gets the next one, up to `runner.rethinks` (default 3, `0` = off) in one line of cards; then the card waits
-  for you. When the rethink card is done, a later look comments on and closes the old PR (the branch is kept), cancels
-  the old card as `superseded by <rethink card>` and moves cards that waited on it to the rethink card. See docs/runner.md.
+  for you. When the rethink card is done, a later look cancels the old card (and any card above it in the line still at
+  the limit) as `superseded by <rethink card>`, comments on and closes its PR (the branch is kept) and moves cards that
+  waited on it to the rethink card. See docs/runner.md.
 - Code review rule: at most 2 passes per PR. Pass 1 reviews the whole change; pass 2 only re-checks pass-1 findings and
   regressions from the fixes; the board and `dask review-record` refuse a third pass (older stored pass-3 rows stay
   readable). A finding blocks only if it carries a repro (a `repro:` line with the command or input and the wrong

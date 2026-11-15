@@ -185,9 +185,10 @@ async function retryPending(env: FlowEnv): Promise<void> {
 /** Done rethink cards close their old card (src/lib/rethink.ts). A line is logged once until it changes; a failed read
  *  only skips this look. */
 const closeSaid = new Set<string>();
+const rethinksFinished = new Set<string>();
 async function supersede(env: FlowEnv): Promise<void> {
   let lines: string[];
-  try { lines = await closeSuperseded(env, ghIo(which('gh'))); } catch (e: any) { lines = [`rethink close pass skipped (${oneLine(e.message, 200)})`]; }
+  try { lines = await closeSuperseded(env, ghIo(which('gh')), rethinksFinished); } catch (e: any) { lines = [`rethink close pass skipped (${oneLine(e.message, 200)})`]; }
   for (const l of lines) if (!closeSaid.has(l)) log(l);
   closeSaid.clear(); for (const l of lines) closeSaid.add(l);
 }

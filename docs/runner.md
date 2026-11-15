@@ -137,7 +137,8 @@ To look at a kept ref: `git log refs/dasks/kept/<card>/<sha>`. To drop it: `git 
 A card not clean after its 2 review passes can never be reviewed again: its passes stay used. So the runner files a
 **rethink card** in the same look: a new card, `<card>-rethink-1`, with the old card's goal, lane, priority, milestone and
 `depends_on`. Its body starts with the line `rethink: <old card>`, lists the open findings, asks to re-check the design
-and change the approach rather than repeat the fix, and carries the old card's spec (or body). Being a new card it gets
+and change the approach rather than repeat the fix, and carries the start of the old card's spec (or body; the
+body stays small, the rest is one `dask card <old card>` away). Being a new card it gets
 its own 2 review passes, and it is built from the default branch; the old branch `dasks/<old card>` stays for reference.
 Like any card it needs a ready spec before it is built (the spec pass writes one when `spec` is on). The old card gets a
 note naming it, and your message on the old card says which card took over.
@@ -147,10 +148,12 @@ gets at most `rethinks` of them (default 3); after that the message says the lin
 you, as before. `rethinks: 0` turns this off. A goal over its todo limit turns the rethink into an idea; the message
 says so.
 
-**When the rethink card is done** (merged and marked done), a later look of any runner finishes the old card:
+**When the rethink card is done** (merged and marked done), a later look of any runner finishes the old card, and every
+card above it in the line that still waits at the limit:
 
-1. its open PR gets one comment, `Superseded by <rethink card> …`, and is closed. The branch is never deleted.
-2. the old card is cancelled with the result `superseded by <rethink card>`.
+1. the old card is cancelled with the result `superseded by <rethink card>`, only if it did not change since the runner
+   read it (so a card you just took back is left alone).
+2. its open PR gets one comment, `Superseded by <rethink card> …`, and is closed. The branch is never deleted.
 3. open cards that waited on the old card wait on the rethink card instead.
 
 The runner leaves the old card alone, with one log line, when its PR was merged or cannot be read with `gh`, when its

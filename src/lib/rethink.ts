@@ -12,7 +12,8 @@ import { MAX_ID_LEN, MAX_TITLE_LEN } from './schema.ts';
 
 const LINE = /^rethink:[ \t]*([a-z][a-z0-9]*\.t-[a-z0-9-]+)[ \t]*$/m;
 const SUFFIX = /-rethink-(\d+)$/;
-const OLD_TEXT_MAX = 6000;
+const BODY_BYTES = 2800;      // the rethink card's body: task files are kept small (MAX_TASK_BYTES)
+const FINDINGS_BYTES = 900;
 const oneLine = (s: string, n = 300) => { const t = String(s ?? '').replace(/\s+/g, ' ').trim(); return t.length <= n ? t : t.slice(0, n - 1) + '…'; };
 
 /** The old card a card's `rethink: <id>` line names (a line of its own), or null. */
@@ -24,36 +25,46 @@ export function rethinkGen(id: string, body: string | null | undefined): number 
   return m && rethinkOf(body) ? Number(m[1]) : 0;
 }
 
-/** The id of rethink number `gen` in the line of `card`: the line's first slug, cut so the id fits, then `-rethink-<gen>`.
- *  The same card and number always give the same id, so a retried create finds the card it made. */
+/** The id of rethink number `gen` in the line of `card`, cut so it fits, then `-rethink-<gen>`. A later rethink (gen > 1)
+ *  replaces the previous one's suffix; a first one keeps the whole slug, so a card whose own id ends like a rethink id
+ *  still gets a new one. The same card and number always give the same id, so a retried create finds the card it made. */
 export function rethinkId(card: string, gen: number): string {
   const [goal, slug] = card.split('.t-');
   const tail = `-rethink-${gen}`;
-  const root = slug.replace(SUFFIX, '').slice(0, MAX_ID_LEN - goal.length - 3 - tail.length).replace(/-+$/, '');
+  const root = (gen > 1 ? slug.replace(SUFFIX, '') : slug).slice(0, MAX_ID_LEN - goal.length - 3 - tail.length).replace(/-+$/, '');
   return `${goal}.t-${root || 'card'}${tail}`;
 }
 
 /** The marker on the comment that closes an old PR, so a retry does not comment twice. */
 export const closeMarker = (r: string) => `<!-- dasks-runner: superseded-by ${r} -->`;
 
-/** The new card's fields for POST /api/tasks. `old`: the board's task; `text`: its spec text, else its body. */
+/** At most `n` UTF-8 bytes of `s`, cut on a character boundary. */
+function fitBytes(s: string, n: number): string {
+  if (Buffer.byteLength(s) <= n) return s;
+  let out = '', size = 0;
+  for (const ch of s) { const k = Buffer.byteLength(ch); if (size + k > n - 3) break; out += ch; size += k; }
+  return out + '…';
+}
+
+/** The new card's fields for POST /api/tasks. `old`: the board's task; `text`: its spec text, else its body. The body
+ *  stays under BODY_BYTES (task files are kept small): the findings and the old text are cut to fit, and it says where
+ *  the whole old card is. */
 export function rethinkCard(old: any, text: string, pr: string, open: string[], gen: number, max: number): Record<string, unknown> {
   const id = rethinkId(old.id, gen);
-  const oldText = text.length > OLD_TEXT_MAX ? text.slice(0, OLD_TEXT_MAX) + '\n…(cut; read the whole card on the board)' : text;
-  const body = [
+  const findings = fitBytes((open.length ? open.map((l) => `- ${oneLine(l.replace(/^\s*[-*]\s*/, ''), 400)}`) : ['- (none listed)']).join('\n'), FINDINGS_BYTES);
+  const head = [
     `rethink: ${old.id}`, '',
     '## Why this card',
     `${old.id} stopped at the code review limit: 2 review passes, and blocking findings are still open. Its draft PR ${pr || '(none)'} stays open and its branch dasks/${old.id} is kept. This card does the same job with a changed approach and gets its own 2 review passes. It is rethink ${gen} of at most ${max} in this line of cards.`, '',
-    '## Open findings',
-    ...(open.length ? open.map((l) => `- ${l.replace(/^\s*[-*]\s*/, '')}`) : ['- (none listed)']), '',
+    '## Open findings', findings, '',
     '## What to do',
-    `1. Read the findings above, the old PR${pr ? ` (gh pr view ${pr}, gh pr diff ${pr})` : ''} and the old card below.`,
+    `1. Read the findings above, the old PR${pr ? ` (gh pr view ${pr}, gh pr diff ${pr})` : ''} and the old card (dask card ${old.id}).`,
     '2. Work out why two review passes did not end it: a wrong spec, a wrong design, or a case nobody decided (a security or data-loss case the spec does not cover fails closed). Change the design so these findings cannot come back; do not repeat the same fix.',
     `3. Build it from the default branch. Take code from dasks/${old.id} only where it fits the new design.`,
-    `When this card is done, the runner closes ${pr || 'the old PR'} with a comment (the branch is kept), cancels ${old.id} as superseded and moves the cards waiting on it to this one.`, '',
-    `## The old card: ${old.title ?? ''}`,
-    oldText.trim() || '(empty)',
+    `When this card is done, the runner cancels ${old.id} as superseded, closes ${pr || 'its open PR'} with a comment (the branch is kept) and moves the cards waiting on it to this one.`, '',
+    `## The old card: ${oneLine(old.title ?? '', 200)} (its start; all of it: dask card ${old.id})`,
   ].join('\n');
+  const body = `${head}\n${fitBytes(text.trim() || '(empty)', Math.max(0, BODY_BYTES - Buffer.byteLength(head) - 1))}`;
   const title = oneLine(`Rethink: ${old.title ?? old.id}`, MAX_TITLE_LEN);
   const copy = Object.fromEntries(['lane', 'priority', 'kind', 'milestone', 'depends_on', 'secrets'].filter((k) => typeof old[k] === 'string' && old[k]).map((k) => [k, old[k]]));
   return { id, goal: old.goal, title, ...copy, body, force: true };
@@ -109,56 +120,80 @@ export function ghIo(gh: string | null): PrIo {
   };
 }
 
-/** One look's close pass: every done rethink card whose old card is still open (or cancelled by this pass with
- *  dependents left). Returns a line per card that did something or was held; nothing is written when a step fails. */
-export async function closeSuperseded(env: Pick<FlowEnv, 'api'>, io: PrIo): Promise<string[]> {
+/** One look's close pass. For each done rethink card it walks up its line of cards (`rethink:` lines) and finishes every
+ *  card above it still waiting at the review limit: cancel it as superseded (version-checked, so a card someone took
+ *  meanwhile is left alone), then comment on and close its open PR, then move its dependents. `finished`: rethink cards
+ *  whose line needs nothing more, skipped from then on. Returns a line per card that did something or was held. */
+export async function closeSuperseded(env: Pick<FlowEnv, 'api'>, io: PrIo, finished = new Set<string>()): Promise<string[]> {
   const done: any[] = await env.api('GET', '/api/tasks?status=done&fields=id,body,pr');
-  const carriers = done.filter((r) => SUFFIX.test(r.id) && rethinkOf(r.body));
+  const carriers = done.filter((r) => SUFFIX.test(r.id) && rethinkOf(r.body) && !finished.has(r.id));
   if (!carriers.length) return [];
-  const all: any[] = await env.api('GET', '/api/tasks?status=all&fields=id,status,pr,depends_on,version,spec_state,claimed_by,result');
+  const all: any[] = await env.api('GET', '/api/tasks?status=all&fields=id,status,pr,depends_on,version,spec_state,claimed_by,result,body');
   const byId = new Map(all.map((t) => [t.id, t]));
   const lines: string[] = [];
   for (const r of carriers) {
-    const b = byId.get(rethinkOf(r.body)!);
-    if (!b || b.status === 'done') continue;
-    const say = (s: string) => lines.push(`${b.id}: ${s}`);
-    try {
-      if (b.status === 'cancelled') {
-        if (String(b.result ?? '').startsWith(`superseded by ${r.id}`)) await relink(env, b.id, r.id, all, say);
-        continue;
-      }
-      if (b.spec_state !== 'blocked' || b.claimed_by || b.status === 'doing') { say(`not closed for done rethink ${r.id}: the old card is no longer blocked at the review limit or someone holds it`); continue; }
-      const pr = String(b.pr ?? '').trim();
-      if (pr && !PR_URL.test(pr)) { say(`not closed for done rethink ${r.id}: its pr field is not a GitHub PR (${oneLine(pr, 100)})`); continue; }
-      if (pr) {
-        const v = await io.view(pr);
-        if (!v) { say(`not closed yet: ${pr} could not be read`); continue; }
-        if (v.state === 'MERGED') { say(`not closed for done rethink ${r.id}: ${pr} was merged`); continue; }
-        if (v.state === 'OPEN') {
-          if (!v.comments.some((c) => c.includes(closeMarker(r.id)))
-            && !await io.comment(pr, `Superseded by ${r.id}${r.pr ? ` (${r.pr})` : ''}, its rethink card, which is done. The Dasks runner closes this PR; the branch is kept.\n\n${closeMarker(r.id)}`)) { say(`not closed yet: could not comment on ${pr}`); continue; }
-          if (!await io.close(pr) || (await io.view(pr))?.state !== 'CLOSED') { say(`not closed yet: ${pr} did not close`); continue; }
-        }
-      }
-      await env.api('POST', `/api/tasks/${b.id}`, {
-        status: 'cancelled', result: `superseded by ${r.id}${pr ? ` (closed ${pr})` : ''}`, expected_version: Number(b.version ?? 0),
-        note: `runner: rethink card ${r.id} is done, so this card is cancelled as superseded.${pr ? ` ${pr} was closed with a comment; its branch is kept.` : ''} Cards waiting on it now wait on ${r.id}.`,
-      });
-      say(`cancelled as superseded by ${r.id}${pr ? `, ${pr} closed` : ''}`);
-      await relink(env, b.id, r.id, all, say);
-    } catch (e: any) { say(`not closed yet: ${oneLine(e.message, 200)}`); }
+    const seen = new Set([r.id]);
+    let complete = true;
+    for (let cur = rethinkOf(r.body); cur && !seen.has(cur); cur = rethinkOf(byId.get(cur)?.body)) {
+      seen.add(cur);
+      const b = byId.get(cur);
+      if (!b || b.status === 'done') break;
+      const step = await supersede(env, io, b, r, all, (s) => lines.push(`${b.id}: ${s}`));
+      if (step === 'retry') complete = false;
+      if (step !== 'ok') break;
+    }
+    if (complete) finished.add(r.id);
   }
   return lines;
 }
 
-/** Open cards that wait on `b` wait on `r` instead (a cancelled dependency blocks on purpose: src/lib/ready.ts). */
-async function relink(env: Pick<FlowEnv, 'api'>, b: string, r: string, all: any[], say: (s: string) => void): Promise<void> {
+/** Finish one old card `b` for the done rethink card `r`. ok: done, walk on; held: leave it and the cards above it;
+ *  retry: a step failed, the next look tries again. */
+async function supersede(env: Pick<FlowEnv, 'api'>, io: PrIo, b: any, r: any, all: any[], say: (s: string) => void): Promise<'ok' | 'held' | 'retry'> {
+  const pr = String(b.pr ?? '').trim();
+  try {
+    if (b.status === 'cancelled') {
+      if (!String(b.result ?? '').startsWith(`superseded by ${r.id}`)) return 'held';   // cancelled for another reason
+    } else {
+      if (b.spec_state !== 'blocked' || b.claimed_by || b.status === 'doing') { say(`left alone for done rethink ${r.id}: no longer blocked at the review limit, or someone holds it`); return 'held'; }
+      if (pr && !PR_URL.test(pr)) { say(`left alone for done rethink ${r.id}: its pr field is not a GitHub PR (${oneLine(pr, 100)})`); return 'held'; }
+      if (pr) {
+        const v = await io.view(pr);
+        if (!v) { say(`not finished yet: ${pr} could not be read`); return 'retry'; }
+        if (v.state === 'MERGED') { say(`left alone for done rethink ${r.id}: ${pr} was merged`); return 'held'; }
+      }
+      await env.api('POST', `/api/tasks/${b.id}`, {
+        status: 'cancelled', result: `superseded by ${r.id}`, expected_version: Number(b.version ?? 0),
+        note: `runner: rethink card ${r.id} is done, so this card is cancelled as superseded.${pr ? ` Its PR ${pr} is closed with a comment; the branch is kept.` : ''} Cards waiting on it now wait on ${r.id}.`,
+      });
+      say(`cancelled as superseded by ${r.id}`);
+    }
+    if (pr && PR_URL.test(pr)) {
+      const v = await io.view(pr);
+      if (!v) { say(`${pr} not closed yet: it could not be read`); return 'retry'; }
+      if (v.state === 'OPEN') {
+        if (!v.comments.some((c) => c.includes(closeMarker(r.id)))
+          && !await io.comment(pr, `Superseded by ${r.id}${r.pr ? ` (${r.pr})` : ''}, a rethink card that is done. The Dasks runner closes this PR; the branch is kept.\n\n${closeMarker(r.id)}`)) { say(`${pr} not closed yet: the comment failed`); return 'retry'; }
+        if (!await io.close(pr) || (await io.view(pr))?.state !== 'CLOSED') { say(`${pr} not closed yet: the close failed`); return 'retry'; }
+        say(`${pr} closed, branch kept`);
+      }
+    }
+    return await relink(env, b.id, r.id, all, say) ? 'ok' : 'retry';
+  } catch (e: any) { say(`not finished yet: ${oneLine(e.message, 200)}`); return 'retry'; }
+}
+
+/** Open cards that wait on `b` wait on `r` instead (a cancelled dependency blocks on purpose: src/lib/ready.ts). False
+ *  when one of them could not be moved. */
+async function relink(env: Pick<FlowEnv, 'api'>, b: string, r: string, all: any[], say: (s: string) => void): Promise<boolean> {
+  let ok = true;
   for (const t of all) {
     if (t.status === 'done' || t.status === 'cancelled' || !depsOf(t).includes(b)) continue;
     const deps = [...new Set(depsOf(t).map((d) => (d === b ? r : d)))].join(', ');
     try {
-      await env.api('POST', `/api/tasks/${t.id}`, { depends_on: deps, expected_version: Number(t.version ?? 0), note: `runner: ${b} was superseded by its rethink card ${r}; this card now waits on ${r}.` });
+      const res = await env.api('POST', `/api/tasks/${t.id}`, { depends_on: deps, expected_version: Number(t.version ?? 0), note: `runner: ${b} was superseded by its rethink card ${r}; this card now waits on ${r}.` });
+      Object.assign(t, { depends_on: deps, version: res?.version ?? t.version });   // a card above may need it again
       say(`${t.id} now waits on ${r}`);
-    } catch (e: any) { say(`${t.id} still waits on it (${oneLine(e.message, 150)}); next look tries again`); }
+    } catch (e: any) { ok = false; say(`${t.id} still waits on it (${oneLine(e.message, 150)}); next look tries again`); }
   }
+  return ok;
 }
