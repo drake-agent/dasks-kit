@@ -162,7 +162,7 @@ class Reader:
                     else: buf.append(v)
                 elif nx == '"':  # $"…": bash may translate it through the locale, so the word cannot be known
                     self.i += 2; self.dquote(cmd, '"'); ok = False
-                elif self.expansion(): ok = False
+                elif self.expansion(arith): ok = False  # arithmetic is read as if in "…"
                 else: buf.append("$"); self.i += 1
                 continue
             if c == "`": self.backtick(); ok = False; continue
@@ -224,7 +224,7 @@ class Reader:
             if c == "\\": self.i += 2; continue
             if c == '"': self.i += 1; self.dquote(None, '"'); continue
             if c == "`": self.backtick(); continue
-            if c == "$" and self.expansion(dq): continue
+            if c == "$" and self.expansion(dq or open_ == "["): continue
             if s.startswith(("<(", ">("), self.i):
                 self.i += 2; self.out.compound = True; self.commands(True, True); continue
             if c == "'":
