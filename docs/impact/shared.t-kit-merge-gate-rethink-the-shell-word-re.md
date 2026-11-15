@@ -12,9 +12,14 @@ Builds on #8's reader (launch base f5a9bfc). #8's impact file stays: it maps the
     - a bare open bracket: bash 3.2 does not nest `{` in `${…}` but nests `[` in `$[…]`. Both readings are taken; the
       text between the two possible ends must be plain (no blank, separator, quote, `$`, backtick, backslash or `#`),
       else unreadable. With no nested close, the expansion ends at the first close.
+    - `<(…)` / `>(…)` inside `${…}` / `$[…]` are read as commands (review R1).
+    - in `$[…]` a `'…'` never hides a substitution (review R2).
+  - `Reader.quoted_runs(body)`: reads the substitutions of a `'…'` that bash still runs.
+  - `Reader.word(cmd, arith)`: in `((…))` / `$((…))` a `'…'` is read for substitutions, not skipped (review R2).
   - `Reader.expansion(dq)`: passes the context on; `dquote()` calls it with `dq=True`, `word()` with `False`.
-  - Unchanged: `commands()`, `word()`, `backtick()`, `ansi_c()`, `heredoc_bodies()`, `fail_closed()`, `decide()`,
-    `target()`, the board check.
+  - `fail_closed()`: a read-only command (`READ_ONLY`, by basename) skips the "gh run through a wrapper" check
+    (review R3); its substitutions are still judged as commands of their own.
+  - Unchanged: `commands()`, `backtick()`, `ansi_c()`, `heredoc_bodies()`, `decide()`, `target()`, the board check.
 - `test/kit.test.ts`, test 3: new must-pass and must-refuse rows; tests 1 and 2 unchanged.
 - `CHANGELOG.md`: the Unreleased gate line.
 
