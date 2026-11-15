@@ -2,7 +2,7 @@
 // progress, what is blocked and on whom, what finished lately, and the version's progress when version mode is on.
 // Pure: the server hands in the board, the stuck report and when each done card closed. No file read, no write.
 import type { Board, Goal, Task } from './schema.ts';
-import { CLOSED, doingAgeHours, taskAgeHours } from './ready.ts';
+import { CLOSED, depsOf, taskAgeHours } from './ready.ts';
 import type { StuckItem, StuckReason, StuckReport } from './stuck.ts';
 import { versionStatus } from './version-mode.ts';
 
@@ -14,6 +14,8 @@ const COUNTED = ['todo', 'doing', 'review', 'blocked-on-user', 'done', 'cancelle
 /** Stuck reasons that mean "blocked". An idle todo card is waiting for a builder, not blocked. */
 const BLOCKING: ReadonlySet<StuckReason> = new Set(['blocked-user', 'cycle', 'dep-missing', 'dep-open', 'doing-stale', 'review-stale']);
 
+/** A stuck reason, or a card that waits on a cancelled card (stuck ends a chain at any closed card; ready does not). */
+export type BlockReason = StuckReason | 'dep-cancelled';
 export interface StatusCard { id: string; title: string; status: string }
 export interface ProjectStatus {
   app: string; title: string; why: string; as_of: string;
@@ -24,9 +26,9 @@ export interface ProjectStatus {
   in_progress_rest: number;
   /** `on`: who or what the card waits on: a person for `blocked-user`, the card ids for dependencies, the claim holder
    *  (else the owner) for a stale card. `ask` is the first line of needs_user. */
-  blocked: (StatusCard & { reason: StuckReason; on: string[]; ask?: string; age_hours: number })[];
+  blocked: (StatusCard & { reason: BlockReason; on: string[]; ask?: string; age_hours: number })[];
   blocked_rest: number;
-  blocked_counts: Partial<Record<StuckReason, number>>;
+  blocked_counts: Partial<Record<BlockReason, number>>;
   recent_done: (StatusCard & { done_at: string })[];
   recent_done_rest: number;
 }
@@ -39,6 +41,11 @@ export interface StatusInput {
 }
 
 const hours = (h: number) => Math.round(h * 10) / 10;
+/** Hours since the work started: the start, else the claim; not the claim heartbeat, which moves while work goes on. */
+const startedHours = (t: Task, now: Date) => {
+  const at = [t.started_at, t.claimed_at].map((s) => Date.parse(s ?? '')).find(Number.isFinite);
+  return at === undefined ? taskAgeHours(t, now) : Math.max(0, (now.getTime() - at) / 3600_000);
+};
 const firstLine = (s: string) => (s.split('\n').find((l) => l.trim()) ?? '').trim();
 
 function waitsOn(i: StuckItem, t: Task): string[] {
@@ -72,17 +79,30 @@ export function projectStatus(app: string, inp: StatusInput): ProjectStatus {
   } : null;
 
   const active = tasks.filter((t) => t.status === 'doing' || t.status === 'review')
-    .map((t) => ({ ...card(t), claimed_by: t.claimed_by ?? '', now: t.now ?? '', age_hours: hours(t.status === 'doing' ? doingAgeHours(t, inp.now) : taskAgeHours(t, inp.now)) }))
+    .map((t) => ({ ...card(t), claimed_by: t.claimed_by ?? '', now: t.now ?? '', age_hours: hours(t.status === 'doing' ? startedHours(t, inp.now) : taskAgeHours(t, inp.now)) }))
     .sort((a, b) => (a.status === b.status ? 0 : a.status === 'doing' ? -1 : 1) || b.age_hours - a.age_hours || a.id.localeCompare(b.id));
 
-  const stuck = inp.stuck.items.filter((i) => i.goal === app && BLOCKING.has(i.reason) && byId.has(i.id));
-  const blocked_counts: Partial<Record<StuckReason, number>> = {};
-  for (const i of stuck) blocked_counts[i.reason] = (blocked_counts[i.reason] ?? 0) + 1;
-  const blocked = stuck.map((i) => {
+  // A missing dependency old enough for the ready queue to ignore (all of them direct and ignored) blocks nothing.
+  const ignored = (i: StuckItem) => i.reason === 'dep-missing' && i.missing.every((d) => i.missing_ignored.includes(d));
+  const stuck = inp.stuck.items.filter((i) => i.goal === app && BLOCKING.has(i.reason) && byId.has(i.id) && !ignored(i));
+  const listed = new Set(inp.stuck.items.filter((i) => i.reason === 'blocked-user').map((i) => i.id));
+  const statusOf = new Map(inp.board.tasks.map((t) => [t.id, t.status]));
+  const rows: ProjectStatus['blocked'] = stuck.map((i) => {
     const t = byId.get(i.id)!;
     const ask = i.reason === 'blocked-user' ? firstLine(t.needs_user) : '';
     return { ...card(t), reason: i.reason, on: waitsOn(i, t), ...(ask ? { ask } : {}), age_hours: hours(i.age_hours) };
-  }).sort((a, b) => Number(b.reason === 'blocked-user') - Number(a.reason === 'blocked-user') || b.age_hours - a.age_hours || a.id.localeCompare(b.id));
+  });
+  for (const t of tasks) {
+    if (CLOSED.has(t.status) || listed.has(t.id)) continue;
+    const cancelled = depsOf(t).filter((d) => statusOf.get(d) === 'cancelled');
+    if (!cancelled.length) continue;
+    const row = { ...card(t), reason: 'dep-cancelled' as const, on: cancelled, age_hours: hours(taskAgeHours(t, inp.now)) };
+    const at = rows.findIndex((r) => r.id === t.id);
+    if (at < 0) rows.push(row); else rows[at] = row;
+  }
+  const blocked_counts: Partial<Record<BlockReason, number>> = {};
+  for (const r of rows) blocked_counts[r.reason] = (blocked_counts[r.reason] ?? 0) + 1;
+  const blocked = rows.sort((a, b) => Number(b.reason === 'blocked-user') - Number(a.reason === 'blocked-user') || b.age_hours - a.age_hours || a.id.localeCompare(b.id));
 
   const since = inp.now.getTime() - RECENT_DAYS * 86_400_000;
   // `updated` moves with every write, so a card not updated in the window cannot have closed in it.

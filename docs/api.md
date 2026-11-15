@@ -76,11 +76,12 @@ The page is read-only.
 - `counts`: cards per status (`todo`, `doing`, `review`, `blocked-on-user`, `done`, `cancelled`) and `open` (not done or
   cancelled);
 - `in_progress`: cards in `doing`, then `review`, with who holds the claim, the now line and how many hours since the work
-  started (doing) or last moved (review);
+  started or was claimed (doing) or last moved (review);
 - `blocked`: cards that cannot move, with the `reason` from `/api/stuck` and `on`, who or what they wait on: a person for a
   card blocked on the user (`next_owner`, else `user`, and `ask`, the first line of `needs_user`), the card ids for an open,
-  missing or circular dependency, the claim holder (else the owner) for a card in doing or review too long. Cards waiting on
-  a person come first. A todo card nobody started is not blocked; `/api/stuck` lists it as `ready-idle`;
+  missing, circular or cancelled (`dep-cancelled`) dependency, the claim holder (else the owner) for a card in doing or
+  review too long. Cards waiting on a person come first. A todo card nobody started is not blocked (`/api/stuck` lists it
+  as `ready-idle`), nor is one whose missing dependencies are old enough for `/api/ready` to ignore;
 - `recent_done`: cards that moved to done in the last 7 days, newest first, by the time in their activity log;
 - `version`: the `version_target` milestone's `done`, `total`, `pct`, `ready` and `gate_card` ([versions.md](versions.md)),
   or `null` when version mode is off for the project.

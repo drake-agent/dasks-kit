@@ -37,6 +37,17 @@ test('status: in progress lists doing before review, with claim, now line and ag
   assert.deepEqual(s.in_progress.map((c) => [c.id, c.status, c.age_hours]), [['beta.t-d2', 'doing', 3], ['beta.t-d1', 'doing', 2], ['beta.t-r', 'review', 5]]);
   assert.equal(s.in_progress[1].claimed_by, 'codex@m');
   assert.equal(s.in_progress[1].now, 'writing tests');
+  const beat = projectStatus('beta', input([t('hb', { status: 'doing', started_at: H(48), claimed_at: H(48), claim_seen: H(1) })]));
+  assert.equal(beat.in_progress[0].age_hours, 48, 'a heartbeat does not reset the time since start');
+});
+
+test('status: a cancelled dependency blocks; a missing one old enough to be ignored does not', () => {
+  const s = projectStatus('beta', input([
+    t('parent', { status: 'cancelled' }), t('child', { depends_on: 'beta.t-parent' }),
+    t('ghost', { depends_on: 'beta.t-nowhere', updated: H(30), created: H(30) }),
+  ]));
+  assert.deepEqual(s.blocked.map((b) => [b.id, b.reason, b.on]), [['beta.t-child', 'dep-cancelled', ['beta.t-parent']]]);
+  assert.deepEqual(s.blocked_counts, { 'dep-cancelled': 1 });
 });
 
 test('status: blocked says on whom: the person, the dependency, the missing card, the claim holder; idle todo is not blocked', () => {
