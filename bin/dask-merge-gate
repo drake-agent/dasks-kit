@@ -10,6 +10,10 @@ Fail closed: a merge command must be one plain command. Indirection (eval, sourc
 command word) and compound commands (`;`, `&&`, `||`, `|`, `&`, subshells, newlines) are refused, since the gate checks
 exactly one PR and could not see what else would run. The PR is looked up in the repo the command names (`-R`/`--repo`,
 or the `repos/<owner>/<repo>/` of a `gh api` path), else the current one.
+The merge must name the approved head, so GitHub itself refuses it if the head moves after the check: `gh pr merge` with
+`--match-head-commit <sha>` (or `=<sha>`), a `gh api` merge with a `sha=<sha>` field (`-f`, `-F`, `--field`,
+`--raw-field`). The pin must be the full 40-hex PR head the gate read. Refused: no pin, a short or other sha, two
+different pins, `gh pr merge --auto` (it merges later, unchecked) and `gh api --input` (a body the gate cannot read).
 How the user approves: the agent moves the card to blocked-on-user with needs_user starting `head <40-char sha> …`
 (`dasks update <card> --status blocked-on-user --needs-user "head <sha> merge PR #N? If approved, it merges." --what … --why … --do … --rec …
 --after …`); the user logs in on the board and taps approve. GET /api/merge-ok?card=&sha= then answers ok for that head
@@ -36,6 +40,9 @@ MERGE_TEXT = re.compile(r"\bpr\b[\s\S]*\bmerge\b|pulls/\d+/merge|mergePullReques
 INDIRECT = re.compile(r"\beval\b|\bsource\b|(^|[;&|]\s*)\.\s|\b(?:ba|z)?sh\s+-\w*c\b|\bxargs\b|\$\(|`|\$\{?[A-Za-z_]+\}?\s+pr\b")
 # `gh pr merge` options that take a value: the value is never the PR.
 VALUE_OPTS = {"-R", "--repo", "-b", "--body", "-F", "--body-file", "-t", "--subject", "-A", "--author-email", "--match-head-commit"}
+# `gh api` options that take a value; of these only the field options can carry the merge's `sha`.
+API_FIELD_OPTS = {"-f", "--raw-field", "-F", "--field"}
+API_VALUE_OPTS = API_FIELD_OPTS | {"-X", "--method", "-H", "--header", "-q", "--jq", "-t", "--template", "--cache", "--hostname", "-p", "--preview"}
 
 def refuse(why):
     print("dask-merge-gate: refused: " + why, file=sys.stderr); sys.exit(2)
@@ -58,31 +65,59 @@ def words_of(cmd):
         refuse("a merge must be a single plain command (no ;, &&, ||, |, &, redirects or subshells): run `gh pr merge <n>` on its own")
     return words
 
+def api_pins(words):
+    """The `sha` field values of a `gh api` command (words after `api`); only a field option's value counts."""
+    pins, i = [], 0
+    while i < len(words):
+        w, field = words[i], None
+        if w == "--input" or w.startswith("--input="): refuse("a `gh api` merge with --input: the gate cannot read the body; pass -f sha=<head> instead")
+        if w in API_VALUE_OPTS:
+            if i + 1 >= len(words): refuse("%s needs a value" % w)
+            if w in API_FIELD_OPTS: field = words[i + 1]
+            i += 1
+        elif w.startswith(("--field=", "--raw-field=")): field = w.split("=", 1)[1]
+        elif w.startswith(("-f", "-F")) and not w.startswith("--"): field = w[2:].removeprefix("=")
+        if field is not None:
+            key, eq, val = field.partition("=")
+            if eq and key == "sha": pins.append(val)
+        i += 1
+    return pins
+
 def target(cmd):
-    """(repo or '', PR selector or '') of the one merge in `cmd`."""
+    """(repo or '', PR selector or '', [pinned head shas]) of the one merge in `cmd`."""
     words = words_of(cmd)
     if not words or os.path.basename(words[0]) != "gh": refuse("the merge must start with gh (no prefixes or wrappers)")
     if len(words) > 1 and words[1] == "api":
         path = next((w for w in words[2:] if "pulls/" in w), "")
         m = re.search(r"repos/([^/\s]+/[^/\s]+)/pulls/(\d+)/merge", path)
         if not m: refuse("a `gh api` merge the gate cannot read (use repos/<owner>/<repo>/pulls/<n>/merge or gh pr merge)")
-        return m.group(1), m.group(2)
+        return m.group(1), m.group(2), check_pins(api_pins(words[2:]))
     if words[1:3] != ["pr", "merge"]: refuse("a merge the gate cannot read; run a plain `gh pr merge <n> [-R owner/repo]`")
-    repo, sel, i = "", "", 3
+    repo, sel, pins, i = "", "", [], 3
     while i < len(words):
         w = words[i]
         if w in VALUE_OPTS:
             if i + 1 >= len(words): refuse("%s needs a value" % w)
             if w in ("-R", "--repo"): repo = words[i + 1]
+            if w == "--match-head-commit": pins.append(words[i + 1])
             i += 2; continue
+        if w == "--auto" or w.startswith("--auto="): refuse("gh pr merge --auto merges later, at a head nobody checked; merge now with --match-head-commit <head>")
         if w.startswith("--repo="): repo = w.split("=", 1)[1]
+        elif w.startswith("--match-head-commit="): pins.append(w.split("=", 1)[1])
         elif w.startswith("-R") and len(w) > 2: repo = w[2:]
         elif not w.startswith("-"):
             if sel: refuse("more than one PR named; merge one PR per command")
             sel = w
         i += 1
     if repo and not sel: refuse("-R names another repo: name the PR too")
-    return repo, sel
+    return repo, sel, check_pins(pins)
+
+def check_pins(pins):
+    """The one pinned head (lower case), or '' when there is none; refuses short or conflicting pins."""
+    for p in pins:
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", p): refuse("the pinned head %r is not a full 40-hex sha" % p)
+    if len({p.lower() for p in pins}) > 1: refuse("the merge pins more than one head; pin exactly one")
+    return pins[0].lower() if pins else ""
 
 def main():
     if os.environ.get("DASK_MERGE_GATE") == "0": return
@@ -92,9 +127,13 @@ def main():
     if isinstance(cmd, list): cmd = " ".join(map(str, cmd))
     if not isinstance(cmd, str) or not MERGE_TEXT.search(cmd) or "gh" not in cmd: return
     if INDIRECT.search(cmd): refuse("the merge command uses indirection the gate cannot read; run a plain `gh pr merge <n>`")
-    repo, sel = target(cmd)
+    repo, sel, pin = target(cmd)
     info = json.loads(gh("pr", "view", *([sel] if sel else []), *(["-R", repo] if repo else []), "--json", "headRefOid,headRefName,title,url"))
     branch, title, sha = info.get("headRefName") or "", info.get("title") or "", info.get("headRefOid") or ""
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", sha): refuse("gh did not report the PR head")
+    if pin != sha.lower():
+        refuse("%s: the merge must name the PR head %s; add --match-head-commit %s (gh api: -f sha=%s)"
+               % ("the merge pins %s, not the head" % pin if pin else "the merge does not pin the head", sha, sha, sha))
     m = re.fullmatch(r"(?:human|dasks)/(%s)" % CARD_RE.pattern, branch) or re.match(r"(%s):" % CARD_RE.pattern, title)
     if not m: refuse("%s has no Dasks card (branch human/<card> or dasks/<card>, or a `<card>:` title); the human merges it" % info.get("url", "this PR"))
     card = m.group(1)
