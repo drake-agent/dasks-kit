@@ -5,7 +5,8 @@
 - Merge gate: a merge must now name the approved head, so a push after the check makes GitHub refuse it. `gh pr merge`
   needs `--match-head-commit <sha>` and a `gh api …/pulls/<n>/merge` needs a `sha=<sha>` field, the full 40-hex PR head
   the board approved. A merge with no pin, a short or other sha, two different pins, `gh pr merge --auto` or
-  `gh api --input` is refused; the reason names the head and the flag to add. `dask merge` already pins its merges.
+  `gh api --input` is refused, and so is any `$`, glob or brace in a merge command; the reason names the head and the
+  flag to add. `dask merge` already pins its merges.
 - Code review rule: at most 2 passes per PR. Pass 1 reviews the whole change; pass 2 only re-checks pass-1 findings and
   regressions from the fixes; the board and `dask review-record` refuse a third pass (older stored pass-3 rows stay
   readable). A finding blocks only if it carries a repro (a `repro:` line with the command or input and the wrong

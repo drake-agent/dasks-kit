@@ -224,12 +224,17 @@ test('merge gate: a merge passes only when it is pinned to the head the board ap
       `gh pr merge 12 --squash --match-head-commit ${A} --match-head-commit=${B}`,
       `gh api -X PUT repos/o/r/pulls/12/merge -f sha=${A} --input body.json`,
       `gh api -X PUT repos/o/r/pulls/12/merge -H sha=${A}`,
+      `gh pr merge 12 --squash --match-head-commit ${A} --au$'to'`,
+      `gh api -X PUT repos/o/r/pulls/12/merge -f sha=${A} $'--input' body.json`,
+      `gh pr merge 12 --squash --match-head-commit ${A} --{auto,x}`,
     ]) {
       const r = gate(c);
       assert.equal(r.status, 2, c);
       assert.match(r.stderr, /refused/, c);
     }
-    assert.match(gate('gh pr merge 12 --squash').stderr, new RegExp(`--match-head-commit ${A}.*-f sha=${A}`));
+    for (const c of ['gh pr merge 12 --squash', `gh pr merge 12 --match-head-commit ${A.slice(0, 12)}`, `gh pr merge 12 --match-head-commit ${A} --match-head-commit ${B}`]) {
+      assert.match(gate(c).stderr, new RegExp(`--match-head-commit ${A}.*-f sha=${A}`), c);
+    }
     for (const c of [
       `gh pr merge 12 --squash --match-head-commit ${A}`,
       `gh pr merge 12 --squash --match-head-commit=${A}`,
