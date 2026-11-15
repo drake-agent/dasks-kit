@@ -126,14 +126,14 @@ class Reader:
             op = next((o for o in SEPARATORS if s.startswith(o, self.i)), None)
             if op:
                 finish(); self.out.compound = True; self.i += len(op); continue
-            w = self.word(cmd)
+            w = self.word(cmd, arith)
             if w.raw.isdigit() and self.i < len(s) and s[self.i] in "<>": continue  # the fd number of a redirect
             saw_case = saw_case or (not cmd.words and w.value == "case")  # the keyword, not an argument
             cmd.words.append(w)
         finish()
         if stop: self.out.broken = True  # no closing `)`
 
-    def word(self, cmd):
+    def word(self, cmd, arith=False):
         s, st, buf, ok = self.s, self.i, [], True
         while self.i < len(s):
             c = s[self.i]
@@ -146,7 +146,9 @@ class Reader:
             if c == "'":
                 j = s.find("'", self.i + 1)
                 if j < 0: ok = False; self.i = len(s); self.out.broken = True; break
-                buf.append(s[self.i + 1:j]); self.i = j + 1; continue
+                if arith: self.quoted_runs(s[self.i + 1:j]); ok = False  # in ((…)) a '…' does not stop a substitution
+                else: buf.append(s[self.i + 1:j])
+                self.i = j + 1; continue
             if c == '"':
                 self.i += 1; v = self.dquote(cmd, '"')
                 if v is None: ok = False
@@ -205,11 +207,17 @@ class Reader:
         if m: self.i = m.end(); return True
         return False
 
+    def quoted_runs(self, body):
+        """A '…' whose substitutions bash still runs (inside "${…}", $[…] or ((…))): read them as commands."""
+        if '"' in body: self.out.broken = True  # where a "…" ends depends on the bash version
+        Reader(body, self.out).dquote(None, None)
+
     def braced(self, open_, close, dq):
-        """Inside ${…} or $[…]: find the end and read every substitution inside. Outside "…" a '…' quotes (nothing in it
-        runs); inside "…" bash pairs the quotes but still runs the substitutions in them (R2), and a lone ' is plain
-        text to some bash versions. A bare open bracket nests in some versions and not in others: the text between the
-        two possible ends must be plain, or the gate cannot know where the next command starts (unreadable)."""
+        """Inside ${…} or $[…]: find the end and read every substitution inside, process substitutions too. Outside "…"
+        a '…' in ${…} quotes (nothing in it runs); inside "…" or in $[…] bash pairs the quotes but still runs the
+        substitutions in them (R2), and a lone ' is plain text to some bash versions. A bare open bracket nests in some
+        versions and not in others: the text between the two possible ends must be plain, or the gate cannot know where
+        the next command starts (unreadable)."""
         s, depth, first_end = self.s, 0, None
         while self.i < len(s):
             c = s[self.i]
@@ -217,15 +225,15 @@ class Reader:
             if c == '"': self.i += 1; self.dquote(None, '"'); continue
             if c == "`": self.backtick(); continue
             if c == "$" and self.expansion(dq): continue
+            if s.startswith(("<(", ">("), self.i):
+                self.i += 2; self.out.compound = True; self.commands(True, True); continue
             if c == "'":
                 j = s.find("'", self.i + 1)
-                if not dq:
+                if not dq and open_ == "{":
                     if j < 0: self.out.broken = True; self.i = len(s); return
                     self.i = j + 1; continue
                 if j < 0: self.i += 1; continue  # a lone ' inside "…": plain text, or bash stops with a syntax error
-                body = s[self.i + 1:j]
-                if '"' in body: self.out.broken = True  # where the "…" ends depends on the bash version
-                Reader(body, self.out).dquote(None, None)  # its substitutions run
+                self.quoted_runs(s[self.i + 1:j])
                 self.i = j + 1; continue
             if c == open_: depth += 1
             elif c == close:
@@ -326,6 +334,7 @@ def fail_closed(c):
         if any(w.value is None for w in rest[:2]):
             refuse("gh with a word the gate cannot read ($variables, globs, $\"…\", escapes it cannot decode): spell the gh command out")
         return
+    if name(cw) in READ_ONLY: return  # it never runs its words; its substitutions are judged as commands of their own
     for n, w in enumerate(rest):
         if name(w) == "gh" and any(x.value is None for x in rest[n + 1:]):
             refuse("gh run through %s with a word the gate cannot read: run the gh command on its own, spelled out" % cw.value)

@@ -219,7 +219,9 @@ test('merge gate: a merge is decided from decoded shell words of each simple com
     'echo "${x:-$(gh pr m""erge 12)}"', 'echo $[1+$(g""h pr merge 12)]', "echo \"`gh pr m$'\\x65'rge 12`\"",
     'case x in x) gh pr m""erge 12;; esac', 'echo "$(echo "$(gh pr merge 12)")"',
     // Real case: R2 with brackets in the quoted default, and a nested `{` whose two readings split the command apart
-    `echo "\${x:-'(x)$(gh pr m""erge 12)'}"`, 'echo ${x:-{a} ; gh pr m""erge 12 ; echo }', `echo "\${x:-'(x)$(gh pr mer\\ge 12)'}"`];
+    `echo "\${x:-'(x)$(gh pr m""erge 12)'}"`, 'echo ${x:-{a} ; gh pr m""erge 12 ; echo }', `echo "\${x:-'(x)$(gh pr mer\\ge 12)'}"`,
+    // review R1-R2 (Real case: a merge in a process substitution inside ${…}, or in '…' inside arithmetic, which bash runs)
+    'echo ${x:- >(gh pr m""erge 12)}', `echo $['$(gh pr m""erge 12)' +1]`, `echo $(( '$(gh pr mer\\ge 12)' + 1 ))`];
   const passes = [`grep -F 'gh pr m""erge' test/kit.test.ts`, "grep -n 'gh pr merge' README.md", 'echo "gh pr merge 12"',
     'git status && npm test', 'gh pr view 12', 'gh pr list', 'grep -n merge README.md', '"$HOME/bin/tool" run',
     // review R4-R6 (Real case: an agent searches for `case`, prints a default in quotes, or calls echo by its path)
@@ -227,7 +229,9 @@ test('merge gate: a merge is decided from decoded shell words of each simple com
     // Real case: an agent greps for a shell keyword, prints a quoted default, or prints a word from a substitution
     "grep -n 'esac' f", 'echo "${y:-\\"a b\\"}"', `printf '%s' "$(echo gh)"`,
     // Real case: a default with brackets or braces in it, quoted or not
-    `echo "\${x:-'(default)'}"`, "echo ${x:-'a}b'}", 'echo ${x:-{}}', 'echo "${x:-{a}b}"'];
+    `echo "\${x:-'(default)'}"`, "echo ${x:-'a}b'}", 'echo ${x:-{}}', 'echo "${x:-{a}b}"',
+    // review R3 (Real case: an agent greps a file under a variable path for gh)
+    'grep -n gh "$PWD/README.md"'];
   const closed = 'http://127.0.0.1:9';
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dasks-gate-'));
   try {
