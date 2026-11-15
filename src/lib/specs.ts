@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { HttpError, commitFiles, isoLocal, readTask, updateTask, withRepoLock } from './write.ts';
-import { assertProtectedWrite, fieldsAfterSpecWrite, reworkDone } from './spec-state.ts';
+import { assertProtectedWrite, autoOkOnlyChange, fieldsAfterSpecWrite, reworkDone } from './spec-state.ts';
 import { TASK_ID_RE, isTaskId } from './schema.ts';
 import { checkCard } from './contract.ts';
 import { loadConfig } from './config.ts';
@@ -17,6 +17,8 @@ import { doneLineCheck } from './done-line.ts';
 export const SPEC_MAX_BYTES = 262_144;      // decoded spec text, UTF-8
 export const SPEC_MAX_BODY = 2_097_152;     // raw JSON body of PUT /spec (a spec at the cap written as \uXXXX is ~1.5 MiB)
 export const SPEC_NOTE_MAX_BYTES = 4_096;
+/** A spec says what to build, why, and how to tell it is done; how to build it is the builder's call. */
+export const SPEC_MAX_WORDS = 1_500;
 export const SECTIONS = { acceptance_tests: 'Acceptance tests', oracle: 'Oracle' } as const;
 
 export type SectionAuthor = { by: string; sha256: string } | null;
@@ -102,6 +104,24 @@ export function assertSpecSize(text: string): void {
   if (n > SPEC_MAX_BYTES) throw new HttpError(413, `spec is ${n} bytes; the cap is ${SPEC_MAX_BYTES}`, { bytes: n, max_bytes: SPEC_MAX_BYTES });
 }
 
+/** Words in a spec text: runs of non-whitespace. */
+export function specWords(text: string): number {
+  return text.split(/\s+/u).filter(Boolean).length;
+}
+
+/** The word cap as card contract reasons ([] when the write is fine). Checked on write only: a spec stored over the cap
+ *  before it existed stays readable and still takes a write that does not make it longer, or that changes only its
+ *  auto-ok header lines (the user's answer to an ask). */
+export function specWordErrors(text: string, prevText: string | undefined): string[] {
+  const n = specWords(text);
+  if (n <= SPEC_MAX_WORDS) return [];
+  if (prevText !== undefined) {
+    const before = specWords(prevText);
+    if (before > SPEC_MAX_WORDS && (n <= before || autoOkOnlyChange(prevText, text))) return [];
+  }
+  return [`spec is ${n} words; the cap is ${SPEC_MAX_WORDS}. Keep what to build, why, the done check and the tests that prove it; leave out how to build it (file-by-file plans, step lists, code to paste): the builder reads the code and decides`];
+}
+
 /** A `## <name>` section: from its heading line (the first line starting with `## <name>` and no more letters) through
  *  the line before the next `## ` heading, or the end of the text, exact bytes. null when there is none. */
 export function sectionOf(text: string, name: string): string | null {
@@ -181,6 +201,7 @@ export function prepareSpecWrite(root: string, id: string, put: SpecPut, actor: 
   // The finish line (done_when / done_at): required on a first spec and once a card has one; older specs warn.
   const dl = doneLineCheck(text, prevText);
   verdict.errors.push(...dl.errors); verdict.warnings.push(...dl.warnings);
+  verdict.errors.push(...specWordErrors(text, prevText));
   if (verdict.errors.length)
     throw new HttpError(422, `the spec breaks the card contract (${verdict.errors.length} reason${verdict.errors.length > 1 ? 's' : ''})`, { reasons: verdict.errors, warnings: verdict.warnings });
   const prev: SectionAuthors = cur ? (JSON.parse(fs.readFileSync(path.join(root, p.meta(cur)), 'utf8')) as VersionRecord).section_authors : { acceptance_tests: null, oracle: null };

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Specs: `PUT /spec` refuses (422) a spec over 1,500 words, with a reason that says what to cut. A spec says what to
+  build, why and how to tell it is done, never how to build it; the spec writer prompt and the `spec-writer` skill say
+  so. Specs stored over the cap before this stay readable and still take shorter or auto-ok-only writes. See
+  docs/specs.md.
+- Runner: the build prompt tells the agent to read the code around the change before a feature, reproduce a bug before
+  fixing it, and that a quick throwaway prototype is fine when the approach is unclear. The `dasks` skill says the same.
+  See docs/runner.md.
 - Code review rule: at most 2 passes per PR. Pass 1 reviews the whole change; pass 2 only re-checks pass-1 findings and
   regressions from the fixes; the board and `dask review-record` refuse a third pass (older stored pass-3 rows stay
   readable). A finding blocks only if it carries a repro (a `repro:` line with the command or input and the wrong

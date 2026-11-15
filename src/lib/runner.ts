@@ -379,6 +379,9 @@ export function prBody(o: { summary: string; card: string; note: string; open: s
 /** In `claude -p` the turn is the process: ending the turn on a background wait kills the work half done. */
 export const HEADLESS_WAIT_RULE = 'Headless run: this is an unattended `claude -p` / `codex exec` process, so ending your turn ends the process and kills everything you started. Never end a turn while background work (a run_in_background command, a background agent, a Monitor) is running or while you wait on one. Wait in the foreground instead: a bounded loop with a timeout that fits one tool call (under 10 min, e.g. `for i in $(seq 1 18); do test -s <file> && break; sleep 30; done`), repeated as needed. Always finish with the RESULT line, also when you give up.';
 
+/** How a build goes about the work, whatever the card: look before changing, prove a bug before fixing it. */
+export const BUILD_METHOD_RULE = 'How to build: for a feature, first read the code around the change (the callers, the tests, how similar things are done here) and only then write it. For a bug, reproduce it first (a failing test, or a command and its wrong output), rule out causes with evidence from running the code, then fix the root cause. When the approach is unclear, a quick throwaway prototype (never committed) is fine to settle it before the real change.';
+
 /** Every helper a run starts gets this word for word: prompts are the only control the runner has over helpers. */
 export function helperRule(card: string): string {
   return `Helpers stay read-only on the board: any helper process you start for card ${card} (codex exec, claude -p, a subagent) never runs the \`dask\` subcommands begin, claim, release, block, submit or merge, nor the board API calls behind them, and never records a spec review of a spec it wrote itself; a reviewer helper only records its own review. Copy this rule word for word into every helper's prompt.`;
@@ -392,6 +395,7 @@ export function runnerRules(card: string, branch: string, base: string): string 
     `Do not run \`dask begin\`, \`dask claim\`, \`dask submit\`, \`dask release\` or \`dask block\`, do not push, do not open a PR and never merge: the runner gets a cross-model review, pushes the branch and opens a draft PR after you stop.`,
     `Do the card's work here and commit it on ${branch}; every commit message starts with "${card}: ". Commit often: if this run is stopped, the runner tries to save uncommitted changes as a WIP commit, but that can fail.`,
     'If the card cannot be done as written (a missing decision, a wrong spec), make no commits and say why in the RESULT line.',
+    BUILD_METHOD_RULE,
     HUMAN_STEP_RULE,
     HEADLESS_WAIT_RULE,
     helperRule(card),

@@ -53,6 +53,9 @@ flowchart LR
   as skipped (`not in version <milestone>`), take no spec slot, and `dask runner status` counts them. Without a target
   nothing is held. [versions.md](versions.md).
 - **Usage or rate limits:** that tool waits `backoff_min`; the attempt does not count.
+- **How a build works.** The build prompt tells the agent to read the code around the change before a feature, to
+  reproduce a bug first (a failing test, or a command and its wrong output) and fix the root cause, and that a quick
+  throwaway prototype (never committed) is fine when the approach is unclear.
 - **Steps only you can do.** A build or fix prompt tells the agent to leave a login, signing, a paid purchase, a physical
   device or an approval undone and finish the rest. It never tries, fakes or works around the step, and it writes one line
   per step directly above its `RESULT:` line:
