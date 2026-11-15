@@ -21,6 +21,7 @@ import { endGroup, type Supervised } from '../lib/supervise.ts';
 import { secretGate } from '../lib/secret-gate.ts';
 import { versionHolds } from '../lib/version-mode.ts';
 import { applyUpdate, mayUpdate, planUpdate } from '../lib/self-update.ts';
+import { codemapCache } from '../lib/codemap/map.ts';
 import { execFileSync, spawn } from 'node:child_process';
 
 const KIT = path.resolve(import.meta.dirname, '../..');
@@ -32,6 +33,8 @@ const BOARD_TIMEOUT_MS = Number(process.env.DASKS_RUNNER_BOARD_TIMEOUT_MS) || 60
 const ROOT = boardRoot();
 
 const log = (line: string) => console.log(`${new Date().toISOString()} ${line}`);
+/** Each project clone's import map at its default branch (docs/runner.md "Code map"), kept in ~/.dasks/runner/codemap/. */
+const codemap = codemapCache(path.join(STATE_DIR, 'codemap'), log);
 const oneLine = (s: string, n = 300) => { const t = String(s ?? '').replace(/\s+/g, ' ').trim(); return t.length <= n ? t : t.slice(0, n - 1) + '…'; };
 
 function runnerConfigFile(): string {
@@ -147,6 +150,7 @@ function flowEnv(cfg: RunnerConfig): FlowEnv {
     activityMs: Number(process.env.DASKS_RUNNER_ACTIVITY_MS || 30_000),
     stopping: () => stopping,
     track: (card, agent) => { if (agent) active.set(card, agent); else active.delete(card); },
+    codemap: (repo) => codemap.view(repo),
   };
 }
 
@@ -211,6 +215,7 @@ async function look(): Promise<void> {
   if (!cfg.enabled) { if (!disabledSaid) log('runner is off (config.json runner.enabled is false); nothing to do'); disabledSaid = true; return; }
   disabledSaid = false;
   const repos = projectRepos(doc);
+  void codemap.refresh([...new Set(repos.values())].filter((r) => fs.existsSync(path.join(r, '.git'))));   // background, never awaited
   // The whole queue (open, unclaimed, deps done): ready specs are built, the rest may get a spec (runner.spec).
   const queue: any[] = (await env.api('GET', '/api/ready?all=1')).ready ?? [];
   const ready = queue.filter((r) => r.spec_state === 'ready');

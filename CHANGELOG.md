@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Runner: a code map. Each project clone gets a map of which file imports which (TS/JS, Python, Rust, SwiftPM), built
+  from the git tree at `origin/main` in the background, with no model and within file, byte and time limits. When a
+  claimed card changes a file one import away from a file another card in the same repo is changing, the runner logs a
+  warning and writes one note on the card. It is only a warning: nothing is held. The board's exclusive claim reply now
+  lists those other cards (`beside`). See docs/runner.md "Code map".
 - Code review rule: at most 2 passes per PR. Pass 1 reviews the whole change; pass 2 only re-checks pass-1 findings and
   regressions from the fixes; the board and `dask review-record` refuse a third pass (older stored pass-3 rows stay
   readable). A finding blocks only if it carries a repro (a `repro:` line with the command or input and the wrong

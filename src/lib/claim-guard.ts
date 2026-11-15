@@ -22,14 +22,18 @@ export function touchesOf(root: string, t: Pick<Task, 'id' | 'body'>): string[] 
   return parseTouches(touchesValue(text));
 }
 
-/** Throws 409 when `card` overlaps a claimed doing card in the same repo. Call it under the repo lock. */
-export function assertTouchesFree(root: string, card: Task, tasks: Task[], projects: Project[]): void {
+/** Throws 409 when `card` overlaps a claimed doing card in the same repo. Call it under the repo lock. Returns the
+ *  other claimed doing cards in that repo with their touches, so the runner can warn when one is an import away. */
+export function assertTouchesFree(root: string, card: Task, tasks: Task[], projects: Project[]): { id: string; touches: string[] }[] {
   const mine = touchesOf(root, card);
-  if (!mine.length) return;
-  const key = repoKey(card.goal, projects);
+  if (!mine.length) return [];
+  const key = repoKey(card.goal, projects), beside: { id: string; touches: string[] }[] = [];
   for (const o of tasks) {
     if (o.id === card.id || o.status !== 'doing' || !o.claimed_by || repoKey(o.goal, projects) !== key) continue;
-    if (touchesOverlap(mine, touchesOf(root, o)))
+    const theirs = touchesOf(root, o);
+    if (touchesOverlap(mine, theirs))
       throw new HttpError(409, `touches overlap ${o.id}, which ${o.claimed_by} is working in the same repo`, { rule: 'touches', with: o.id, claimed_by: o.claimed_by });
+    if (theirs.length) beside.push({ id: o.id, touches: theirs });
   }
+  return beside;
 }

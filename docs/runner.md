@@ -132,6 +132,31 @@ saying it is continuing and from where, and that `wip:` commits are unfinished s
 
 To look at a kept ref: `git log refs/dasks/kept/<card>/<sha>`. To drop it: `git update-ref -d <ref>`.
 
+## Code map
+
+Two cards whose `touches:` do not overlap can still collide: one changes a file the other's file imports. The runner
+warns about that. It never holds a claim or a start, and it never changes dependencies, status or touches.
+
+- **The map.** For each project clone the runner keeps a map of which repo file imports which, read from the git tree
+  at `origin/main` (else `origin/HEAD`), never the working tree, with no model and no network. It knows relative TS/JS
+  imports (`import`, `export … from`, `require`, `import()`), Python `import` and `from … import` (absolute and
+  relative), Rust `mod x;` and `use crate::`/`self::`/`super::` paths, and Swift `import <Target>` of a SwiftPM target
+  declared in the repo. An import that does not name a file in the tree is dropped; package names are never followed.
+- **When it is built.** Every look checks each clone's head in the background and rebuilds a map that is behind, one
+  repo at a time, once per new head. A build reads at most 20,000 source files and 64 MB, skips files over 512 KB and
+  stops after 60 s; past a file or byte limit the map is marked truncated. A failed build logs one line and the last map
+  stays in use, marked stale. Maps live in `~/.dasks/runner/codemap/`; delete them any time and they are built again.
+- **The warning.** The board's answer to the runner's claim lists the other cards being worked in the same repo with
+  their touches (`beside`). When a file in this card's touches and a file in another's are joined by one import, in
+  either direction, the runner logs
+
+  ```
+  warning: <card> is one import from <other>: <a> imports <b>[, +<n> more] (map <sha7>[, stale]), not held
+  ```
+
+  and writes one note on the card. Only file entries count: a directory or glob entry never makes this warning (it
+  already locks by overlap), and a file the card creates is not in the map yet. A repo with no map gives no warnings.
+
 ## Turn it on
 
 1. Give each project the checkout its cards build in (a git repo with a GitHub remote, `gh auth login` done), in
