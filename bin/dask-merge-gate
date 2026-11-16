@@ -47,6 +47,11 @@ VALUE_OPTS = {"-R", "--repo", "-b", "--body", "-F", "--body-file", "-t", "--subj
 READ_ONLY = {"grep", "egrep", "fgrep", "echo", "cat", "head", "tail", "wc"}
 SUBST_SYNTAX = ("$(", "${", "$[", "`", "<(", ">(")
 # Commands that run their arguments as a command: an unreadable word there may be the command word.
+# Commands that run a readable argument as shell code (R6), and builtins that evaluate subscripts or arithmetic in their
+# arguments, so a '…' there still runs its substitutions (R7): such words are read as commands too.
+SHELL_CODE = {"eval", "sh", "bash", "zsh", "dash", "ksh", "source", "."}
+EVAL_ARGS = {"let", "declare", "typeset", "local", "readonly", "export", "unset", "read", "printf", "test", "[", "[[",
+             "mapfile", "readarray"}
 WRAPPERS = {"env", "command", "exec", "builtin", "sudo", "doas", "nohup", "time", "timeout", "nice", "stdbuf", "xargs", "caffeinate"}
 ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=")
 SEPARATORS = (";;&", ";;", ";&", "&&", "||", "|&", "|", ";", "&")
@@ -97,7 +102,7 @@ class Reader:
             c = s[self.i]
             if c in " \t": self.i += 1; continue
             if s.startswith("\\\n", self.i): cmd.cont = True; self.i += 2; continue
-            if c == "#":
+            if c == "#" and not arith:  # in ((…)) a # is not a comment (R8)
                 j = s.find("\n", self.i); self.i = len(s) if j < 0 else j; continue
             if c == "\n":
                 finish(); self.out.compound = True; self.i += 1; self.heredoc_bodies(); continue
@@ -119,7 +124,7 @@ class Reader:
                 cmd.redirect = True; self.i += len(op)
                 while self.i < len(s) and s[self.i] in " \t": self.i += 1
                 if self.i < len(s) and s[self.i] not in "\n;&|()<>":
-                    w = self.word(cmd)
+                    w = self.word(cmd, arith)  # in ((…)) a < is an operator: its operand is still arithmetic (R5)
                     if op in ("<<", "<<-") and not arith:
                         self.heredocs.append((w.value if w.value is not None else w.raw, op == "<<-", not any(q in w.raw for q in "'\"\\")))
                 continue
@@ -306,6 +311,18 @@ class Reader:
 def read(cmd):
     out = Parsed()
     Reader(cmd.rstrip(), out).commands(False, False)
+    i = 0
+    while i < len(out.cmds):  # out.cmds grows: code inside code is read too
+        ws = lead(out.cmds[i])[1]; i += 1
+        if not ws: continue
+        n = next((n for n, w in enumerate(ws) if name(w) in SHELL_CODE and (n == 0 or name(ws[0]) in WRAPPERS)), None)
+        if n is not None:
+            for w in ws[n + 1:]:
+                if w.value is not None: out.compound = True; Reader(w.value, out).commands(True, False)
+        elif name(ws[0]) in EVAL_ARGS:
+            for w in ws[1:]:
+                if w.value is not None and any(m in w.value for m in SUBST_SYNTAX):
+                    out.compound = True; Reader(w.value, out).dquote(None, None)
     return out
 
 # ---------- deciding ----------

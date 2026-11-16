@@ -225,7 +225,11 @@ test('merge gate: a merge is decided from decoded shell words of each simple com
     // Real case: the same '…' in a default inside arithmetic, which bash reads as if in "…" and so runs
     `echo $(( \${x:-'$(gh pr mer\\ge 12)'} + 1 ))`, `echo $[ \${x:-'$(gh pr mer\\ge 12)'} + 1 ]`,
     // review R4 (Real case: a quoted default holds a literal <( and a real merge follows) and R5 ($'…' in arithmetic)
-    'echo "${x:-<(ignored}" ; gh pr mer\\ge 12 ; echo ") }"', `echo $(( $'$(gh pr m""erge 12)' + 1 ))`];
+    'echo "${x:-<(ignored}" ; gh pr mer\\ge 12 ; echo ") }"', `echo $(( $'$(gh pr m""erge 12)' + 1 ))`,
+    // review R5-R8 (extra pass): an operand after < in arithmetic, code run by eval or a shell, a subscript a builtin
+    // evaluates, and a # inside arithmetic (not a comment)
+    `echo $(( 1 < $'$(gh pr m""erge 12)' ))`, `eval 'gh pr m""erge 12'`, `bash -c 'gh pr m""erge 12'`,
+    `env bash -c 'gh pr m""erge 12'`, `let 'a[$(gh pr m""erge 12)]=1'`, 'echo $(( 1 # $(gh pr m""erge 12)\n))'];
   const passes = [`grep -F 'gh pr m""erge' test/kit.test.ts`, "grep -n 'gh pr merge' README.md", 'echo "gh pr merge 12"',
     'git status && npm test', 'gh pr view 12', 'gh pr list', 'grep -n merge README.md', '"$HOME/bin/tool" run',
     // review R4-R6 (Real case: an agent searches for `case`, prints a default in quotes, or calls echo by its path)
@@ -235,7 +239,9 @@ test('merge gate: a merge is decided from decoded shell words of each simple com
     // Real case: a default with brackets or braces in it, quoted or not
     `echo "\${x:-'(default)'}"`, "echo ${x:-'a}b'}", 'echo ${x:-{}}', 'echo "${x:-{a}b}"',
     // review R3 (Real case: an agent greps a file under a variable path for gh)
-    'grep -n gh "$PWD/README.md"', "echo $(( ${x:-'1'} + 1 ))"];
+    'grep -n gh "$PWD/README.md"', "echo $(( ${x:-'1'} + 1 ))",
+    // Real case: a shell or eval running plain code, an exported path, a let, a comparison in arithmetic
+    "bash -c 'echo hi'", "eval 'ls -la'", 'export PATH="$HOME/bin:$PATH"', "let 'x=1+2'", 'echo $(( 1 < 2 ))'];
   const closed = 'http://127.0.0.1:9';
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dasks-gate-'));
   try {
