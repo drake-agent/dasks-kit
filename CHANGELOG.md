@@ -1,7 +1,9 @@
 # Changelog
 
-## Unreleased
+## 1.1.0 — 2026-11-16
 
+- Needs a Node release with its October security fixes: 22.23.4+, 24.22.1+ or 26.12.1+. The installer refuses an
+  older or pre-release Node, and the board warns when it runs on one. Upgrade Node before you pull this version.
 - Specs: `PUT /spec` refuses (422) a spec over 1,500 words, with a reason that says what to cut. A spec says what to
   build, why and how to tell it is done, never how to build it; the spec writer prompt and the `spec-writer` skill say
   so. Specs stored over the cap before this stay readable and still take shorter or auto-ok-only writes. See
