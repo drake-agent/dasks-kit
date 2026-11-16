@@ -9,6 +9,10 @@
 - Runner: the build prompt tells the agent to read the code around the change before a feature, reproduce a bug before
   fixing it, and that a quick throwaway prototype is fine when the approach is unclear. The `dasks` skill says the same.
   See docs/runner.md.
+- Project status: `GET /api/status` (every project) and `GET /api/status/<app>` (one) say where a project stands: cards
+  per status, what is in progress, what is blocked and on whom, what finished in the last 7 days, and the version's
+  progress when version mode is on. `?format=text` gives plain text. The same answer is MCP `project_status` and
+  `dasks status [app]`. Read-only. See docs/api.md.
 - Code review rule: at most 2 passes per PR. Pass 1 reviews the whole change; pass 2 only re-checks pass-1 findings and
   regressions from the fixes; the board and `dask review-record` refuse a third pass (older stored pass-3 rows stay
   readable). A finding blocks only if it carries a repro (a `repro:` line with the command or input and the wrong

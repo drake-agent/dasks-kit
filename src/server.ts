@@ -8,6 +8,7 @@ import { allOutcomes, recordOutcome, resetAttempts, taskOutcomes, handoffOf, dec
 import { jobOutcomes, recordJobOutcome } from './lib/job-outcome.ts';
 import { readyQueue } from './lib/ready.ts';
 import { stuckReport } from './lib/stuck.ts';
+import { statusRoute } from './lib/project-status.ts';
 import { laneList, lanesKey } from './lib/lanes.ts';
 import { taskEvidence } from './lib/transitions.ts';
 import http from 'node:http';
@@ -1003,6 +1004,12 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
     if (p === '/api/claims/dead') return deadClaims(res, url.searchParams);
     if (p === '/api/stuck') return send(res, 200, stuckReport(board, new Date(), cfg.stuck));
     if (p === '/api/versions') return send(res, 200, versionRows(board));
+    if (p === '/api/status' || p.startsWith('/api/status/')) {
+      const now = new Date();
+      // Only cards updated in the window can have closed in it, so the activity log is read for few cards.
+      const r = statusRoute(p, url.searchParams, { board, stuck: stuckReport(board, now, cfg.stuck), now, doneAt: (t) => { const ms = lastDone(t.id); return ms === null ? null : new Date(ms).toISOString(); } });
+      return send(res, r.status, r.body, r.type);
+    }
     if (p === '/api/ready') {
       const g = url.searchParams.get('goal'); const lim = Number(url.searchParams.get('limit') || 0);
       // Every item carries spec_state and spec_by. Only ready specs by default; ?all=1 (or ?require_spec_ready=0) is the

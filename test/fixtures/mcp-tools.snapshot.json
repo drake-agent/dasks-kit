@@ -114,6 +114,26 @@
   }
  },
  {
+  "name": "project_status",
+  "description": "Where a project stands, as text: cards by status, in progress, blocked and on whom, done in the last 7 days, version progress (version mode). No app: one line per project. json:true for the data.",
+  "inputSchema": {
+   "type": "object",
+   "additionalProperties": false,
+   "properties": {
+    "app": {
+     "type": "string",
+     "description": "project (goal) id from list_goals, e.g. demo"
+    },
+    "json": {
+     "type": "boolean"
+    }
+   }
+  },
+  "annotations": {
+   "readOnlyHint": true
+  }
+ },
+ {
   "name": "get_task",
   "description": "Get one task with its handoff summary (summary, summary_by, summary_at: read it first), now, body (context, done criteria, notes), version, claim, the last 8 activity entries (activity_omitted = how many older ones were left out; pass log for more) and lessons: what earlier cards on this project learned (closest to the Handoff files first). Read them before you start.",
   "inputSchema": {

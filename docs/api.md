@@ -16,6 +16,7 @@ carry `Authorization: Bearer <token>` (see [auth.md](auth.md)). The MCP server a
 | `GET /api/ready` | cards ready to build: open, unclaimed, deps done, spec ready (`?all=1`, `?goal=a,b`); your pushes first, then bug fixes (kind `bug`); a card whose goal has a version target also carries `version_target` |
 | `GET /api/start` | one-call agent start: rules, unread messages, your cards, ready cards, cards in review, as text lines |
 | `GET /api/stuck` | stuck cards and why |
+| `GET /api/status`, `/api/status/<app>` | where each project stands, or one project; `?format=text` for plain text ([below](#project-status)) |
 | `GET /api/versions` | each goal with a `version_target`: `milestone`, `total`, `done`, `open`, `ready`, `gate_card` ([versions.md](versions.md)) |
 | `GET /api/tasks/<id>/messages` | card messages (`/messages/wait` long-polls, `/participants` lists who is on the card) |
 | `GET /api/merge-ok?card=&sha=` | `{ok: true}` only when you approved a merge of that card at exactly that head |
@@ -67,6 +68,28 @@ The page shows them as ready, fix, CI, review, stale. Inside a bucket: priority,
 by the board with `gh pr view` (at most 4 at a time, 20 s each, 60 per sweep; a PR read in the last 5 minutes is not read
 again) and kept in `run/pr-status.json`; the browser never calls GitHub. Without `gh` every PR stays in `ci` as unknown.
 The page is read-only.
+
+## Project status
+
+`GET /api/status/<app>` answers where one project stands, read-only:
+
+- `counts`: cards per status (`todo`, `doing`, `review`, `blocked-on-user`, `done`, `cancelled`) and `open` (not done or
+  cancelled);
+- `in_progress`: cards in `doing`, then `review`, with who holds the claim, the now line and how many hours since the work
+  started or was claimed (doing) or last moved (review);
+- `blocked`: cards that cannot move, with the `reason` from `/api/stuck` and `on`, who or what they wait on: a person for a
+  card blocked on the user (`next_owner`, else `user`, and `ask`, the first line of `needs_user`), the card ids for an open,
+  missing, circular or cancelled (`dep-cancelled`) dependency, the claim holder (else the owner) for a card in doing or
+  review too long. Cards waiting on a person come first. A todo card nobody started is not blocked (`/api/stuck` lists it
+  as `ready-idle`), nor is one whose missing dependencies are old enough for `/api/ready` to ignore;
+- `recent_done`: cards that moved to done in the last 7 days, newest first, by the time in their activity log;
+- `version`: the `version_target` milestone's `done`, `total`, `pct`, `ready` and `gate_card` ([versions.md](versions.md)),
+  or `null` when version mode is off for the project.
+
+Lists are capped (`in_progress` 10, `blocked` 10, `recent_done` 5); `*_rest` says how many were left out. `GET /api/status`
+gives one row per project with the same counts. `?format=text` returns the same answer as short plain text, which is what
+MCP `project_status` and `dasks status [app]` show (`dasks status --json` and `json: true` give the data). An unknown project
+is a 404 that lists the project ids.
 
 ## Daily summary
 

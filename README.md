@@ -71,7 +71,7 @@ make.
 | Piece | What it is |
 |---|---|
 | Board server and web UI | `http://127.0.0.1:4747`: Home, Today (what waits on you), Board, Goals, a page per project, decisions, a line of cards finished since you last looked, a daily summary and a review triage page ([docs/api.md](docs/api.md#review-triage)) |
-| `dasks` MCP | 35 tools for Claude Code and Codex: list, create, claim and finish cards; specs; messages; ideas; lessons; project profiles; the daily summary |
+| `dasks` MCP | 36 tools for Claude Code and Codex: list, create, claim and finish cards; specs; messages; ideas; lessons; project profiles and status; the daily summary |
 | `dask` CLI | the card workflow inside a repo: `ready`, `begin`, `submit`, `release`, `msg`, `runner status` |
 | `dasks` CLI (alias `gb`) | raw board reads and writes from any shell, including each project's profile (what works, what is missing) |
 | Skills | `dasks` (the card protocol agents follow), `review-loop` (cross-model review) and `captain`, for both tools |
