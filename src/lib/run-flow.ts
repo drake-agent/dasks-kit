@@ -18,7 +18,7 @@ import { closeRepoView, openRepoView, repoSource, specLoop, TOOL_NAME as SPEC_TO
 import { originRef, pickStart, pushableBranch, saveWork } from './keep-work.ts';
 import { SPEC_RETRIES, type SpecPicked } from './runner.ts';
 import { fileRethink } from './rethink.ts';
-import { prFilesRoute, SHA_RE } from './touches-actual.ts';
+import { lockTouches, prFilesRoute, SHA_RE } from './touches-actual.ts';
 import { claimWarnings } from './codemap/overlap.ts';
 import type { MapView } from './codemap/map.ts';
 
@@ -374,7 +374,7 @@ export async function runCard(env: FlowEnv, p: Picked, cfg: RunnerConfig, title:
   env.log(`${card}: claimed as ${env.actor} (run ${r.run_id}, attempt ${r.attempt}); ${tool} builds in ${dir}; log ${logFile}`);
   // Code map (docs/runner.md): a log line and a card note, never a hold; the note is not awaited and may fail.
   let near: string[] = [];
-  try { near = claimWarnings(card, p.touches, claimed?.beside, env.codemap?.(repo) ?? null); } catch (e: any) { env.log(`${card}: code map not read (${oneLine(e?.message ?? e, 120)})`); }
+  try { near = claimWarnings(card, lockTouches(claimed ?? {}, p.touches), claimed?.beside, env.codemap?.(repo) ?? null); } catch (e: any) { env.log(`${card}: code map not read (${oneLine(e?.message ?? e, 120)})`); }
   for (const w of near) env.log(w);
   if (near.length) void env.api('POST', `/api/tasks/${card}`, { note: `code map: ${near.map((w) => w.replace(/^warning: \S+ is /, '')).join('; ')}. Both keep running; check each other's changes at review.` }).catch(() => {});
   const save = (patch: Partial<RunRecord>) => { Object.assign(r, patch); env.update((s) => { if (s.running[card]) Object.assign(s.running[card], patch); }); };
