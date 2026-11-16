@@ -22,7 +22,9 @@ flowchart LR
 ```
 
 - **Claim.** The claim asks the board to refuse it while a card with overlapping `touches:` is being worked in the same
-  repo, so two runners on different machines cannot start colliding cards. The board answers with a run id.
+  repo, so two runners on different machines cannot start colliding cards. A card that already has a PR is held on the
+  PR's real files (`touches_actual`, [cards.md](cards.md#touches)), which the runner stores right after it hands the PR
+  back. The board answers with a run id.
 - **Recovery record.** Saved in `~/.dasks/runner/state.json` right after the claim. If the runner dies, the next start
   stops what it left running and gives the card back. A record goes away only after the board confirmed the release or
   the hand-back.
