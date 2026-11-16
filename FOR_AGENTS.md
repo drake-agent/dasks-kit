@@ -50,7 +50,7 @@ curl -fsS "$URL/api/health"          # {"ok":true,"ready":true,...}; a 503 names
 dask ready --all                     # lists demo.t-hello
 ```
 
-Check the MCP server answers `tools/list` (35 tools):
+Check the MCP server answers `tools/list` (36 tools):
 
 ```bash
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"check","version":"1"}}}' \

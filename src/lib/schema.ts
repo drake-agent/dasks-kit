@@ -78,7 +78,8 @@ export const MAX_BLOCK_NOTE_BYTES = 1024;
 // promoted from) are optional too.
 // `claim_seen`: the claim holder's last own write (the claim lease heartbeat).
 // `now` + `now_by` / `now_at` / `now_lint`: the now line, what the agent is doing right now.
-const TASK_EXTRA_FIELDS = ['started_at', 'version', 'claimed_by', 'claimed_at', 'claim_seen', 'title_ko', 'title_en', 'idea', 'depends_on', 'next_owner', 'run_id', 'attempt', 'reset_epoch', 'pushed', 'secrets', 'summary', 'summary_by', 'summary_at', 'now', 'now_by', 'now_at', 'now_lint', ...SPEC_TASK_FIELDS] as const;
+// `touches_actual` + `touches_sha`: the files the card's PR head changes and that head's commit (lib/touches-actual.ts).
+const TASK_EXTRA_FIELDS = ['started_at', 'version', 'claimed_by', 'claimed_at', 'claim_seen', 'title_ko', 'title_en', 'idea', 'depends_on', 'next_owner', 'run_id', 'attempt', 'reset_epoch', 'pushed', 'secrets', 'summary', 'summary_by', 'summary_at', 'now', 'now_by', 'now_at', 'now_lint', 'touches_actual', 'touches_sha', ...SPEC_TASK_FIELDS] as const;
 export const TASK_OPTIONAL_FIELDS = ['pr', ...TASK_EXTRA_FIELDS] as const;
 export const TASK_ALL_FIELDS = [...TASK_FIELDS, ...TASK_EXTRA_FIELDS] as const;
 /** Languages with their own display title (title_ko, title_en). */
@@ -157,6 +158,10 @@ export interface Task {
   now_by?: string;
   now_at?: string;
   now_lint?: string;
+  /** The files the card's PR head changes (`a, b`) and that head's 40-hex commit; the runner writes them after it opens
+   *  the PR. The board's claim check holds a doing card on this list instead of its planned `touches:`. */
+  touches_actual?: string;
+  touches_sha?: string;
   /** Spec state (stored when a spec write, review or block changed it; absent = derived on read, lib/spec-state.ts). */
   spec_state?: string;
   blocked_by?: string;

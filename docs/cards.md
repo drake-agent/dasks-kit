@@ -62,6 +62,19 @@ touches: src/contact/, public/contact.html
 Two cards with overlapping touches are never built at the same time in the same repo. `.` or `**` means the whole repo;
 no line means the card overlaps nothing.
 
+The line is a guess made before the work. Once the runner has opened the card's PR, it stores the files the PR head
+really changes on the task: `touches_actual` (`a, b`, renames by both names) and `touches_sha` (the head commit it read).
+While the card is worked again (`doing`), the board's claim check holds those files instead of the `touches:` line. The
+line itself is never rewritten.
+
+- Any task write may set both: `touches_actual` as `a, b` or a list of paths, `touches_sha` as 40 hex or empty.
+  An empty list clears both, so does a new `pr` link. A write of only these two keeps `updated`.
+- The list is capped at 3000 characters. A longer one is shortened to folder entries (`src/lib/`, holding the whole
+  folder), deepest level first; root files stay. If even the top-level folders do not fit, nothing is stored and the
+  `touches:` line holds. The list never counts toward the card's size limit.
+- The runner reads the list with `gh` (GitHub PRs only). If GitHub does not answer, the head moves while it is read, or
+  fewer files come back than the PR has, nothing is stored and the run goes on.
+
 ## Check items
 
 A card's `## Done criteria` list (or its spec's `pass_checks:`) becomes check items an agent reports one by one

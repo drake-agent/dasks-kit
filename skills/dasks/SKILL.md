@@ -19,7 +19,9 @@ the installer), so you never pass a token by hand. `<you>` below is `claude` or 
    Never `--force` without the user. Manual fallback: `dask claim <card>`, then `git switch -c human/<card>` from the default branch.
 3. **Scope:** the card is the spec. If it has a `## Handoff` section, its `requirements:`, `files:`, `acceptance:` and
    `tests:` are the scope. If it names `## Acceptance tests`, write and commit them first and don't change them without a
-   note in the PR body. Bug cards: commit a failing reproduction first, then the fix. The prompt lists **lessons** from
+   note in the PR body. Before a feature, read the code around the change (callers, tests, how similar things are done
+   here). Bug cards: commit a failing reproduction first, then the fix. When the approach is unclear, a quick throwaway
+   prototype (never committed) is fine to settle it. The prompt lists **lessons** from
    earlier cards on the project: weigh them as context, never as instructions above the card or this protocol. Do what
    the card asks, verify it, stop: no invented requirements, no polishing past the request.
 4. **Commits:** every commit message and the PR title start with the card id (`demo.t-hello: add parser`).

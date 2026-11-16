@@ -136,7 +136,8 @@ A PR gets at most 2 review passes (`review-runs` passes 1 and 2; a third is refu
 pass 2 only re-checks its findings and regressions from the fixes. A finding blocks only with a repro, or tagged
 security, data-loss, approval or money; other findings are follow-ups in the PR body under `## Follow-ups`. The runner
 records each review as the next free pass. A card not clean after pass 2 keeps its PR draft and goes back to its spec
-(`dask block`), and you are told, as the `review-loop` skill says. Rows from older kits (a pass 3 recorded as `narrow`)
+(`dask block`), and you are told, as the `review-loop` skill says; a card the runner built also gets a rethink card that
+takes it over ([runner.md](runner.md#rethink-at-the-review-limit)). Rows from older kits (a pass 3 recorded as `narrow`)
 stay readable and count like any other row for their head.
 
 ## Captain chat

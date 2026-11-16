@@ -125,6 +125,7 @@ export const SPEC_METHOD = [
   '4. Sections: ## Background (what the code does today, with file references), ## Why, ## Scope, ## Non-goals, ## Files likely touched, ## Context pack (files and docs to read first), ## Acceptance tests (concrete tests: name, setup, action, expected result; each must fail on today\'s code), ## Tests, ## Done criteria (a list), ## Open questions.',
   '5. Open questions: one line each, `- [Q] often=<1-10> bad=<1-10> kind=<security|data-loss|approval|what|where|done|other> <question>`. Security, data loss and approval questions always block. A plain what/where/done question whose often x bad is under 30 is not a blocker: write it as `implementer decides (score N): <question>` instead.',
   '6. No secrets, tokens or personal data in the spec.',
+  '7. Write what to build, why, and how to tell it is done; never how to build it: no file-by-file plan, no step list, no code to paste. The builder reads the code and decides. Keep the whole spec under 1,500 words: the board refuses a longer one.',
 ].join('\n');
 
 const SPEC_START = '<<<SPEC', SPEC_END = 'SPEC>>>';

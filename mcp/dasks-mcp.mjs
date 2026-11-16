@@ -108,6 +108,13 @@ const TOOLS = [
     run: readyDelta,
   },
   {
+    name: 'project_status',
+    description: 'Where a project stands, as text: cards by status, in progress, blocked and on whom, done in the last 7 days, version progress (version mode). No app: one line per project. json:true for the data.',
+    inputSchema: { type: 'object', additionalProperties: false, properties: { app: { type: 'string', description: APP_DESC }, json: { type: 'boolean' } } },
+    annotations: { readOnlyHint: true },
+    run: (a) => board.status(a),
+  },
+  {
     name: 'get_task',
     description: `Get one task with its handoff summary (summary, summary_by, summary_at: read it first), now, body (context, done criteria, notes), version, claim, the last ${GET_TASK_LOG} activity entries (activity_omitted = how many older ones were left out; pass log for more) and lessons: what earlier cards on this project learned (closest to the Handoff files first). Read them before you start.`,
     inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'task id, e.g. demo.t-hello' }, log: { type: 'integer', minimum: 0, maximum: 50, description: `newest activity entries to return (default ${GET_TASK_LOG}, max 50)` } }, required: ['id'], additionalProperties: false },

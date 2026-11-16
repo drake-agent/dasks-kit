@@ -232,5 +232,9 @@ test('no gate reads messages: gate modules and the write path never import or ca
     assert.doesNotMatch(src, /messages\.ts|\/messages\b|readMessages|filterMessages|waitMessages/, `${f} must not read card messages`);
   }
   // and nothing else in src/lib imports it either (only the server routes do)
-  for (const f of fs.readdirSync(lib)) if (f !== 'messages.ts') assert.doesNotMatch(fs.readFileSync(path.join(lib, f), 'utf8'), /from '\.\/messages\.ts'/, f);
+  // (sub folders too: src/lib/codemap/ imports with ../)
+  for (const f of fs.readdirSync(lib, { recursive: true }) as string[]) {
+    if (f === 'messages.ts' || fs.statSync(path.join(lib, f)).isDirectory()) continue;
+    assert.doesNotMatch(fs.readFileSync(path.join(lib, f), 'utf8'), /from '(\.\.?\/)+messages\.ts'/, f);
+  }
 });

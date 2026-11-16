@@ -16,13 +16,15 @@ flowchart LR
   P --> G
   G --> H[push branch, draft PR]
   H --> I[card to review, handed back]
-  H -->|not clean after pass 2| B2[card blocked, you are told]
+  H -->|not clean after pass 2| B2[card blocked, rethink card filed, you are told]
   D -->|failed, stopped, limit| S[save the work: WIP commit, scan, push branch]
   S --> R[outcome, then release]
 ```
 
 - **Claim.** The claim asks the board to refuse it while a card with overlapping `touches:` is being worked in the same
-  repo, so two runners on different machines cannot start colliding cards. The board answers with a run id.
+  repo, so two runners on different machines cannot start colliding cards. A card that already has a PR is held on the
+  PR's real files (`touches_actual`, [cards.md](cards.md#touches)), which the runner stores right after it hands the PR
+  back. The board answers with a run id.
 - **Recovery record.** Saved in `~/.dasks/runner/state.json` right after the claim. If the runner dies, the next start
   stops what it left running and gives the card back. A record goes away only after the board confirmed the release or
   the hand-back.
@@ -53,6 +55,9 @@ flowchart LR
   as skipped (`not in version <milestone>`), take no spec slot, and `dask runner status` counts them. Without a target
   nothing is held. [versions.md](versions.md).
 - **Usage or rate limits:** that tool waits `backoff_min`; the attempt does not count.
+- **How a build works.** The build prompt tells the agent to read the code around the change before a feature, to
+  reproduce a bug first (a failing test, or a command and its wrong output) and fix the root cause, and that a quick
+  throwaway prototype (never committed) is fine when the approach is unclear.
 - **Steps only you can do.** A build or fix prompt tells the agent to leave a login, signing, a paid purchase, a physical
   device or an approval undone and finish the rest. It never tries, fakes or works around the step, and it writes one line
   per step directly above its `RESULT:` line:
@@ -79,7 +84,7 @@ flowchart LR
   nothing. The P level only orders the list; the line format is in the `review-loop` skill.
 - **Not clean after pass 2.** The PR stays a draft (a ready PR from an earlier attempt goes back to draft), the open
   findings go on top of a new PR's body, the card gets a Spec block with those findings and you get a message on the
-  card. It stays in review with its PR; nothing picks it up until you unblock it.
+  card. It stays in review with its PR, and the runner files a rethink card that takes it over (below).
 - **Review record.** Each pass is also stored on the board for the head it read, sent as the reviewing
   tool (`codex@<machine>`; the claim goes in as the build tool beside `runner@<machine>`)
   (`GET /api/tasks/<card>/review-runs`), which is what `dask captain-merge` checks ([captain.md](captain.md)). A clean
@@ -132,6 +137,58 @@ saying it is continuing and from where, and that `wip:` commits are unfinished s
 
 To look at a kept ref: `git log refs/dasks/kept/<card>/<sha>`. To drop it: `git update-ref -d <ref>`.
 
+## Rethink at the review limit
+
+A card not clean after its 2 review passes can never be reviewed again: its passes stay used. So the runner files a
+**rethink card** in the same look: a new card, `<card>-rethink-1`, with the old card's goal, lane, priority, milestone and
+`depends_on`. Its body starts with the line `rethink: <old card>`, lists the open findings, asks to re-check the design
+and change the approach rather than repeat the fix, and carries the start of the old card's spec (or body; the
+body stays small, the rest is one `dask card <old card>` away). Being a new card it gets
+its own 2 review passes, and it is built from the default branch; the old branch `dasks/<old card>` stays for reference.
+Like any card it needs a ready spec before it is built (the spec pass writes one when `spec` is on). The old card gets a
+note naming it, and your message on the old card says which card took over.
+
+A rethink card that is itself not clean after 2 passes gets the next one (`-rethink-2`, and so on). One line of cards
+gets at most `rethinks` of them (default 3); after that the message says the line is used up and the card waits for
+you, as before. `rethinks: 0` turns this off. A goal over its todo limit turns the rethink into an idea; the message
+says so.
+
+**When the rethink card is done** (merged and marked done), a later look of any runner finishes the old card, and every
+card above it in the line that still waits at the limit:
+
+1. the old card is cancelled with the result `superseded by <rethink card>`, only if it did not change since the runner
+   read it (so a card you just took back is left alone).
+2. its open PR gets one comment, `Superseded by <rethink card> …`, and is closed. The branch is never deleted.
+3. open cards that waited on the old card wait on the rethink card instead.
+
+The runner leaves the old card alone, with one log line, when its PR was merged or cannot be read with `gh`, when its
+`pr` field is not a GitHub PR URL, or when the old card is no longer blocked at the review limit or someone holds it
+(you unblocked it to rebuild it yourself). A step that fails is tried again on the next look.
+## Code map
+
+Two cards whose `touches:` do not overlap can still collide: one changes a file the other's file imports. The runner
+warns about that. It never holds a claim or a start, and it never changes dependencies, status or touches.
+
+- **The map.** For each project clone the runner keeps a map of which repo file imports which, read from the git tree
+  at `origin/main` (else `origin/HEAD`), never the working tree, with no model and no network. It knows relative TS/JS
+  imports (`import`, `export … from`, `require`, `import()`), Python `import` and `from … import` (absolute and
+  relative), Rust `mod x;` and `use crate::`/`self::`/`super::` paths, and Swift `import <Target>` of a SwiftPM target
+  declared in the repo. An import that does not name a file in the tree is dropped; package names are never followed.
+- **When it is built.** Every look checks each clone's head in the background and rebuilds a map that is behind, one
+  repo at a time, once per new head. A build reads at most 20,000 source files and 64 MB, skips files over 512 KB and
+  stops after 60 s; past a file or byte limit the map is marked truncated. A failed build logs one line and the last map
+  stays in use, marked stale. Maps live in `~/.dasks/runner/codemap/`; delete them any time and they are built again.
+- **The warning.** The board's answer to the runner's claim lists the other cards being worked in the same repo with
+  their touches (`beside`). When a file in this card's touches and a file in another's are joined by one import, in
+  either direction, the runner logs
+
+  ```
+  warning: <card> is one import from <other>: <a> imports <b>[, +<n> more] (map <sha7>[, stale]), not held
+  ```
+
+  and writes one note on the card. Only file entries count: a directory or glob entry never makes this warning (it
+  already locks by overlap), and a file the card creates is not in the map yet. A repo with no map gives no warnings.
+
 ## Turn it on
 
 1. Give each project the checkout its cards build in (a git repo with a GitHub remote, `gh auth login` done), in
@@ -172,6 +229,7 @@ Try one look by hand first: `bin/dasks-runner --once`.
 | `pr_limit` | `10` | a repo with more open PRs than this starts no new card; `0` turns it off |
 | `nudge` | `true` | one "continue" to a Claude build that exited without a RESULT line |
 | `spec` | `true` | when a look starts no ready card, free slots write specs for cards without a ready one ([specs.md](specs.md)) |
+| `rethinks` | `3` | rethink cards one line of cards gets at the review limit; `0` turns them off (below) |
 | `machine` | stored machine name | the runner's name on the board: `runner@<machine>` |
 | `update` | on a joined Mac, off on the board's | between cards, update the kit checkout from its remote (below) |
 
