@@ -2,7 +2,9 @@
 // on the board or the card, not on the review triage page. Every other case keeps asking as before.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { limitNote, openRethinkTargets, replacedByRethink } from '../src/lib/rethink.ts';
+import { limitNote, openRethinkTargets, replacedByRethink, replacedOnBoard } from '../src/lib/rethink.ts';
+import { skippedSteps } from '../src/lib/summary.ts';
+import { stuckReport } from '../src/lib/stuck.ts';
 import { task, tempRepo } from './helpers.ts';
 import { serve, until } from './state-support.ts';
 
@@ -35,6 +37,18 @@ test('replacedByRethink: every other case still asks', () => {
   for (const [name, got] of cases) assert.equal(got, false, name);
 });
 
+test('summary and stuck: a replaced card lists no skipped steps and is not review-stale; the others still are', () => {
+  const step = { at: '2026-11-10T10:00:00Z', note: 'HUMAN-STEP: Try it on a phone -- needs a device' };
+  const base = { title: 'x', goal: 'web' };
+  const steps = skippedSteps([{ ...old(), ...base, replaced: true, notes: [step] }, { ...old({ id: 'web.t-other' }), ...base, notes: [step] }], 0, Date.parse('2026-11-11T00:00:00Z'));
+  assert.deepEqual(steps.map((s) => s.id), ['web.t-other']);
+  const stale = { updated: '2026-10-01T00:00:00Z', created: '2026-10-01T00:00:00Z', spec_state: 'blocked', blocked_by: 'runner@mac-1', block_note: NOTE };
+  const tasks = [task({ id: 'web.t-login', status: 'review', ...stale } as any), task({ id: 'web.t-login-rethink-1', body: 'rethink: web.t-login\n' }),
+    task({ id: 'web.t-kept', status: 'review', ...stale } as any), task({ id: 'web.t-kept-rethink-1', status: 'cancelled', body: 'rethink: web.t-kept\n' })];
+  const r = stuckReport({ tasks }, new Date('2026-11-10T00:00:00Z'), {}, replacedOnBoard(tasks));
+  assert.deepEqual(r.items.filter((i) => i.reason === 'review-stale').map((i) => i.id), ['web.t-kept']);
+});
+
 test('server: the replaced card drops out of /api/board, /api/tasks/<card> and /api/review-triage; the exceptions stay', async () => {
   const blocked = { spec_state: 'blocked', blocked_by: 'runner@mac-1', blocked_at: '2026-11-10T10:00:00+09:00', block_note: NOTE };
   const now = new Date().toISOString();
@@ -58,6 +72,8 @@ test('server: the replaced card drops out of /api/board, /api/tasks/<card> and /
     for (const id of asking) assert.ok(asks.has(id), `${id} still asks on the board`);
     assert.equal((await (await fetch(srv.url + '/api/tasks/beta.t-gone')).json()).decision_request, undefined);
     assert.ok((await (await fetch(srv.url + '/api/tasks/beta.t-alone')).json()).decision_request);
+    // The write checks read the card from disk and the rethink card only from cache: there the card still asks.
+    assert.equal((await fetch(srv.url + '/api/decisions/request/beta.t-gone')).status, 200);
     let tri: any;
     await until(async () => { tri = await (await fetch(srv.url + '/api/review-triage')).json(); return tri.total > 0; });
     const listed = Object.values(tri.buckets).flat().map((x: any) => x.id).sort();

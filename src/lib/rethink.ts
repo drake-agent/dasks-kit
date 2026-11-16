@@ -64,6 +64,14 @@ export function replacedByRethink(t: { id: string; status: string; needs_user?: 
   return spec.spec_state === 'blocked' && LIMIT_NOTE.test(String(spec.fields?.block_note ?? ''));
 }
 
+/** replacedByRethink over a loaded board, with each card's spec fields as read from its file (for readers without the
+ *  board's committed spec index, such as the digest). */
+export function replacedOnBoard(tasks: readonly { id: string; status: string; body?: string | null; spec_state?: string; block_note?: string }[]) {
+  const targets = openRethinkTargets(tasks);
+  return (t: { id: string; status: string; needs_user?: string | null; approvals?: string | null; spec_state?: string; block_note?: string }) =>
+    replacedByRethink(t, { spec_state: t.spec_state, fields: { block_note: t.block_note } }, targets);
+}
+
 /** The marker on the comment that closes an old PR, so a retry does not comment twice. */
 export const closeMarker = (r: string) => `<!-- dasks-runner: superseded-by ${r} -->`;
 

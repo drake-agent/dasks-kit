@@ -156,8 +156,10 @@ says so.
 **While the rethink card is open** (any status but done or cancelled), the old card asks you nothing: the rethink card
 is already handling it. A card in review, blocked at the review limit (the runner's `NEEDS-SPEC (…): not clean after N
 review passes` block note, as committed) and named by an open card's `rethink:` line gets no `decision_request` on
-`/api/board` or `/api/tasks/<card>` (no approve/reject on its panel, and the board's "record the decision first" write
-check does not apply to it) and is left off the review triage page. It asks again, exactly as before, when:
+`/api/board` or `/api/tasks/<card>` (no approve/reject on its panel), is left off the review triage page, lists no
+skipped steps in the daily summary, and is not counted as `review-stale` in `/api/stuck`, project status or the digest.
+The board's write checks are unchanged: a user write that moves the card on, `POST /api/decisions` and
+`GET /api/decisions/request/<card>` still treat it as asking. It asks again everywhere, exactly as before, when:
 
 - it has `needs_user` or `approvals` set (someone asked you on purpose);
 - the rethink card is cancelled, or done (the close step above then finishes the old card);

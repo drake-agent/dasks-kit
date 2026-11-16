@@ -31,8 +31,9 @@ export interface SummaryInput {
   now: Date;
   since: Date;
   /** Every card; done_at only where the card moved to done (from its activity). live_ask: an open user decision.
-   *  notes: its activity notes, needed only on cards that can still list a skipped step (skippedSteps). */
-  tasks: { id: string; title: string; goal: string; status: string; pr?: string; needs_user?: string; done_at?: string | null; live_ask?: boolean; notes?: { at: string; note?: string }[] }[];
+   *  notes: its activity notes, needed only on cards that can still list a skipped step (skippedSteps). replaced: an
+   *  open rethink card replaces it (src/lib/rethink.ts replacedByRethink), so its skipped steps are not listed. */
+  tasks: { id: string; title: string; goal: string; status: string; pr?: string; needs_user?: string; done_at?: string | null; live_ask?: boolean; replaced?: boolean; notes?: { at: string; note?: string }[] }[];
   machines: { machine: string; state: string; last_seen: string }[];
   /** Cards in doing with no news past the stuck threshold. */
   stale: { id: string; title: string; goal: string; age_hours: number }[];
@@ -45,11 +46,11 @@ const inWindow = (at: string | null | undefined, a: number, b: number) => { cons
 
 /** Skipped steps stay on the list while their card is open, so one missed morning loses nothing. A done card's step is
  *  listed only if it was noted in this window, so it is seen once and then closes; a cancelled card lists none. The same
- *  step noted again (a retry) is one entry, the latest. */
+ *  step noted again (a retry) is one entry, the latest. A card an open rethink card replaces lists none. */
 export function skippedSteps(tasks: SummaryInput['tasks'], since: number, until: number): SkippedStep[] {
   const out = new Map<string, SkippedStep>();
   for (const t of tasks) {
-    if (t.status === 'cancelled') continue;
+    if (t.status === 'cancelled' || t.replaced) continue;
     for (const n of t.notes ?? []) {
       const p = parseHumanStep(n.note);
       const ms = Date.parse(n.at);
