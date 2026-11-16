@@ -17,6 +17,7 @@ import { humanStepLine, humanStepsOf, mergeHumanSteps } from './human-steps.ts';
 import { closeRepoView, openRepoView, repoSource, specLoop, TOOL_NAME as SPEC_TOOL_NAME, type AgentRun } from './spec-flow.ts';
 import { originRef, pickStart, pushableBranch, saveWork } from './keep-work.ts';
 import { SPEC_RETRIES, type SpecPicked } from './runner.ts';
+import { fileRethink } from './rethink.ts';
 
 export class BoardError extends Error {
   status: number; body: any;
@@ -45,6 +46,8 @@ export interface FlowEnv {
   track: (card: string, agent: Supervised | null) => void;
   /** How often a running card's worktree is checked for changes (ms). */
   activityMs?: number;
+  /** runner.rethinks: rethink cards one line of cards may get at the review limit (0 = off; unset = 0). */
+  rethinks?: number;
 }
 
 const TOOL_NAME: Record<Tool, string> = { claude: 'Claude', codex: 'Codex' };
@@ -126,8 +129,9 @@ export async function settle(env: FlowEnv, card: string, r: RunRecord, reason: s
   return true;
 }
 
-/** Not clean after the last pass: Spec block with the open findings and a message to the user. Safe to repeat: a card
- *  already blocked is left as it is, and the message has one request id per run. */
+/** Not clean after the last pass: Spec block with the open findings, a rethink card (src/lib/rethink.ts) and a message
+ *  to the user. Safe to repeat: a card already blocked is left as it is, a rethink card already made is found again, and
+ *  the message has one request id per run. */
 async function blockAtLimit(env: FlowEnv, card: string, r: RunRecord, pr: string, open: string[]): Promise<void> {
   const findings = oneLine(open.join(' | '), 800);
   const t = await env.api('GET', `/api/tasks/${card}?log=0`);
@@ -139,8 +143,12 @@ async function blockAtLimit(env: FlowEnv, card: string, r: RunRecord, pr: string
       block_note: oneLine(`NEEDS-SPEC (${env.actor}): not clean after ${REVIEW_PASSES} review passes: ${findings}`, 1000),
     });
   }
+  const re = await fileRethink(env, card, pr, open, env.rethinks ?? 0);
+  if (re.fresh) await env.api('POST', `/api/tasks/${card}`, { note: `runner: rethink card ${re.id} redoes this card with a changed approach. When it is done, ${pr} is closed (branch kept) and this card is cancelled as superseded.` });
+  env.log(`${card}: ${re.id ? `rethink card ${re.id}` : `no rethink card: ${re.why}`}`);
+  const next = re.id ? `Rethink card ${re.id} takes it over with a changed approach.` : `No rethink card: ${re.why}; it waits for you.`;
   await env.api('POST', `/api/tasks/${card}/messages`, {
-    text: oneLine(`Review of ${card} is not clean after ${REVIEW_PASSES} passes; ${pr} stays a draft and the card is blocked. Open: ${findings}`, 1000),
+    text: oneLine(`Review of ${card} is not clean after ${REVIEW_PASSES} passes; ${pr} stays a draft and the card is blocked. ${next} Open: ${findings}`, 1000),
     to: 'user', kind: 'heads-up', request_id: `review-limit-${r.run_id}`.slice(0, 64),
   });
 }
@@ -165,7 +173,7 @@ export async function handBack(env: FlowEnv, card: string, r: RunRecord, pr: str
       summary: [`Runner build by ${tool}: ${summary}`, `Review: ${oneLine(reviewNote, 190)}`, `Draft PR: ${pr}`, ...(left ? [`Not done: ${skipped.length} skipped step(s) wait for you`] : [])].join('\n'),
       what: `A draft PR for this card is open: ${title}`,
       why: `The runner built the card with ${tool}; ${oneLine(reviewNote, 200)}`,
-      do: blocked ? 'Read the open findings in the PR body, fix the spec or the design, then unblock the card' : `${left}Read the PR and its checks; merge it or ask for changes`,
+      do: blocked && (env.rethinks ?? 0) > 0 ? `Nothing while a rethink card takes it over (the runner's message on this card names it); with none, read the open findings in the PR body, fix the spec or the design, then unblock the card` : blocked ? 'Read the open findings in the PR body, fix the spec or the design, then unblock the card' : `${left}Read the PR and its checks; merge it or ask for changes`,
       rec: blocked ? `Do not merge: the review is not clean after ${REVIEW_PASSES} passes and gets no third pass` : open.length ? 'Check the findings listed in the PR body before merging' : 'Merge when the checks are green and the diff looks right',
       after: `After the merge, mark the card done (dask done ${card} --pr <url>)`,
     });

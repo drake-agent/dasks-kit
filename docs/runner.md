@@ -16,7 +16,7 @@ flowchart LR
   P --> G
   G --> H[push branch, draft PR]
   H --> I[card to review, handed back]
-  H -->|not clean after pass 2| B2[card blocked, you are told]
+  H -->|not clean after pass 2| B2[card blocked, rethink card filed, you are told]
   D -->|failed, stopped, limit| S[save the work: WIP commit, scan, push branch]
   S --> R[outcome, then release]
 ```
@@ -82,7 +82,7 @@ flowchart LR
   nothing. The P level only orders the list; the line format is in the `review-loop` skill.
 - **Not clean after pass 2.** The PR stays a draft (a ready PR from an earlier attempt goes back to draft), the open
   findings go on top of a new PR's body, the card gets a Spec block with those findings and you get a message on the
-  card. It stays in review with its PR; nothing picks it up until you unblock it.
+  card. It stays in review with its PR, and the runner files a rethink card that takes it over (below).
 - **Review record.** Each pass is also stored on the board for the head it read, sent as the reviewing
   tool (`codex@<machine>`; the claim goes in as the build tool beside `runner@<machine>`)
   (`GET /api/tasks/<card>/review-runs`), which is what `dask captain-merge` checks ([captain.md](captain.md)). A clean
@@ -135,6 +135,34 @@ saying it is continuing and from where, and that `wip:` commits are unfinished s
 
 To look at a kept ref: `git log refs/dasks/kept/<card>/<sha>`. To drop it: `git update-ref -d <ref>`.
 
+## Rethink at the review limit
+
+A card not clean after its 2 review passes can never be reviewed again: its passes stay used. So the runner files a
+**rethink card** in the same look: a new card, `<card>-rethink-1`, with the old card's goal, lane, priority, milestone and
+`depends_on`. Its body starts with the line `rethink: <old card>`, lists the open findings, asks to re-check the design
+and change the approach rather than repeat the fix, and carries the start of the old card's spec (or body; the
+body stays small, the rest is one `dask card <old card>` away). Being a new card it gets
+its own 2 review passes, and it is built from the default branch; the old branch `dasks/<old card>` stays for reference.
+Like any card it needs a ready spec before it is built (the spec pass writes one when `spec` is on). The old card gets a
+note naming it, and your message on the old card says which card took over.
+
+A rethink card that is itself not clean after 2 passes gets the next one (`-rethink-2`, and so on). One line of cards
+gets at most `rethinks` of them (default 3); after that the message says the line is used up and the card waits for
+you, as before. `rethinks: 0` turns this off. A goal over its todo limit turns the rethink into an idea; the message
+says so.
+
+**When the rethink card is done** (merged and marked done), a later look of any runner finishes the old card, and every
+card above it in the line that still waits at the limit:
+
+1. the old card is cancelled with the result `superseded by <rethink card>`, only if it did not change since the runner
+   read it (so a card you just took back is left alone).
+2. its open PR gets one comment, `Superseded by <rethink card> …`, and is closed. The branch is never deleted.
+3. open cards that waited on the old card wait on the rethink card instead.
+
+The runner leaves the old card alone, with one log line, when its PR was merged or cannot be read with `gh`, when its
+`pr` field is not a GitHub PR URL, or when the old card is no longer blocked at the review limit or someone holds it
+(you unblocked it to rebuild it yourself). A step that fails is tried again on the next look.
+
 ## Turn it on
 
 1. Give each project the checkout its cards build in (a git repo with a GitHub remote, `gh auth login` done), in
@@ -175,6 +203,7 @@ Try one look by hand first: `bin/dasks-runner --once`.
 | `pr_limit` | `10` | a repo with more open PRs than this starts no new card; `0` turns it off |
 | `nudge` | `true` | one "continue" to a Claude build that exited without a RESULT line |
 | `spec` | `true` | when a look starts no ready card, free slots write specs for cards without a ready one ([specs.md](specs.md)) |
+| `rethinks` | `3` | rethink cards one line of cards gets at the review limit; `0` turns them off (below) |
 | `machine` | stored machine name | the runner's name on the board: `runner@<machine>` |
 | `update` | on a joined Mac, off on the board's | between cards, update the kit checkout from its remote (below) |
 
