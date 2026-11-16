@@ -17,7 +17,7 @@ import { humanStepLine, humanStepsOf, mergeHumanSteps } from './human-steps.ts';
 import { closeRepoView, openRepoView, repoSource, specLoop, TOOL_NAME as SPEC_TOOL_NAME, type AgentRun } from './spec-flow.ts';
 import { originRef, pickStart, pushableBranch, saveWork } from './keep-work.ts';
 import { SPEC_RETRIES, type SpecPicked } from './runner.ts';
-import { fileRethink } from './rethink.ts';
+import { fileRethink, limitNote } from './rethink.ts';
 import { lockTouches, prFilesRoute, SHA_RE } from './touches-actual.ts';
 import { claimWarnings } from './codemap/overlap.ts';
 import type { MapView } from './codemap/map.ts';
@@ -145,7 +145,7 @@ async function blockAtLimit(env: FlowEnv, card: string, r: RunRecord, pr: string
     try { sp = await env.api('GET', `/api/tasks/${card}/spec`); } catch (e: any) { if (!(e instanceof BoardError) || e.status !== 404) throw e; }
     await env.api('POST', `/api/tasks/${card}/spec/block`, {
       expected_version: Number(t?.version ?? 0), expected_spec_version: Number(sp?.metadata?.version ?? 0),
-      block_note: oneLine(`NEEDS-SPEC (${env.actor}): not clean after ${REVIEW_PASSES} review passes: ${findings}`, 1000),
+      block_note: oneLine(limitNote(env.actor, REVIEW_PASSES, findings), 1000),
     });
   }
   const re = await fileRethink(env, card, pr, open, env.rethinks ?? 0);

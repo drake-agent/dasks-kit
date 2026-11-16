@@ -54,7 +54,8 @@ Optimistic locking: most writes take `expected_version` and answer 409 when the 
 ## Review triage
 
 `GET /api/review-triage` (the board page More → Review) puts every card in review that has a GitHub PR into one bucket,
-in the order to clear them; the first rule that matches wins:
+in the order to clear them (a card an open rethink card replaces is left out: [runner.md](runner.md#rethink-at-the-review-limit));
+the first rule that matches wins:
 
 | Bucket | Rule |
 |---|---|

@@ -26,6 +26,7 @@ import { deadRunnerCards, Fleet, kitCommitOf, parseHeartbeat } from './lib/fleet
 import { Backup, backupView, remoteShown } from './lib/backup.ts';
 import { buildSummary, readSummary, saveSummary, summaryDue } from './lib/summary.ts';
 import { buildTriage } from './lib/triage.ts';
+import { openRethinkTargets, replacedByRethink } from './lib/rethink.ts';
 import { PrStatusCache } from './lib/pr-status.ts';
 import { machineName } from './lib/connection.mjs';
 import { execFileSync } from 'node:child_process';
@@ -311,7 +312,7 @@ const reviewPrs = () => board.tasks.flatMap((t) => (t.status === 'review' && t.p
 setInterval(() => { if (!stopping) void prStatus.refresh(reviewPrs()); }, 5 * 60_000).unref();
 setTimeout(() => { if (!stopping) void prStatus.refresh(reviewPrs()); }, 2000).unref();
 function reviewTriage() {
-  return buildTriage(board.tasks.filter((t) => t.status === 'review').map((t) => ({ id: t.id, title: t.title, goal: t.goal, priority: t.priority, updated: t.updated, pr: t.pr ?? '' })),
+  return buildTriage(board.tasks.filter((t) => t.status === 'review' && !replaced(t)).map((t) => ({ id: t.id, title: t.title, goal: t.goal, priority: t.priority, updated: t.updated, pr: t.pr ?? '' })),
     (pr) => prStatus.get(pr), (id) => { try { return readReviewRuns(ROOT, id) as any[]; } catch { return []; } }, new Date(), cfg.review.stale_days);
 }
 
@@ -328,8 +329,8 @@ function summaryTick(now = new Date()) {
     const s = buildSummary({ now, since,
       tasks: board.tasks.map((t) => ({ id: t.id, title: t.title, goal: t.goal, status: t.status, pr: t.pr, needs_user: t.needs_user,
         done_at: t.status === 'done' && Date.parse(t.updated) >= since.getTime() ? (() => { const ms = lastDone(t.id); return ms === null ? null : new Date(ms).toISOString(); })() : null,
-        live_ask: !!liveAsk(t), notes: canListSkips(t, since) ? readActivity(ROOT, t.id).filter((a) => a.note).map((a) => ({ at: a.at, note: a.note })) : [] })),
-      machines: fleet.list(cfg.fleet.dead_min, now), stale: stuckReport(board, now, cfg.stuck).items.filter((i) => i.reason === 'doing-stale'),
+        live_ask: !!liveAsk(t), replaced: replaced(t), notes: canListSkips(t, since) ? readActivity(ROOT, t.id).filter((a) => a.note).map((a) => ({ at: a.at, note: a.note })) : [] })),
+      machines: fleet.list(cfg.fleet.dead_min, now), stale: stuckReport(board, now, cfg.stuck, replaced).items.filter((i) => i.reason === 'doing-stale'),
       outcomes: allOutcomes(ROOT), warnings: [backupNow().warning].filter((w): w is string => !!w) });
     saveSummary(ROOT, s);
     version++; announce();
@@ -384,7 +385,7 @@ function publicTask(t: Task) {
   // the one it displays, never a newer one fetched at tap time (the server then refuses a scope that moved on).
   // A card waiting on a user decision (an open ask) is answered only in the decision queue (/asks): no approve/reject.
   const live = liveAsk(t);
-  const asks = live ? null : decisionRequest(t);
+  const asks = live ? null : askOf(t);
   return { ...rest, version: Number(t.version || 0), claimed_by: t.claimed_by || '', claimed_at: t.claimed_at || '', spec_state: facts?.spec_state ?? 'none', file, ...(asks ? { decision_request: asks } : {}), ...(live ? { user_ask: { id: live.id, kind: live.kind } } : {}) };
 }
 
@@ -397,8 +398,22 @@ function liveAsk(t: Task, fresh = false): Ask | null {
   const a = fresh ? readAsks(ROOT, t.id)?.open ?? null : askMap().get(t.id) ?? null;
   return askLive(ROOT, t, a) ? a : null;
 }
-/** The approve/reject question a card asks on the board, unless it waits on a user decision instead. */
-const boardDecision = (t: Task, fresh = false) => (liveAsk(t, fresh) ? null : decisionRequest(t));
+let rethinkCache: { key: number; tasks: Task[]; targets: Set<string> | null } | null = null;
+/** An open rethink card replaces the card (src/lib/rethink.ts replacedByRethink), so it asks the user nothing. Spec facts
+ *  as committed; a spec index that failed to rebuild, or any error, keeps the card asking. */
+function replaced(t: Task): boolean {
+  if (specIndexFailed) return false;
+  try {
+    if (rethinkCache?.key !== version || rethinkCache.tasks !== board.tasks) rethinkCache = { key: version, tasks: board.tasks, targets: openRethinkTargets(board.tasks) };
+    return replacedByRethink(t, specIndex.facts.get(t.id), rethinkCache.targets);
+  } catch { return false; }
+}
+/** The approve/reject question a card asks (decisions.ts), unless an open rethink card replaces it. */
+const askOf = (t: Task) => (replaced(t) ? null : decisionRequest(t));
+/** The approve/reject question a card asks on the board, unless it waits on a user decision instead. fresh (the write
+ *  checks and POST /api/decisions, read from disk): the rethink card's state is only cached, so a replaced card still
+ *  asks there; it is left out of the lists only. */
+const boardDecision = (t: Task, fresh = false) => (liveAsk(t, fresh) ? null : fresh ? decisionRequest(t) : askOf(t));
 
 /** GET /api/asks: the open user decisions, newest first. */
 function asksDoc() {
@@ -991,7 +1006,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
       }
       const { version: v0, ...rest } = boardCache.body;
       const now = new Date();
-      const json = JSON.stringify({ version: v0, now: now.toISOString(), ...rest, projects: cfg.projects, stuck: stuckReport(board, now, cfg.stuck) });
+      const json = JSON.stringify({ version: v0, now: now.toISOString(), ...rest, projects: cfg.projects, stuck: stuckReport(board, now, cfg.stuck, replaced) });
       // Every open tab reads every task on each reload: gzip it for clients that accept it (browsers, fetch).
       if (/\bgzip\b/.test(String(req.headers['accept-encoding'] || ''))) {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding', 'Cache-Control': 'no-store', ...SECURITY_HEADERS });
@@ -1002,12 +1017,12 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
     if (p === '/api/decisions/today') return send(res, 200, decisionsToday(ROOT));
     if (p === '/api/tasks') return getTasks(req, res, url.searchParams);
     if (p === '/api/claims/dead') return deadClaims(res, url.searchParams);
-    if (p === '/api/stuck') return send(res, 200, stuckReport(board, new Date(), cfg.stuck));
+    if (p === '/api/stuck') return send(res, 200, stuckReport(board, new Date(), cfg.stuck, replaced));
     if (p === '/api/versions') return send(res, 200, versionRows(board));
     if (p === '/api/status' || p.startsWith('/api/status/')) {
       const now = new Date();
       // Only cards updated in the window can have closed in it, so the activity log is read for few cards.
-      const r = statusRoute(p, url.searchParams, { board, stuck: stuckReport(board, now, cfg.stuck), now, doneAt: (t) => { const ms = lastDone(t.id); return ms === null ? null : new Date(ms).toISOString(); } });
+      const r = statusRoute(p, url.searchParams, { board, stuck: stuckReport(board, now, cfg.stuck, replaced), now, doneAt: (t) => { const ms = lastDone(t.id); return ms === null ? null : new Date(ms).toISOString(); } });
       return send(res, r.status, r.body, r.type);
     }
     if (p === '/api/ready') {
