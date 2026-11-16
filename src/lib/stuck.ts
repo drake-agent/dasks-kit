@@ -23,8 +23,9 @@ interface Dependencies { depth: number; root: string; missing: string[]; cycle: 
 /** Read-only snapshot. Healthy open cards are omitted. Precedence: user, cycle (including its dependants), missing,
  * open dependency, then stale/idle. Closed dependencies end a chain. Old missing dependencies remain visible warnings
  * even after readyQueue stops treating them as blockers. Doing-stale age uses the latest start, claim or heartbeat;
- * other causes use updated, falling back to created. */
-export function stuckReport(board: Pick<Board, 'tasks'>, now = new Date(), opts: Partial<StuckConfig> = {}): StuckReport {
+ * other causes use updated, falling back to created. `replaced`: an open rethink card replaces the card
+ * (src/lib/rethink.ts replacedByRethink); such a card is not review-stale, the rethink card carries its work. */
+export function stuckReport(board: Pick<Board, 'tasks'>, now = new Date(), opts: Partial<StuckConfig> = {}, replaced: (t: Board['tasks'][number]) => boolean = () => false): StuckReport {
   const thresholds = { ...DEFAULT_STUCK, ...opts };
   const open = board.tasks.filter((t) => !CLOSED.has(t.status));
   const byId = new Map(board.tasks.map((t) => [t.id, t]));
@@ -70,7 +71,7 @@ export function stuckReport(board: Pick<Board, 'tasks'>, now = new Date(), opts:
     else if (t.status === 'doing' && doingAgeHours(t, now) > thresholds.doing_hours) {
       cause = { reason: 'doing-stale' }; age_hours = doingAgeHours(t, now);
     }
-    else if (t.status === 'review' && age_hours > thresholds.review_hours) cause = { reason: 'review-stale' };
+    else if (t.status === 'review' && age_hours > thresholds.review_hours && !replaced(t)) cause = { reason: 'review-stale' };
     else if (t.status === 'todo' && !t.claimed_by && age_hours > thresholds.ready_idle_hours) cause = { reason: 'ready-idle' };
     if (cause) items.push({ id: t.id, title: t.title, goal: t.goal, status: t.status, age_hours, ...cause });
   }

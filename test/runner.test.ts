@@ -452,9 +452,11 @@ esac
 const FAKE_GH = `#!/bin/bash
 printf '%s\\n' "$*" >> "$FAKE_DIR/gh.args"
 case "$1 $2" in
-  "pr view") if [ -n "\${FAKE_PR_OPEN:-}" ]; then case "$*" in *body*) echo "From the last attempt" ;; *) echo "https://github.com/example/proj/pull/7" ;; esac; else exit 1; fi ;;
+  "pr view") case "$*" in *state,comments*) echo "{\\"state\\":\\"$(cat "$FAKE_DIR/prstate" 2>/dev/null || echo OPEN)\\",\\"comments\\":[]}"; exit 0 ;; esac
+    if [ -n "\${FAKE_PR_OPEN:-}" ]; then case "$*" in *body*) echo "From the last attempt" ;; *) echo "https://github.com/example/proj/pull/7" ;; esac; else exit 1; fi ;;
   "pr ready") [ -z "\${FAKE_UNDO_FAIL:-}" ] ;;
-  "pr edit") exit 0 ;;
+  "pr edit"|"pr comment") exit 0 ;;
+  "pr close") echo CLOSED > "$FAKE_DIR/prstate" ;;
   "pr list") case "\${FAKE_PRS:-0}" in fail) echo "HTTP 401: Bad credentials" >&2; exit 1 ;; *) echo "\${FAKE_PRS:-0}" ;; esac ;;
   "pr create") echo "Creating draft pull request"; echo "https://github.com/example/proj/pull/7" ;;
   *) exit 1 ;;
@@ -588,6 +590,59 @@ test('e2e: a [security] finding with no repro stays open after pass 2: no third 
     const msgs = (await (await fetch(`${w.url}/api/tasks/${w.card}/messages`)).json()).messages;
     assert.equal(msgs.filter((m: any) => m.to === 'user' && m.kind === 'heads-up' && /not clean after 2 passes/.test(m.text)).length, 1);
     assert.deepEqual(w.state().running, {}, 'the hand-back finished');
+  } finally { await w.stop(); }
+});
+
+test('e2e rethink: a card blocked at the limit gets a rethink card; once it is done the old PR closes, the old card is cancelled, its dependents move', async () => {
+  const w = await world({ FAKE_AGENT: 'success', FAKE_REVIEW: 'security' });
+  const write = (route: string, body: unknown) => fetch(`${w.url}${route}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Dasks-Actor': 'claude@testbox', Authorization: `Bearer ${w.token}` }, body: JSON.stringify(body) });
+  try {
+    const dep = await write('/api/tasks', { goal: 'beta', title: 'After the build', depends_on: w.card });
+    assert.equal(dep.status, 201, await dep.clone().text());
+    const depId = (await dep.json()).id;
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    const re = await w.get('beta.t-build-rethink-1');
+    assert.equal(re.status, 'todo', r.out);
+    assert.match(re.body, /^rethink: beta\.t-build$/m);
+    assert.match(re.body, /touches: src\/a/);
+    assert.doesNotMatch(re.body, /## Notes/, "the old run's notes stay on the old card");
+    assert.match(re.body, /R1 \[P2\] \[security\]/);
+        assert.deepEqual([re.lane, re.priority], ['claude', 'p1']);
+    const old = await w.get();
+    assert.equal(old.spec_state, 'blocked');
+    assert.match(old.body, /rethink card beta\.t-build-rethink-1 redoes this card/);
+    const msgs = (await (await fetch(`${w.url}/api/tasks/${w.card}/messages`)).json()).messages;
+    assert.ok(msgs.some((m: any) => /Rethink card beta\.t-build-rethink-1 takes it over/.test(m.text)), JSON.stringify(msgs));
+    // Not done yet: the old card and its PR stay.
+    fs.rmSync(path.join(w.fake, 'gh.args'));
+    await w.runner('--once');
+    assert.equal((await w.get()).status, 'review');
+    assert.doesNotMatch(w.read('gh.args'), /^pr close/m);
+    // Done: the next look closes the old PR (the branch stays), cancels the old card and moves its dependent.
+    const d = await write('/api/tasks/beta.t-build-rethink-1', { status: 'done', pr: 'https://github.com/example/proj/pull/8', result: 'built another way', expected_version: Number((await w.get('beta.t-build-rethink-1')).version) });
+    assert.equal(d.status, 200, await d.text());
+    const r2 = await w.runner('--once');
+    const gh = w.read('gh.args');
+    assert.match(gh, /^pr comment https:\/\/github\.com\/example\/proj\/pull\/7 --body Superseded by beta\.t-build-rethink-1/m, r2.out);
+    assert.match(gh, /^pr close https:\/\/github\.com\/example\/proj\/pull\/7$/m);
+    assert.doesNotMatch(gh, /delete-branch/);
+    const after = await w.get();
+    assert.equal(after.status, 'cancelled', r2.out);
+    assert.match(after.result, /^superseded by beta\.t-build-rethink-1/);
+    assert.equal((await w.get(depId)).depends_on, 'beta.t-build-rethink-1', r2.out);
+  } finally { await w.stop(); }
+});
+
+test('e2e rethink: runner.rethinks 0 files no rethink card and the message says it waits for you', async () => {
+  const w = await world({ FAKE_AGENT: 'success', FAKE_REVIEW: 'security' });
+  try {
+    w.config((c) => { c.runner.rethinks = 0; });
+    const r = await w.runner('--once');
+    assert.equal(r.status, 0, r.out);
+    assert.equal((await fetch(`${w.url}/api/tasks/beta.t-build-rethink-1`)).status, 404);
+    const msgs = (await (await fetch(`${w.url}/api/tasks/${w.card}/messages`)).json()).messages;
+    assert.ok(msgs.some((m: any) => /No rethink card: rethinks are off/.test(m.text)), JSON.stringify(msgs));
   } finally { await w.stop(); }
 });
 
@@ -1047,6 +1102,11 @@ test('board: an exclusive claim is refused while a card with overlapping touches
     assert.equal(refused.body.rule, 'touches');
     assert.equal(refused.body.with, 'beta.t-other');
     assert.equal((await call('/api/tasks/beta.t-build/claim', { who: 'runner@one' }, 'runner@one')).status, 200, 'a plain claim is not checked');
+    // an exclusive claim that is free names the doing cards beside it, for the runner's code map warning
+    assert.equal((await call('/api/tasks', { id: 'beta.t-near', goal: 'beta', title: 'Near', milestone: 'beta.m1', lane: 'claude', body: 'touches: lib/n.ts\n' }, 'claude-code@testbox')).status, 201);
+    const near = await call('/api/tasks/beta.t-near/claim', { who: 'runner@three', exclusive_touches: true }, 'runner@three');
+    assert.equal(near.status, 200, JSON.stringify(near.body));
+    assert.deepEqual(near.body.beside.find((b: any) => b.id === 'beta.t-other'), { id: 'beta.t-other', touches: ['src/a/x.ts'] });
   } finally { await w.stop(); }
 });
 

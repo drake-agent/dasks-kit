@@ -61,6 +61,15 @@ spec and notes on the board, nothing else: no branch, no commit, no push, no PR.
 - **One harness** on a Mac (or both mapped to one family by `config.json` `families`): the runner drafts with what it
   has and leaves the spec as draft, with a note that it needs a reviewer of the other family. It does not draft it again.
 
+## How long a spec is
+
+A spec says what to build, why, and how anyone can tell it is done: the goal, the done check, the tests that prove it
+and the real constraints. It never says how to build it (no file-by-file plan, no step list, no code to paste): the
+builder reads the code and decides. `PUT /spec` refuses (422) a spec over 1,500 words (runs of non-whitespace), with a
+reason that says what to cut; the 262,144-byte cap (413) stays as well. The cap is checked on write only: a spec stored
+over it before this rule stays readable, and still takes a write that does not make it longer or that changes only its
+`auto-ok` header lines (your answer to an ask). An auto-ok-only write is never refused for length.
+
 ## The often × bad rule
 
 Every open question gets two scores from 1 to 10: how often a builder would hit it, and how bad a wrong guess would be.

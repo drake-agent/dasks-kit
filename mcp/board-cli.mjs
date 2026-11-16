@@ -17,6 +17,8 @@ const USAGE = `%P — Dasks board CLI (alias: gb).
   %P update <id> [--status S] [--note TEXT] [--what ..] [--why ..] [--do ..] [--rec ..] [--after ..]
                  [--pr URL] [--pr-summary ..] [--needs-user ..] [--title ..] [--title-ko ..] [--title-en ..] [--deps id,id|""] [--secrets label,label|""] [--version N]
   %P stuck                                stuck reasons, ages and top blockers (read-only)
+  %P status [app]                          where each project stands, or one project: counts, in progress, blocked
+                                             and on whom, done lately, version progress (read-only)
   %P ready [--app A] [--limit N] [--all]     spec-ready todo tasks: the user's pushes first (★), then most-unblocking
                                              (depends_on); --all also lists cards whose spec is not ready
   %P intake [--app A]                       todo counts by goal, creator, id family and spec state (read-only)
@@ -150,6 +152,8 @@ async function main() {
         `Stuck: ${r.total} (${Object.entries(r.counts).map(([reason, n]) => `${reason} ${n}`).join(', ')})`,
         ...r.items.map((t) => `${t.reason}  ${t.age_hours.toFixed(1)}h  ${t.id}  ${t.title}${t.root_blocker ? `  waits on ${t.root_blocker}` : ''}${t.missing?.length ? `  missing ${t.missing.join(', ')}` : ''}`),
       ].join('\n'));
+    case 'status':
+      return opt.json ? show(await board.status({ app: args[0], json: true })) : process.stdout.write(await board.status({ app: args[0] }));
     case 'ready':
       return show(await board.ready({ app: opt.app, limit: opt.limit, all: opt.all }), (r) => [
         ...(r.ready.length ? r.ready.map((t) => `${String(t.unblocks).padStart(3)} unblocks  ${t.priority} ${t.id}  ${t.title}${t.push_note ? `  ${t.push_note}` : ''}${t.missing_ignored?.length ? `  missing ignored: ${t.missing_ignored.join(', ')}` : ''}`) : ['(nothing ready)']),

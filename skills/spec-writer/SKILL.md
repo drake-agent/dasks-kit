@@ -43,6 +43,9 @@ the exact version. You are the drafter. Write the spec so that review finds noth
    Sections: `## Background` (what the code does today, with file references), `## Why`, `## Scope`, `## Non-goals`,
    `## Files likely touched`, `## Context pack`, `## Acceptance tests` (name, setup, action, expected result; each one
    fails on today's code), `## Tests`, `## Done criteria` (a list), `## Open questions`.
+   Write what to build, why, and how anyone can tell it is done; never how to build it: no file-by-file plan, no step
+   list, no code to paste. The builder reads the code and decides. Keep the whole spec under 1,500 words: the board
+   refuses a longer one (422).
 5. **Score open questions** as `- [Q] often=<1-10> bad=<1-10> kind=<security|data-loss|approval|what|where|done|other>
    <question>`. Often = how often a builder would hit it; bad = how bad a wrong guess is.
    - Security, data-loss and approval questions **always block**, whatever the score: ask the user.
@@ -63,7 +66,8 @@ the exact version. You are the drafter. Write the spec so that review finds noth
 - pass checks that cannot fail; a `done_when` nobody can check, or `done_at: pr` for a change that only shows once it is
   live;
 - scope or non-goals left unstated; hidden dependencies (other cards, migrations, secrets, services, data formats);
-- blocking questions left as assumptions.
+- blocking questions left as assumptions;
+- a how-to-build plan in place of what and why.
 
 P0/P1 findings or a blocking question leave the spec in draft with the findings in a card note; a clean review makes it
 ready.

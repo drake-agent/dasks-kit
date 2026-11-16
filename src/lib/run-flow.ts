@@ -17,6 +17,10 @@ import { humanStepLine, humanStepsOf, mergeHumanSteps } from './human-steps.ts';
 import { closeRepoView, openRepoView, repoSource, specLoop, TOOL_NAME as SPEC_TOOL_NAME, type AgentRun } from './spec-flow.ts';
 import { originRef, pickStart, pushableBranch, saveWork } from './keep-work.ts';
 import { SPEC_RETRIES, type SpecPicked } from './runner.ts';
+import { fileRethink, limitNote } from './rethink.ts';
+import { lockTouches, prFilesRoute, SHA_RE } from './touches-actual.ts';
+import { claimWarnings } from './codemap/overlap.ts';
+import type { MapView } from './codemap/map.ts';
 
 export class BoardError extends Error {
   status: number; body: any;
@@ -45,6 +49,10 @@ export interface FlowEnv {
   track: (card: string, agent: Supervised | null) => void;
   /** How often a running card's worktree is checked for changes (ms). */
   activityMs?: number;
+  /** runner.rethinks: rethink cards one line of cards may get at the review limit (0 = off; unset = 0). */
+  rethinks?: number;
+  /** The code map of a clone (null = none yet): a claimed card one import from a doing card gets a warning. */
+  codemap?: (repo: string) => MapView | null;
 }
 
 const TOOL_NAME: Record<Tool, string> = { claude: 'Claude', codex: 'Codex' };
@@ -126,8 +134,9 @@ export async function settle(env: FlowEnv, card: string, r: RunRecord, reason: s
   return true;
 }
 
-/** Not clean after the last pass: Spec block with the open findings and a message to the user. Safe to repeat: a card
- *  already blocked is left as it is, and the message has one request id per run. */
+/** Not clean after the last pass: Spec block with the open findings, a rethink card (src/lib/rethink.ts) and a message
+ *  to the user. Safe to repeat: a card already blocked is left as it is, a rethink card already made is found again, and
+ *  the message has one request id per run. */
 async function blockAtLimit(env: FlowEnv, card: string, r: RunRecord, pr: string, open: string[]): Promise<void> {
   const findings = oneLine(open.join(' | '), 800);
   const t = await env.api('GET', `/api/tasks/${card}?log=0`);
@@ -136,11 +145,15 @@ async function blockAtLimit(env: FlowEnv, card: string, r: RunRecord, pr: string
     try { sp = await env.api('GET', `/api/tasks/${card}/spec`); } catch (e: any) { if (!(e instanceof BoardError) || e.status !== 404) throw e; }
     await env.api('POST', `/api/tasks/${card}/spec/block`, {
       expected_version: Number(t?.version ?? 0), expected_spec_version: Number(sp?.metadata?.version ?? 0),
-      block_note: oneLine(`NEEDS-SPEC (${env.actor}): not clean after ${REVIEW_PASSES} review passes: ${findings}`, 1000),
+      block_note: oneLine(limitNote(env.actor, REVIEW_PASSES, findings), 1000),
     });
   }
+  const re = await fileRethink(env, card, pr, open, env.rethinks ?? 0);
+  if (re.fresh) await env.api('POST', `/api/tasks/${card}`, { note: `runner: rethink card ${re.id} redoes this card with a changed approach. When it is done, ${pr} is closed (branch kept) and this card is cancelled as superseded.` });
+  env.log(`${card}: ${re.id ? `rethink card ${re.id}` : `no rethink card: ${re.why}`}`);
+  const next = re.id ? `Rethink card ${re.id} takes it over with a changed approach.` : `No rethink card: ${re.why}; it waits for you.`;
   await env.api('POST', `/api/tasks/${card}/messages`, {
-    text: oneLine(`Review of ${card} is not clean after ${REVIEW_PASSES} passes; ${pr} stays a draft and the card is blocked. Open: ${findings}`, 1000),
+    text: oneLine(`Review of ${card} is not clean after ${REVIEW_PASSES} passes; ${pr} stays a draft and the card is blocked. ${next} Open: ${findings}`, 1000),
     to: 'user', kind: 'heads-up', request_id: `review-limit-${r.run_id}`.slice(0, 64),
   });
 }
@@ -165,7 +178,7 @@ export async function handBack(env: FlowEnv, card: string, r: RunRecord, pr: str
       summary: [`Runner build by ${tool}: ${summary}`, `Review: ${oneLine(reviewNote, 190)}`, `Draft PR: ${pr}`, ...(left ? [`Not done: ${skipped.length} skipped step(s) wait for you`] : [])].join('\n'),
       what: `A draft PR for this card is open: ${title}`,
       why: `The runner built the card with ${tool}; ${oneLine(reviewNote, 200)}`,
-      do: blocked ? 'Read the open findings in the PR body, fix the spec or the design, then unblock the card' : `${left}Read the PR and its checks; merge it or ask for changes`,
+      do: blocked && (env.rethinks ?? 0) > 0 ? `Nothing while a rethink card takes it over (the runner's message on this card names it); with none, read the open findings in the PR body, fix the spec or the design, then unblock the card` : blocked ? 'Read the open findings in the PR body, fix the spec or the design, then unblock the card' : `${left}Read the PR and its checks; merge it or ask for changes`,
       rec: blocked ? `Do not merge: the review is not clean after ${REVIEW_PASSES} passes and gets no third pass` : open.length ? 'Check the findings listed in the PR body before merging' : 'Merge when the checks are green and the diff looks right',
       after: `After the merge, mark the card done (dask done ${card} --pr <url>)`,
     });
@@ -175,6 +188,7 @@ export async function handBack(env: FlowEnv, card: string, r: RunRecord, pr: str
     history(env, card, r, 'error', `board: ${e.message}`, pr);
     return true;
   }
+  await recordPrFiles(env, card, pr);
   if (blocked) {
     try { await blockAtLimit(env, card, r, pr, open); } catch (e: any) {
       if (!(e instanceof BoardError) || e.status >= 500) { env.log(`${card}: blocking at the review limit failed (${e.message}); will retry`); return false; }
@@ -190,6 +204,33 @@ export async function handBack(env: FlowEnv, card: string, r: RunRecord, pr: str
   env.log(`${card}: draft PR ${pr}; card moved to review`);
   history(env, card, r, 'review', summary, pr);
   return true;
+}
+
+/** Store the PR head's real file list on the card (touches_actual + touches_sha, docs/cards.md "touches"), so the board's
+ *  claim check holds the files the PR really changes when the card is worked again. Best effort: when GitHub cannot
+ *  say, the head moves while it is read, or the board refuses, the card keeps its planned `touches:` and the run goes on. */
+export async function recordPrFiles(env: Pick<FlowEnv, 'api' | 'log'>, card: string, pr: string): Promise<void> {
+  const route = prFilesRoute(pr);
+  if (!route) return;
+  const head = () => {
+    const v = spawnSync('gh', ['pr', 'view', pr, '--json', 'headRefOid,changedFiles'], { encoding: 'utf8', timeout: 60_000 });
+    try { const j = JSON.parse(v.stdout); return v.status === 0 ? { sha: String(j.headRefOid).toLowerCase(), count: Number(j.changedFiles) } : null; } catch { return null; }
+  };
+  const before = head();
+  // A rename changes two paths: its new name and the one it had.
+  const list = spawnSync('gh', ['api', '--paginate', route, '--jq', '.[] | .filename + "\\t" + (.previous_filename // "")'], { encoding: 'utf8', timeout: 120_000 });
+  const after = head();
+  const rows = list.status === 0 ? list.stdout.split('\n').filter(Boolean) : [];
+  const why = !before || list.status !== 0 ? 'GitHub did not answer' : !SHA_RE.test(before.sha) || before.sha !== after?.sha ? 'the head moved while it was read' : rows.length !== before.count ? `${rows.length} of ${before.count} files listed` : '';
+  if (why) {
+    // A list from an older head no longer says what the PR changes: drop it, so the planned line holds.
+    env.log(`${card}: ${pr} file list not stored (${why}); its touches line holds`);
+    try { await env.api('POST', `/api/tasks/${card}`, { touches_actual: '' }); } catch (e: any) { env.log(`${card}: the old file list was not cleared (${e.message})`); }
+    return;
+  }
+  try {
+    await env.api('POST', `/api/tasks/${card}`, { touches_actual: rows.flatMap((r) => r.split('\t')).filter(Boolean), touches_sha: before!.sha });
+  } catch (e: any) { env.log(`${card}: ${pr} file list not stored (${e.message}); its touches line holds`); }
 }
 
 /** The review passes stored for a card, oldest first; null when the board cannot say, so no pass may start. */
@@ -331,6 +372,11 @@ export async function runCard(env: FlowEnv, p: Picked, cfg: RunnerConfig, title:
   // Saved before anything else can fail: a runner that dies from here on leaves a record to give the card back.
   env.update((s) => { s.running[card] = r; countStart(s, t0, 1); });
   env.log(`${card}: claimed as ${env.actor} (run ${r.run_id}, attempt ${r.attempt}); ${tool} builds in ${dir}; log ${logFile}`);
+  // Code map (docs/runner.md): a log line and a card note, never a hold; the note is not awaited and may fail.
+  let near: string[] = [];
+  try { near = claimWarnings(card, lockTouches(claimed ?? {}, p.touches), claimed?.beside, env.codemap?.(repo) ?? null); } catch (e: any) { env.log(`${card}: code map not read (${oneLine(e?.message ?? e, 120)})`); }
+  for (const w of near) env.log(w);
+  if (near.length) void env.api('POST', `/api/tasks/${card}`, { note: `code map: ${near.map((w) => w.replace(/^warning: \S+ is /, '')).join('; ')}. Both keep running; check each other's changes at review.` }).catch(() => {});
   const save = (patch: Partial<RunRecord>) => { Object.assign(r, patch); env.update((s) => { if (s.running[card]) Object.assign(s.running[card], patch); }); };
 
   let resume = '';
