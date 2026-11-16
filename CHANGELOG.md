@@ -7,6 +7,49 @@
   the board approved. A merge with no pin, a short or other sha, two different pins, `gh pr merge --auto` or
   `gh api --input` is refused, and so is any `$`, glob or brace in a merge command; the reason names the head and the
   flag to add. `dask merge` already pins its merges.
+
+## 1.1.1 — 2026-11-16
+
+- Rethink cards: while a rethink card is open (not done, not cancelled), the card it replaces no longer asks you for a
+  decision. A card in review that is blocked at the review limit and named by an open card's `rethink:` line gets no
+  `decision_request` on `/api/board` or `/api/tasks/<card>` (so no approve/reject on its panel), leaves the review
+  triage page, lists no skipped steps in the daily summary and is not `review-stale` in `/api/stuck`, project status or
+  the digest. The board's write checks still treat it as asking. It still asks as before when it has `needs_user` or `approvals` set, when the rethink card is done or
+  cancelled, when it is no longer blocked at the limit, and when the board cannot read the facts it needs. See
+  docs/runner.md.
+
+## 1.1.0 — 2026-11-16
+
+- Needs a Node release with its October security fixes: 22.23.4+, 24.22.1+ or 26.12.1+. The installer refuses an
+  older or pre-release Node, and the board warns when it runs on one. Upgrade Node before you pull this version.
+- Specs: `PUT /spec` refuses (422) a spec over 1,500 words, with a reason that says what to cut. A spec says what to
+  build, why and how to tell it is done, never how to build it; the spec writer prompt and the `spec-writer` skill say
+  so. Specs stored over the cap before this stay readable and still take shorter or auto-ok-only writes. See
+  docs/specs.md.
+- Runner: the build prompt tells the agent to read the code around the change before a feature, reproduce a bug before
+  fixing it, and that a quick throwaway prototype is fine when the approach is unclear. The `dasks` skill says the same.
+  See docs/runner.md.
+- Project status: `GET /api/status` (every project) and `GET /api/status/<app>` (one) say where a project stands: cards
+  per status, what is in progress, what is blocked and on whom, what finished in the last 7 days, and the version's
+  progress when version mode is on. `?format=text` gives plain text. The same answer is MCP `project_status` and
+  `dasks status [app]`. Read-only. See docs/api.md.
+- Runner: a card whose review is not clean after pass 2 no longer just waits. The runner files a rethink card
+  (`<card>-rethink-1`, its body starting `rethink: <card>`) with the open findings and the old card's text, asking to
+  re-check the design and change the approach; as a new card it gets its own 2 review passes. A rethink card stopped at
+  the limit gets the next one, up to `runner.rethinks` (default 3, `0` = off) in one line of cards; then the card waits
+  for you. When the rethink card is done, a later look cancels the old card (and any card above it in the line still at
+  the limit) as `superseded by <rethink card>`, comments on and closes its PR (the branch is kept) and moves cards that
+  waited on it to the rethink card. See docs/runner.md.
+- Touches from the real PR: after the runner opens or updates a card's PR, it stores the files the PR head changes on
+  the task (`touches_actual`, with the head commit in `touches_sha`). When the card is worked again, the board's claim
+  check holds those files instead of the planned `touches:` line, so a card no longer blocks paths it never changed.
+  The list is capped (a long one is shortened to folders), never counts toward the size limit, and is cleared by a new
+  PR link. GitHub PRs only; when the list cannot be read, the `touches:` line holds as before. See docs/cards.md.
+- Runner: a code map. Each project clone gets a map of which file imports which (TS/JS, Python, Rust, SwiftPM), built
+  from the git tree at `origin/main` in the background, with no model and within file, byte and time limits. When a
+  claimed card changes a file one import away from a file another card in the same repo is changing, the runner logs a
+  warning and writes one note on the card. It is only a warning: nothing is held. The board's exclusive claim reply now
+  lists those other cards (`beside`). See docs/runner.md "Code map".
 - Code review rule: at most 2 passes per PR. Pass 1 reviews the whole change; pass 2 only re-checks pass-1 findings and
   regressions from the fixes; the board and `dask review-record` refuse a third pass (older stored pass-3 rows stay
   readable). A finding blocks only if it carries a repro (a `repro:` line with the command or input and the wrong

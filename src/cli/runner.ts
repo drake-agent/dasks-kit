@@ -14,6 +14,7 @@ import path from 'node:path';
 import { boardRoot, configFile } from '../lib/config.ts';
 import { authHeader, boardUrl, dasksHome, machineName } from '../lib/connection.mjs';
 import { cardTouches, countAllOpenPrs, emptyState, pickCards, pickSpecCards, prHolds, projectRepos, runnerConfig, startedToday, type Candidate, type PrCount, type RunnerConfig, type RunnerState, type SpecCandidate, type Tool } from '../lib/runner.ts';
+import { closeSuperseded, ghIo } from '../lib/rethink.ts';
 import { BoardError, handBack, runCard, runSpecCard, settle, type FlowEnv, type SpecRunEnv } from '../lib/run-flow.ts';
 import { familyOf } from '../lib/spec-state.ts';
 import { cardHash, specCacheDir, specViewsDir } from '../lib/spec-flow.ts';
@@ -21,6 +22,7 @@ import { endGroup, type Supervised } from '../lib/supervise.ts';
 import { secretGate } from '../lib/secret-gate.ts';
 import { versionHolds } from '../lib/version-mode.ts';
 import { applyUpdate, mayUpdate, planUpdate } from '../lib/self-update.ts';
+import { codemapCache } from '../lib/codemap/map.ts';
 import { execFileSync, spawn } from 'node:child_process';
 
 const KIT = path.resolve(import.meta.dirname, '../..');
@@ -32,6 +34,8 @@ const BOARD_TIMEOUT_MS = Number(process.env.DASKS_RUNNER_BOARD_TIMEOUT_MS) || 60
 const ROOT = boardRoot();
 
 const log = (line: string) => console.log(`${new Date().toISOString()} ${line}`);
+/** Each project clone's import map at its default branch (docs/runner.md "Code map"), kept in ~/.dasks/runner/codemap/. */
+const codemap = codemapCache(path.join(STATE_DIR, 'codemap'), log);
 const oneLine = (s: string, n = 300) => { const t = String(s ?? '').replace(/\s+/g, ' ').trim(); return t.length <= n ? t : t.slice(0, n - 1) + '…'; };
 
 function runnerConfigFile(): string {
@@ -147,6 +151,8 @@ function flowEnv(cfg: RunnerConfig): FlowEnv {
     activityMs: Number(process.env.DASKS_RUNNER_ACTIVITY_MS || 30_000),
     stopping: () => stopping,
     track: (card, agent) => { if (agent) active.set(card, agent); else active.delete(card); },
+    rethinks: cfg.rethinks,
+    codemap: (repo) => codemap.view(repo),
   };
 }
 
@@ -180,6 +186,17 @@ async function retryPending(env: FlowEnv): Promise<void> {
   }
 }
 
+/** Done rethink cards close their old card (src/lib/rethink.ts). A line is logged once until it changes; a failed read
+ *  only skips this look. */
+const closeSaid = new Set<string>();
+const rethinksFinished = new Set<string>();
+async function supersede(env: FlowEnv): Promise<void> {
+  let lines: string[];
+  try { lines = await closeSuperseded(env, ghIo(which('gh')), rethinksFinished); } catch (e: any) { lines = [`rethink close pass skipped (${oneLine(e.message, 200)})`]; }
+  for (const l of lines) if (!closeSaid.has(l)) log(l);
+  closeSaid.clear(); for (const l of lines) closeSaid.add(l);
+}
+
 /** PR-first: count the open PRs of each repo that has a card to start; a repo over runner.pr_limit is held. A count that
  *  fails (no gh, not logged in, no GitHub remote) holds nothing; it is logged once until the reason changes. */
 const prSaid = new Map<string, string>();
@@ -210,7 +227,9 @@ async function look(): Promise<void> {
   holdSaid = '';
   if (!cfg.enabled) { if (!disabledSaid) log('runner is off (config.json runner.enabled is false); nothing to do'); disabledSaid = true; return; }
   disabledSaid = false;
+  if (cfg.rethinks > 0) await supersede(env);
   const repos = projectRepos(doc);
+  void codemap.refresh([...new Set(repos.values())].filter((r) => fs.existsSync(path.join(r, '.git'))));   // background, never awaited
   // The whole queue (open, unclaimed, deps done): ready specs are built, the rest may get a spec (runner.spec).
   const queue: any[] = (await env.api('GET', '/api/ready?all=1')).ready ?? [];
   const ready = queue.filter((r) => r.spec_state === 'ready');

@@ -165,6 +165,8 @@ export function client({ url = boardUrl(), actor = envActor(), token = boardToke
     },
     /** Unblocked todo tasks ranked by how many tasks they unblock: {ready, blocked, cycles}. */
     stuck: () => req('GET', '/api/stuck'),
+    /** Where each project stands (no app) or one project: text unless f.json. */
+    status: (f = {}) => req('GET', `/api/status${f.app ? `/${enc(f.app)}` : ''}` + qs({ format: f.json ? undefined : 'text' })),
     /** One-call loop start (text lines): rules, unread messages, mine, ready, review. rules:false skips the rules; peek leaves messages unread. */
     start(f = {}) {
       // An explicitly empty DASKS_ROLES is sent as roles= (no roles), not left out (the server's default role list).

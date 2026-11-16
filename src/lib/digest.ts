@@ -6,6 +6,7 @@ import YAML from 'yaml';
 import { loadBoard, parseFrontmatter } from './load.ts';
 import { loadConfig } from './config.ts';
 import { stuckReport, STUCK_REASONS } from './stuck.ts';
+import { replacedOnBoard } from './rethink.ts';
 import { commitFiles, git, GIT_BOUND, isoLocal, withRepoLock } from './write.ts';
 
 export interface DigestLine { app: string; ts: string; text: string }
@@ -134,7 +135,8 @@ export function formatDigest(lines: DigestLine[], header: string): string {
 }
 
 function stuckDigest(root: string, now: Date): string {
-  const r = stuckReport(loadBoard(root), now, loadConfig(root).stuck);
+  const board = loadBoard(root);
+  const r = stuckReport(board, now, loadConfig(root).stuck, replacedOnBoard(board.tasks));
   return `Stuck: ${r.total} (${STUCK_REASONS.map((reason) => `${reason} ${r.counts[reason]}`).join(', ')})\n`
     + r.unblockers.map((t) => `- Unblock ${t.id}: ${short(t.title.replace(/[\r\n]/g, ' '))} (${t.unblocks} dependants)\n`).join('');
 }
