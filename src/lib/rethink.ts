@@ -36,6 +36,34 @@ export function rethinkId(card: string, gen: number): string {
   return `${goal}.t-${root || 'card'}${tail}`;
 }
 
+/** The Spec block note the runner writes on a card at the review limit (run-flow.ts blockAtLimit), and its test. */
+export const limitNote = (actor: string, passes: number, findings: string) => `NEEDS-SPEC (${actor}): not clean after ${passes} review passes: ${findings}`;
+const LIMIT_NOTE = /^NEEDS-SPEC \([^)]*\): not clean after \d+ review passes/;
+
+/** The cards an open rethink card replaces: every card a `rethink:` line names, read from cards neither done nor
+ *  cancelled (a card naming itself does not count). null when the tasks could not be read. */
+export function openRethinkTargets(tasks: readonly { id: string; status: string; body?: string | null }[] | null | undefined): Set<string> | null {
+  if (!Array.isArray(tasks)) return null;
+  const out = new Set<string>();
+  for (const r of tasks) {
+    if (r.status === 'done' || r.status === 'cancelled') continue;
+    const b = rethinkOf(r.body);
+    if (b && b !== r.id) out.add(b);
+  }
+  return out;
+}
+
+/** Does an open rethink card replace this card, so it asks the user nothing? Only a card in review, Spec-blocked at the
+ *  review limit as committed (`spec`: its committed spec_state and block_note), that an open card's `rethink:` line
+ *  names. It still asks when the card names a user gate (needs_user, approvals), when the rethink card is done or
+ *  cancelled (`targets` then lacks it), and when anything could not be read (null targets, no spec facts). */
+export function replacedByRethink(t: { id: string; status: string; needs_user?: string | null; approvals?: string | null },
+  spec: { spec_state?: unknown; fields?: Record<string, unknown> } | null | undefined, targets: Set<string> | null): boolean {
+  if (t.status !== 'review' || !targets?.has(t.id) || !spec) return false;
+  if (String(t.needs_user ?? '').trim() || (t.approvals && t.approvals !== 'none')) return false;
+  return spec.spec_state === 'blocked' && LIMIT_NOTE.test(String(spec.fields?.block_note ?? ''));
+}
+
 /** The marker on the comment that closes an old PR, so a retry does not comment twice. */
 export const closeMarker = (r: string) => `<!-- dasks-runner: superseded-by ${r} -->`;
 

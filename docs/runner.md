@@ -153,6 +153,17 @@ gets at most `rethinks` of them (default 3); after that the message says the lin
 you, as before. `rethinks: 0` turns this off. A goal over its todo limit turns the rethink into an idea; the message
 says so.
 
+**While the rethink card is open** (any status but done or cancelled), the old card asks you nothing: the rethink card
+is already handling it. A card in review, blocked at the review limit (the runner's `NEEDS-SPEC (…): not clean after N
+review passes` block note, as committed) and named by an open card's `rethink:` line gets no `decision_request` on
+`/api/board` or `/api/tasks/<card>` (no approve/reject on its panel, and the board's "record the decision first" write
+check does not apply to it) and is left off the review triage page. It asks again, exactly as before, when:
+
+- it has `needs_user` or `approvals` set (someone asked you on purpose);
+- the rethink card is cancelled, or done (the close step above then finishes the old card);
+- it is no longer blocked at the limit (you unblocked it to rebuild it yourself), or it moved to `blocked-on-user`;
+- the board cannot read the tasks or the committed spec facts.
+
 **When the rethink card is done** (merged and marked done), a later look of any runner finishes the old card, and every
 card above it in the line that still waits at the limit:
 

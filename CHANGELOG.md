@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Rethink cards: while a rethink card is open (not done, not cancelled), the card it replaces no longer asks you for a
+  decision. A card in review that is blocked at the review limit and named by an open card's `rethink:` line gets no
+  `decision_request` on `/api/board` or `/api/tasks/<card>` (so no approve/reject on its panel) and leaves the review
+  triage page. It still asks as before when it has `needs_user` or `approvals` set, when the rethink card is done or
+  cancelled, when it is no longer blocked at the limit, and when the board cannot read the facts it needs. See
+  docs/runner.md.
+
 ## 1.1.0 — 2026-11-16
 
 - Needs a Node release with its October security fixes: 22.23.4+, 24.22.1+ or 26.12.1+. The installer refuses an
