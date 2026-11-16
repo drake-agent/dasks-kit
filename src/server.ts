@@ -1425,18 +1425,19 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
       opts.appendNote = note;
       if (actor === 'user') opts.statusGate = needsReceipt;
       opts.specGate = specIndexGuard(res); // updateTask calls it under the lock, after the task is read (claims only)
+      let beside: { id: string; touches: string[] }[] | undefined;   // claimed doing cards in the same repo (code map warnings)
       const t = withRepoLock(ROOT, () => {
         if (c[2] === 'finish') opts.appendNote = unparkWrite(id, fields, actor, note, `${result ?? ''} ${note ?? ''}`, opts);
         if (exclusive_touches === true) {
           const key = repoKey(readTask(ROOT, id).goal, cfg.projects);
           const peers = board.tasks.filter((t) => t.id !== id && repoKey(t.goal, cfg.projects) === key).map((t) => readTask(ROOT, t.id));
-          assertTouchesFree(ROOT, readTask(ROOT, id), peers, cfg.projects);
+          beside = assertTouchesFree(ROOT, readTask(ROOT, id), peers, cfg.projects);
         }
         return updateTask(ROOT, id, fields, actor, opts);
       });
       reloadAfterWrite();
       setWarningHeader(opts.warnings!, res);
-      return send(res, 200, { ...publicTask(t), warnings: opts.warnings });
+      return send(res, 200, { ...publicTask(t), warnings: opts.warnings, ...(beside ? { beside } : {}) });
     }
     if (/^\/api\/tasks\/[^/]+\/spec$/.test(p)) return send(res, 405, { error: `${req.method} is not allowed on a spec: GET reads it, PUT stores a new version` });
     const m = /^\/api\/tasks\/([^/]+)$/.exec(p);

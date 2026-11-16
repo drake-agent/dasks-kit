@@ -34,7 +34,7 @@ carry `Authorization: Bearer <token>` (see [auth.md](auth.md)). The MCP server a
 |---|---|
 | `POST /api/tasks` | create a card (`goal`, `title`, `milestone`, optional `id`, `body`, `lane`, `priority`, …) → 201 |
 | `POST /api/tasks/<id>` | update fields, add a `note`, set `now`; the context fields `what`/`why`/`do`/`rec`/`after`; `sweep: true` marks a board-tidying write (it never parks a card on the user); `job_end: <run_id>` is a job runner's close of that run (if the run's outcome already moved the card, the status is kept; a close for an older run never moves it); `touches_actual` / `touches_sha`, the PR's real files ([cards.md](cards.md#touches)) |
-| `POST /api/tasks/<id>/claim` | take the card (`who`, `force`, `exclusive_touches`); the reply carries `run_id` and `attempt` |
+| `POST /api/tasks/<id>/claim` | take the card (`who`, `force`, `exclusive_touches`); the reply carries `run_id` and `attempt`, and with `exclusive_touches` also `beside`: the other claimed doing cards in the same repo with their touches |
 | `POST /api/tasks/<id>/release` | give it back (`run_id`: only while the card is still on that run, else 409) |
 | `POST /api/tasks/<id>/finish` | `result`, `status` (`done`, `review`, `blocked-on-user`), `pr`, `pr_summary` |
 | `POST /api/tasks/<id>/outcome` | a run's outcome (`state`, `note`, `evidence`, `job`, `run_id`, `attempt`); a failed one counts toward the retry cap |

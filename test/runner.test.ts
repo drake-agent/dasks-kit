@@ -1102,6 +1102,11 @@ test('board: an exclusive claim is refused while a card with overlapping touches
     assert.equal(refused.body.rule, 'touches');
     assert.equal(refused.body.with, 'beta.t-other');
     assert.equal((await call('/api/tasks/beta.t-build/claim', { who: 'runner@one' }, 'runner@one')).status, 200, 'a plain claim is not checked');
+    // an exclusive claim that is free names the doing cards beside it, for the runner's code map warning
+    assert.equal((await call('/api/tasks', { id: 'beta.t-near', goal: 'beta', title: 'Near', milestone: 'beta.m1', lane: 'claude', body: 'touches: lib/n.ts\n' }, 'claude-code@testbox')).status, 201);
+    const near = await call('/api/tasks/beta.t-near/claim', { who: 'runner@three', exclusive_touches: true }, 'runner@three');
+    assert.equal(near.status, 200, JSON.stringify(near.body));
+    assert.deepEqual(near.body.beside.find((b: any) => b.id === 'beta.t-other'), { id: 'beta.t-other', touches: ['src/a/x.ts'] });
   } finally { await w.stop(); }
 });
 
