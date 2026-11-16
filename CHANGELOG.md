@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.1 — 2026-11-16
 
 - Rethink cards: while a rethink card is open (not done, not cancelled), the card it replaces no longer asks you for a
   decision. A card in review that is blocked at the review limit and named by an open card's `rethink:` line gets no
