@@ -5,17 +5,23 @@ the human user's signed merge OK for that PR's card at exactly the PR's head.
   dask-merge-gate        reads the hook JSON on stdin; exit 0 = allow (silent), exit 2 = refuse (reason on stderr)
   DASK_MERGE_GATE=0      turns it off
 
-What counts as a merge: `gh pr merge …` and `gh api …/pulls/<n>/merge`. Commands with no merge pass with no gh call.
-Fail closed: a merge command must be one plain command. Indirection (eval, source, `sh -c`, xargs, a variable as the
-command word) and compound commands (`;`, `&&`, `||`, `|`, `&`, subshells, newlines) are refused, since the gate checks
-exactly one PR and could not see what else would run. The PR is looked up in the repo the command names (`-R`/`--repo`,
-or the `repos/<owner>/<repo>/` of a `gh api` path), else the current one.
+What counts as a merge: `gh pr merge …` and `gh api …/pulls/<n>/merge`, decided on what bash will run, not on how the text
+looks. The command is split into simple commands and each word is decoded the way bash's quote removal does ('…', "…",
+backslashes, $'…' ANSI-C escapes), so `gh pr m""erge 12` and `gh pr m$'\\x65'rge 12` are checked like `gh pr merge 12`.
+A word the gate cannot know ($name, ${…}, $(…), backticks, $"…", globs, a bad quote or escape) is unreadable; a gh
+command, or a command word that looks like gh, with unreadable words in the wrong place is refused (fail closed).
+Fail closed: a merge command must be one plain command. Indirection (eval, source, `sh -c`, xargs, env, a variable as
+the command word), compound commands (`;`, `&&`, `||`, `|`, `&`, subshells, substitutions, newlines), redirects and
+NAME=value prefixes on a merge are refused, since the gate checks exactly one PR and could not see what else would run.
+Commands with no merge pass with no gh call; grep, egrep, fgrep, echo, cat, head, tail and wc on their own (with no
+substitution syntax) never count as a merge, whatever their arguments say. The PR is looked up in the repo the command
+names (`-R`/`--repo`, or the `repos/<owner>/<repo>/` of a `gh api` path), else the current one.
 How the user approves: the agent moves the card to blocked-on-user with needs_user starting `head <40-char sha> …`
 (`dasks update <card> --status blocked-on-user --needs-user "head <sha> merge PR #N? If approved, it merges." --what … --why … --do … --rec …
 --after …`); the user logs in on the board and taps approve. GET /api/merge-ok?card=&sha= then answers ok for that head
 only; a new push needs a new OK. The PR's card is its `human/<card>` or `dasks/<card>` branch, else a `<card>:` title
 prefix. Board URL: $DASKS_URL, else ~/.dasks/client.json."""
-import json, os, re, shlex, subprocess, sys, urllib.parse, urllib.request
+import json, os, re, subprocess, sys, urllib.parse, urllib.request
 
 def _client():
     home = os.environ.get("DASKS_HOME") or os.path.expanduser("~/.dasks")
@@ -33,9 +39,25 @@ if CA:
     urllib.request.install_opener(urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=CA))))
 CARD_RE = re.compile(r"[a-z][a-z0-9]{0,23}\.t-[a-z0-9]+(?:-[a-z0-9]+)*")
 MERGE_TEXT = re.compile(r"\bpr\b[\s\S]*\bmerge\b|pulls/\d+/merge|mergePullRequest|enablePullRequestAutoMerge", re.I)
+API_MERGE = re.compile(r"pulls/\d+/merge|mergePullRequest|enablePullRequestAutoMerge", re.I)
 INDIRECT = re.compile(r"\beval\b|\bsource\b|(^|[;&|]\s*)\.\s|\b(?:ba|z)?sh\s+-\w*c\b|\bxargs\b|\$\(|`|\$\{?[A-Za-z_]+\}?\s+pr\b")
 # `gh pr merge` options that take a value: the value is never the PR.
 VALUE_OPTS = {"-R", "--repo", "-b", "--body", "-F", "--body-file", "-t", "--subject", "-A", "--author-email", "--match-head-commit"}
+# Never a merge on their own, whatever their arguments say (printf is not here: `printf -v 'a[$(…)]'` runs code).
+READ_ONLY = {"grep", "egrep", "fgrep", "echo", "cat", "head", "tail", "wc"}
+SUBST_SYNTAX = ("$(", "${", "$[", "`", "<(", ">(")
+# Commands that run their arguments as a command: an unreadable word there may be the command word.
+# Commands that run a readable argument as shell code (R6), and builtins that evaluate subscripts or arithmetic in their
+# arguments, so a '…' there still runs its substitutions (R7): such words are read as commands too.
+SHELL_CODE = {"eval", "sh", "bash", "zsh", "dash", "ksh", "source", "."}
+EVAL_ARGS = {"let", "declare", "typeset", "local", "readonly", "export", "unset", "read", "printf", "test", "[", "[[",
+             "mapfile", "readarray"}
+WRAPPERS = {"env", "command", "exec", "builtin", "sudo", "doas", "nohup", "time", "timeout", "nice", "stdbuf", "xargs", "caffeinate"}
+ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=")
+SEPARATORS = (";;&", ";;", ";&", "&&", "||", "|&", "|", ";", "&")
+REDIRECTS = ("&>>", "&>", "<<<", "<<-", "<<", "<>", "<&", ">>", ">|", ">&", "<", ">")
+ANSI_C = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+          "\\": "\\", "'": "'", '"': '"', "?": "?"}
 
 def refuse(why):
     print("dask-merge-gate: refused: " + why, file=sys.stderr); sys.exit(2)
@@ -46,28 +68,338 @@ def gh(*args):
     if r.returncode != 0: refuse("gh %s failed: %s" % (" ".join(args[:3]), (r.stderr or r.stdout).strip()[:200]))
     return r.stdout
 
-def words_of(cmd):
-    """The command as words; refuses anything that is not exactly one simple command."""
-    if "\n" in cmd.strip() or "\r" in cmd: refuse("a merge must be one command on one line")
-    try:
-        lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
-        lex.whitespace_split = True
-        words = list(lex)
-    except ValueError: refuse("cannot parse the command")
-    if any(w and set(w) <= set(";&|()<>") for w in words):
-        refuse("a merge must be a single plain command (no ;, &&, ||, |, &, redirects or subshells): run `gh pr merge <n>` on its own")
-    return words
+# ---------- reading the command like bash ----------
 
-def target(cmd):
-    """(repo or '', PR selector or '') of the one merge in `cmd`."""
-    words = words_of(cmd)
-    if not words or os.path.basename(words[0]) != "gh": refuse("the merge must start with gh (no prefixes or wrappers)")
-    if len(words) > 1 and words[1] == "api":
+class Word:
+    """One shell word: its raw text and its value after quote removal, or None when the gate cannot know it."""
+    def __init__(self, raw, value): self.raw, self.value = raw, value
+
+class Simple:
+    """One simple command: its words (redirect targets left out) and what else bash would do around them."""
+    def __init__(self, nested):
+        self.words, self.redirect, self.cont, self.nested, self.start, self.raw = [], False, False, nested, None, ""
+
+class Parsed:
+    # broken: a quote, substitution or escape is not closed, so the gate cannot know where the next command starts
+    def __init__(self): self.cmds, self.compound, self.broken = [], False, False
+
+class Reader:
+    """Splits shell text into simple commands (on separators, newlines, subshells, substitutions) and decodes words."""
+    def __init__(self, src, out):
+        self.s, self.i, self.out, self.heredocs = src, 0, out, []
+
+    def commands(self, nested, stop, arith=False):
+        """Read simple commands up to the end, or up to the `)` that closes this level when `stop`. In arithmetic
+        (`((…))`, `$((…))`) `<<` is a shift, not a here-document."""
+        s, cmd, saw_case = self.s, Simple(nested), False
+        def finish():
+            nonlocal cmd
+            if cmd.words or cmd.redirect:
+                cmd.raw = s[cmd.start:self.i]
+                self.out.cmds.append(cmd)
+            cmd = Simple(nested)
+        while self.i < len(s):
+            c = s[self.i]
+            if c in " \t": self.i += 1; continue
+            if s.startswith("\\\n", self.i): cmd.cont = True; self.i += 2; continue
+            if c == "#" and not arith:  # in ((…)) a # is not a comment (R8)
+                j = s.find("\n", self.i); self.i = len(s) if j < 0 else j; continue
+            if c == "\n":
+                finish(); self.out.compound = True; self.i += 1; self.heredoc_bodies(); continue
+            if c == ")":
+                finish(); self.i += 1
+                if stop:
+                    if saw_case: self.out.broken = True  # a `pat)` of case: the gate cannot tell where this level ends
+                    return
+                self.out.compound = True; continue
+            if c == "(":
+                finish(); self.out.compound = True; self.i += 1
+                self.commands(nested, True, arith or s[self.i:self.i + 1] == "("); continue
+            if cmd.start is None: cmd.start = self.i
+            if s.startswith(("<(", ">("), self.i):
+                st = self.i; self.i += 2; self.out.compound = True; self.commands(True, True)
+                cmd.words.append(Word(s[st:self.i], None)); continue
+            op = next((o for o in REDIRECTS if s.startswith(o, self.i)), None)
+            if op:
+                cmd.redirect = True; self.i += len(op)
+                while self.i < len(s) and s[self.i] in " \t": self.i += 1
+                if self.i < len(s) and s[self.i] not in "\n;&|()<>":
+                    w = self.word(cmd, arith)  # in ((…)) a < is an operator: its operand is still arithmetic (R5)
+                    if op in ("<<", "<<-") and not arith:
+                        self.heredocs.append((w.value if w.value is not None else w.raw, op == "<<-", not any(q in w.raw for q in "'\"\\")))
+                continue
+            op = next((o for o in SEPARATORS if s.startswith(o, self.i)), None)
+            if op:
+                finish(); self.out.compound = True; self.i += len(op); continue
+            w = self.word(cmd, arith)
+            if w.raw.isdigit() and self.i < len(s) and s[self.i] in "<>": continue  # the fd number of a redirect
+            saw_case = saw_case or (not cmd.words and w.value == "case")  # the keyword, not an argument
+            cmd.words.append(w)
+        finish()
+        if stop: self.out.broken = True  # no closing `)`
+
+    def word(self, cmd, arith=False):
+        s, st, buf, ok = self.s, self.i, [], True
+        while self.i < len(s):
+            c = s[self.i]
+            if c in " \t\n;&|()<>": break
+            if c == "\\":
+                nx = s[self.i + 1:self.i + 2]
+                if nx == "\n": cmd.cont = True
+                else: buf.append(nx or "\\")
+                self.i += 2 if nx else 1; continue
+            if c == "'":
+                j = s.find("'", self.i + 1)
+                if j < 0: ok = False; self.i = len(s); self.out.broken = True; break
+                if arith: self.quoted_runs(s[self.i + 1:j]); ok = False  # in ((…)) a '…' does not stop a substitution
+                else: buf.append(s[self.i + 1:j])
+                self.i = j + 1; continue
+            if c == '"':
+                self.i += 1; v = self.dquote(cmd, '"')
+                if v is None: ok = False
+                else: buf.append(v)
+                continue
+            if c == "$":
+                nx = s[self.i + 1:self.i + 2]
+                if nx == "'" and arith:  # in arithmetic $'…' is not decoded and its substitutions still run (R5)
+                    self.i += 1; continue
+                if nx == "'":
+                    v = self.ansi_c()
+                    if v is None: ok = False
+                    else: buf.append(v)
+                elif nx == '"':  # $"…": bash may translate it through the locale, so the word cannot be known
+                    self.i += 2; self.dquote(cmd, '"'); ok = False
+                elif self.expansion(arith): ok = False  # arithmetic is read as if in "…"
+                else: buf.append("$"); self.i += 1
+                continue
+            if c == "`": self.backtick(); ok = False; continue
+            if c in "*?[{": ok = False  # glob or brace expansion
+            buf.append(c); self.i += 1
+        return Word(s[st:self.i], "".join(buf) if ok else None)
+
+    def dquote(self, cmd, term):
+        """Inside "…" (term '"') or an expanding here-document body (term None): the value, or None if unreadable."""
+        s, buf, ok = self.s, [], True
+        while self.i < len(s):
+            c = s[self.i]
+            if term and c == term:
+                self.i += 1; return "".join(buf) if ok else None
+            if c == "\\":
+                nx = s[self.i + 1:self.i + 2]
+                if nx == "\n":
+                    if cmd: cmd.cont = True
+                    self.i += 2; continue
+                if nx and nx in '$`"\\': buf.append(nx); self.i += 2; continue
+                buf.append("\\"); self.i += 1; continue
+            if c == "$":
+                if self.expansion(True): ok = False; continue
+                buf.append("$"); self.i += 1; continue
+            if c == "`": self.backtick(); ok = False; continue
+            buf.append(c); self.i += 1
+        if term: self.out.broken = True; return None
+        return "".join(buf) if ok else None
+
+    def expansion(self, dq=False):
+        """At a `$`: skip a parameter, command or arithmetic expansion (reading commands inside); False if `$` is literal.
+        `dq`: the `$` stands inside "…"."""
+        s, nx = self.s, self.s[self.i + 1:self.i + 2]
+        if nx == "(":
+            arith = s[self.i + 2:self.i + 3] == "("
+            self.i += 2; self.out.compound = True; self.commands(True, True, arith); return True
+        if nx == "{":
+            self.i += 2; self.braced("{", "}", dq); return True
+        if nx == "[":
+            self.i += 2; self.braced("[", "]", dq); return True
+        m = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-]").match(s, self.i + 1)
+        if m: self.i = m.end(); return True
+        return False
+
+    def quoted_runs(self, body):
+        """A '…' whose substitutions bash still runs (inside "${…}", $[…] or ((…))): read them as commands."""
+        if '"' in body: self.out.broken = True  # where a "…" ends depends on the bash version
+        Reader(body, self.out).dquote(None, None)
+
+    def braced(self, open_, close, dq):
+        """Inside ${…} or $[…]: find the end and read every substitution inside, process substitutions too. Outside "…"
+        a '…' in ${…} quotes (nothing in it runs); inside "…" or in $[…] bash pairs the quotes but still runs the
+        substitutions in them (R2), and a lone ' is plain text to some bash versions. A bare open bracket nests in some
+        versions and not in others: the text between the two possible ends must be plain, or the gate cannot know where
+        the next command starts (unreadable)."""
+        s, depth, first_end = self.s, 0, None
+        while self.i < len(s):
+            c = s[self.i]
+            if c == "\\": self.i += 2; continue
+            if c == '"': self.i += 1; self.dquote(None, '"'); continue
+            if c == "`": self.backtick(); continue
+            if c == "$" and self.expansion(dq or open_ == "["): continue
+            if not dq and s.startswith(("<(", ">("), self.i):  # inside "…" bash keeps <( as text (R4)
+                self.i += 2; self.out.compound = True; self.commands(True, True); continue
+            if c == "'":
+                j = s.find("'", self.i + 1)
+                if not dq and open_ == "{":
+                    if j < 0: self.out.broken = True; self.i = len(s); return
+                    self.i = j + 1; continue
+                if j < 0: self.i += 1; continue  # a lone ' inside "…": plain text, or bash stops with a syntax error
+                self.quoted_runs(s[self.i + 1:j])
+                self.i = j + 1; continue
+            if c == open_: depth += 1
+            elif c == close:
+                if not depth:
+                    if first_end is not None and any(x in s[first_end:self.i] for x in " \t\n;&|()<>'\"`$\\#"):
+                        self.out.broken = True
+                    self.i += 1; return
+                depth -= 1
+                if first_end is None: first_end = self.i + 1
+            self.i += 1
+        if first_end is not None: self.i = first_end; return  # it closes only where nesting is not counted
+        self.out.broken = True
+
+    def backtick(self):
+        s, j, buf = self.s, self.i + 1, []
+        while j < len(s) and s[j] != "`":
+            if s[j] == "\\" and s[j + 1:j + 2] in ("$", "`", "\\"): buf.append(s[j + 1]); j += 2; continue
+            buf.append(s[j]); j += 1
+        if j >= len(s): self.out.broken = True
+        self.i = min(j + 1, len(s)); self.out.compound = True
+        Reader("".join(buf), self.out).commands(True, False)
+
+    def ansi_c(self):
+        """At `$'`: the decoded text as bash 5 does it, or None for an escape the gate does not know (refusing beats
+        guessing), a NUL (bash cuts the word there) or a byte that is not ASCII. Like bash, the end of the quote is
+        found first (a backslash always takes the next character with it), then the text inside is decoded."""
+        s, j = self.s, self.i + 2
+        while j < len(s) and s[j] != "'": j += 2 if s[j] == "\\" else 1
+        if j >= len(s): self.i = len(s); self.out.broken = True; return None
+        body, self.i = s[self.i + 2:j], j + 1
+        buf, ok, i = [], True, 0
+        while i < len(body):
+            c = body[i]
+            if c != "\\": buf.append(c); i += 1; continue
+            e = body[i + 1:i + 2]; i += 2
+            if not e: ok = False; continue
+            code = None
+            if e in ANSI_C: buf.append(ANSI_C[e]); continue
+            if e in "01234567":
+                m = re.compile(r"[0-7]{1,3}").match(body, i - 1); i = m.end(); code = int(m.group(), 8)
+                if code > 0x7F: ok = False; continue
+            elif e in "xuU":
+                m = re.compile(r"[0-9a-fA-F]{1,%d}" % {"x": 2, "u": 4, "U": 8}[e]).match(body, i)
+                if not m: ok = False; continue
+                i = m.end(); code = int(m.group(), 16)
+                if e == "x" and code > 0x7F: ok = False; continue
+            elif e == "c":
+                x = body[i:i + 1]; i += 1
+                if not x or x in "\\?": ok = False; continue  # \c? differs between bash versions
+                code = ord(x.upper()) & 0x1F
+            else: ok = False; continue
+            if code == 0 or code > 0x10FFFF or 0xD800 <= code <= 0xDFFF: ok = False; continue
+            buf.append(chr(code))
+        return "".join(buf) if ok else None
+
+    def heredoc_bodies(self):
+        s = self.s
+        for delim, strip, expands in self.heredocs:
+            lines = []
+            while self.i < len(s):
+                j = s.find("\n", self.i); end = len(s) if j < 0 else j
+                line = s[self.i:end]; self.i = len(s) if j < 0 else j + 1
+                if (line.lstrip("\t") if strip else line) == delim: break
+                lines.append(line)
+            if expands: Reader("\n".join(lines), self.out).dquote(None, None)
+        self.heredocs = []
+
+def read(cmd):
+    out = Parsed()
+    Reader(cmd.rstrip(), out).commands(False, False)
+    i = 0
+    while i < len(out.cmds):  # out.cmds grows: code inside code is read too
+        ws = lead(out.cmds[i])[1]; i += 1
+        if not ws: continue
+        n = next((n for n, w in enumerate(ws) if name(w) in SHELL_CODE and (n == 0 or name(ws[0]) in WRAPPERS)), None)
+        if n is not None:
+            for w in ws[n + 1:]:
+                if w.value is not None: out.compound = True; Reader(w.value, out).commands(True, False)
+        elif name(ws[0]) in EVAL_ARGS:
+            for w in ws[1:]:
+                if w.value is not None and any(m in w.value for m in SUBST_SYNTAX):
+                    out.compound = True; Reader(w.value, out).dquote(None, None)
+    return out
+
+# ---------- deciding ----------
+
+def name(w): return os.path.basename(w.value) if w.value is not None else None
+
+def lead(c):
+    """(number of leading NAME=value words, the words from the command word on)."""
+    k = 0
+    while k < len(c.words) and ASSIGN.match(c.words[k].raw): k += 1
+    return k, c.words[k:]
+
+def gh_like(w): return w.value is None or w.value in ("pr", "api") or "merge" in w.value.lower() or "pulls/" in w.value
+
+def merge_text(c):
+    return bool(MERGE_TEXT.search(c.raw) or MERGE_TEXT.search(" ".join(w.value for w in c.words if w.value is not None)))
+
+def fail_closed(c):
+    """Refuse a simple command whose unreadable words could make it a merge the gate cannot check."""
+    words = lead(c)[1]
+    if not words: return
+    cw, rest = words[0], words[1:]
+    if cw.value is None:
+        if any(gh_like(w) for w in rest):
+            refuse("the command word is not readable (a $variable, glob or quote the gate cannot decode) and its words look like gh: spell gh out")
+        return
+    if name(cw) == "gh":
+        if any(w.value is None for w in rest[:2]):
+            refuse("gh with a word the gate cannot read ($variables, globs, $\"…\", escapes it cannot decode): spell the gh command out")
+        return
+    if name(cw) in READ_ONLY: return  # it never runs its words; its substitutions are judged as commands of their own
+    for n, w in enumerate(rest):
+        if name(w) == "gh" and any(x.value is None for x in rest[n + 1:]):
+            refuse("gh run through %s with a word the gate cannot read: run the gh command on its own, spelled out" % cw.value)
+    if name(cw) in WRAPPERS:
+        bad = [n for n, w in enumerate(rest) if w.value is None and not ASSIGN.match(w.raw)]
+        if bad and any(gh_like(w) for w in rest[bad[0] + 1:]):
+            refuse("%s runs a command word the gate cannot read with words that look like gh: spell gh out" % cw.value)
+
+def decide(cmd):
+    """The decoded words of the one merge in `cmd`, or None when `cmd` is not a merge. Refuses what it cannot check."""
+    p = read(cmd)
+    if p.broken: refuse("cannot read the command: a quote, substitution or escape is not closed")
+    for c in p.cmds: fail_closed(c)
+    if p.compound or len(p.cmds) > 1:
+        if MERGE_TEXT.search(cmd) or any(merge_text(c) for c in p.cmds):
+            if INDIRECT.search(cmd): refuse("the merge command uses indirection the gate cannot read; run a plain `gh pr merge <n>`")
+            refuse("a merge must be a single plain command (no ;, &&, ||, |, &, redirects or subshells): run `gh pr merge <n>` on its own")
+        return None
+    if not p.cmds: return None
+    c = p.cmds[0]
+    k, words = lead(c)
+    if words and name(words[0]) == "gh":
+        vals = [w.value for w in words[1:]]
+        if vals[:2] == ["pr", "merge"] or (vals[:1] == ["api"] and any(v is not None and API_MERGE.search(v) for v in vals[1:])):
+            if k: refuse("the merge must start with gh (no NAME=value prefixes: they can change which PR merges)")
+            if None in vals: refuse("a merge with a word the gate cannot read ($variables, globs, substitutions): name the PR literally")
+            if c.redirect: refuse("a merge must be a single plain command (no redirects): run `gh pr merge <n>` on its own")
+            if c.cont or "\r" in cmd: refuse("a merge must be one command on one line")
+            return [words[0].value, *vals]
+        if vals[:1] and vals[0] is not None and vals[0].startswith("-") and any(v is not None and ("merge" in v.lower() or MERGE_TEXT.search(v)) for v in vals[1:]):
+            refuse("gh options before the subcommand of a merge; run a plain `gh pr merge <n> [-R owner/repo]`")
+        if merge_text(c): refuse("a merge the gate cannot read; run a plain `gh pr merge <n> [-R owner/repo]`")
+        return None
+    if not k and words and name(words[0]) in READ_ONLY and not any(m in cmd for m in SUBST_SYNTAX): return None
+    if merge_text(c) or MERGE_TEXT.search(cmd):
+        if INDIRECT.search(cmd): refuse("the merge command uses indirection the gate cannot read; run a plain `gh pr merge <n>`")
+        refuse("the merge must start with gh (no prefixes or wrappers)")
+    return None
+
+def target(words):
+    """(repo or '', PR selector or '') of the merge `words` (gh pr merge … or gh api …/pulls/<n>/merge)."""
+    if words[1] == "api":
         path = next((w for w in words[2:] if "pulls/" in w), "")
         m = re.search(r"repos/([^/\s]+/[^/\s]+)/pulls/(\d+)/merge", path)
         if not m: refuse("a `gh api` merge the gate cannot read (use repos/<owner>/<repo>/pulls/<n>/merge or gh pr merge)")
         return m.group(1), m.group(2)
-    if words[1:3] != ["pr", "merge"]: refuse("a merge the gate cannot read; run a plain `gh pr merge <n> [-R owner/repo]`")
     repo, sel, i = "", "", 3
     while i < len(words):
         w = words[i]
@@ -90,9 +422,11 @@ def main():
     except Exception: return
     cmd = ((payload or {}).get("tool_input") or {}).get("command")
     if isinstance(cmd, list): cmd = " ".join(map(str, cmd))
-    if not isinstance(cmd, str) or not MERGE_TEXT.search(cmd) or "gh" not in cmd: return
-    if INDIRECT.search(cmd): refuse("the merge command uses indirection the gate cannot read; run a plain `gh pr merge <n>`")
-    repo, sel = target(cmd)
+    if not isinstance(cmd, str): return
+    try: words = decide(cmd)
+    except Exception as e: refuse("cannot read the command (%s)" % type(e).__name__)  # a crash would let it run
+    if not words: return
+    repo, sel = target(words)
     info = json.loads(gh("pr", "view", *([sel] if sel else []), *(["-R", repo] if repo else []), "--json", "headRefOid,headRefName,title,url"))
     branch, title, sha = info.get("headRefName") or "", info.get("title") or "", info.get("headRefOid") or ""
     m = re.fullmatch(r"(?:human|dasks)/(%s)" % CARD_RE.pattern, branch) or re.match(r"(%s):" % CARD_RE.pattern, title)

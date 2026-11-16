@@ -193,6 +193,103 @@ test('merge gate: the PR is looked up in the repo the command names (-R, gh api 
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('merge gate: a merge is decided from decoded shell words of each simple command', () => {
+  // Real case: an agent, or a prompt-injected command, spells a merge with quotes, backslashes or ANSI-C escapes
+  // ($'\x65') so the raw text no longer reads "merge"; bash still runs `gh pr merge 12`, so the gate must check it
+  // like the literal command. And an agent searching the repo for the merge text must not be stopped.
+  const pr = ['gh pr m""erge 12', 'gh pr mer\\ge 12', "gh pr 'mer'ge 12", 'gh pr "merge" 12', 'g""h pr merge 12', '\\gh pr merge 12',
+    "gh pr $'merge' 12", "gh pr m$'er'ge 12", "gh pr m$'\\x65'rge 12", "gh pr $'\\155erge' 12", "gh pr $'merge' 12"];
+  const api = ['gh api -X PUT repos/o/r/pulls/12/m""erge', 'gh api -X PUT repos/o/r/pulls/12/mer\\ge'];
+  const refused = ['gh pr m""erge 12 "unterminated', 'gh pr m$"er"ge 12', 'gh pr $"integrate" 12', "gh pr m$'\\q'erge 12",
+    'GH_REPO=o/other gh pr merge 12', '$G pr merge 12', '/opt/homebrew/bin/g? pr merge 12', 'gh $X merge 12', 'gh $X $Y 12',
+    'gh $X $Y 12 && true', 'env gh $X $Y 12', "gh pr view 12 --template 'gh pr merge 12'", '${G}h $X 12', 'gh pr merge $N',
+    'gh -R o/r pr merge 12', 'gh pr merge 12 > out.txt', "echo $(gh pr m$'\\x65'rge 12)", 'echo "$(g""h pr merge 12)"',
+    "echo '$(gh pr merge 12)'", "printf -v 'a[$(gh pr merge 12)]' '%s' x", 'env gh pr merge 12', 'command gh pr merge 12',
+    `python3 -c "import os; os.system('gh pr merge 12')"`, "git -c alias.x='!gh pr merge 12' x", 'eval "gh pr merge 12"',
+    'echo "gh pr merge 12" | sh', 'echo $(gh pr merge 12)', 'cat <(gh pr merge 12)', 'gh pr merge 12 && true',
+    // the compound rows of `merge gate: no merge passes without any call…`
+    'gh pr merge 1 && gh pr merge 2', 'gh pr merge 1; gh pr merge 2', 'gh pr merge 1 | cat', 'gh pr merge 1 & gh pr merge 2', '(gh pr merge 1)',
+    // review R1-R3 (Real case: a merge hidden in $[…], in '…' inside "${…}", or after a $'\c' that ate its own quote)
+    'echo $[$(gh pr m""erge 12)+1]', `echo "\${x:-'$(gh pr m""erge 12)'}"`, "echo $'\\c'; gh pr m\"\"erge 12",
+    // the same kind, where the gate would read further than bash and hide the next command: a bare `{` in ${…}, a shift
+    // `<<` in arithmetic taken as a here-document, a case pattern's `)` in $(…), $'\c\\'
+    'echo ${x:-{} ; gh pr m""erge 12 ; echo }', 'echo $((1<<2))\ngh pr m""erge 12', '(( x = 1<<2 ))\ngh pr m""erge 12',
+    "x=$(case a in a) echo ';; esac); gh pr m\"\"erge 12 #'", "echo $'\\c\\\\'; gh pr m\"\"erge 12",
+    // Real case: a fuzz of the R1-R6 shapes (a merge nested in ${…}, $[…], backticks in "…", a case arm, $(…) in $(…))
+    'echo "${x:-$(gh pr m""erge 12)}"', 'echo $[1+$(g""h pr merge 12)]', "echo \"`gh pr m$'\\x65'rge 12`\"",
+    'case x in x) gh pr m""erge 12;; esac', 'echo "$(echo "$(gh pr merge 12)")"',
+    // Real case: R2 with brackets in the quoted default, and a nested `{` whose two readings split the command apart
+    `echo "\${x:-'(x)$(gh pr m""erge 12)'}"`, 'echo ${x:-{a} ; gh pr m""erge 12 ; echo }', `echo "\${x:-'(x)$(gh pr mer\\ge 12)'}"`,
+    // review R1-R2 (Real case: a merge in a process substitution inside ${…}, or in '…' inside arithmetic, which bash runs)
+    'echo ${x:- >(gh pr m""erge 12)}', `echo $['$(gh pr m""erge 12)' +1]`, `echo $(( '$(gh pr mer\\ge 12)' + 1 ))`,
+    // Real case: the same '…' in a default inside arithmetic, which bash reads as if in "…" and so runs
+    `echo $(( \${x:-'$(gh pr mer\\ge 12)'} + 1 ))`, `echo $[ \${x:-'$(gh pr mer\\ge 12)'} + 1 ]`,
+    // review R4 (Real case: a quoted default holds a literal <( and a real merge follows) and R5 ($'…' in arithmetic)
+    'echo "${x:-<(ignored}" ; gh pr mer\\ge 12 ; echo ") }"', `echo $(( $'$(gh pr m""erge 12)' + 1 ))`,
+    // review R5-R8 (extra pass): an operand after < in arithmetic, code run by eval or a shell, a subscript a builtin
+    // evaluates, and a # inside arithmetic (not a comment)
+    `echo $(( 1 < $'$(gh pr m""erge 12)' ))`, `eval 'gh pr m""erge 12'`, `bash -c 'gh pr m""erge 12'`,
+    `env bash -c 'gh pr m""erge 12'`, `let 'a[$(gh pr m""erge 12)]=1'`, 'echo $(( 1 # $(gh pr m""erge 12)\n))'];
+  const passes = [`grep -F 'gh pr m""erge' test/kit.test.ts`, "grep -n 'gh pr merge' README.md", 'echo "gh pr merge 12"',
+    'git status && npm test', 'gh pr view 12', 'gh pr list', 'grep -n merge README.md', '"$HOME/bin/tool" run',
+    // review R4-R6 (Real case: an agent searches for `case`, prints a default in quotes, or calls echo by its path)
+    'echo "$(grep -n case bin/dask-merge-gate)"', `echo "\${x:-'default'}"`, '/bin/echo "gh pr merge 12"',
+    // Real case: an agent greps for a shell keyword, prints a quoted default, or prints a word from a substitution
+    "grep -n 'esac' f", 'echo "${y:-\\"a b\\"}"', `printf '%s' "$(echo gh)"`,
+    // Real case: a default with brackets or braces in it, quoted or not
+    `echo "\${x:-'(default)'}"`, "echo ${x:-'a}b'}", 'echo ${x:-{}}', 'echo "${x:-{a}b}"',
+    // review R3 (Real case: an agent greps a file under a variable path for gh)
+    'grep -n gh "$PWD/README.md"', "echo $(( ${x:-'1'} + 1 ))",
+    // Real case: a shell or eval running plain code, an exported path, a let, a comparison in arithmetic
+    "bash -c 'echo hi'", "eval 'ls -la'", 'export PATH="$HOME/bin:$PATH"', "let 'x=1+2'", 'echo $(( 1 < 2 ))'];
+  const closed = 'http://127.0.0.1:9';
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dasks-gate-'));
+  try {
+    // gh off PATH, board on a closed port: every spelling of a merge is refused, never let through
+    const offline = (command: string) => spawnSync('python3', [path.join(ROOT, 'bin/dask-merge-gate')], { input: JSON.stringify({ tool_input: { command } }), env: { ...process.env, PATH: '/usr/bin:/bin', DASKS_URL: closed }, encoding: 'utf8' });
+    for (const c of [...pr, ...api]) {
+      const r = offline(c);
+      assert.equal(r.status, 2, `${c} exited ${r.status}: ${r.stderr}`);
+      assert.match(r.stderr, /^dask-merge-gate: refused:/, c);
+    }
+    // a stub gh that names a card: each spelling makes the literal command's `pr view` call, then asks the board
+    const log = path.join(dir, 'gh.args');
+    fs.writeFileSync(path.join(dir, 'gh'), `#!/bin/bash\nprintf '%s\\n' "$*" >> "${log}"\necho '{"headRefOid":"${'a'.repeat(40)}","headRefName":"human/demo.t-x","title":"demo.t-x: x","url":"u"}'\n`, { mode: 0o755 });
+    const stubbed = (command: string) => {
+      fs.rmSync(log, { force: true });
+      const r = spawnSync('python3', [path.join(ROOT, 'bin/dask-merge-gate')], { input: JSON.stringify({ tool_input: { command } }), env: { ...process.env, PATH: `${dir}:/usr/bin:/bin`, DASKS_URL: closed }, encoding: 'utf8' });
+      return { r, calls: fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n') : [] };
+    };
+    for (const [literal, spellings, call] of [['gh pr merge 12', pr, 'pr view 12 --json headRefOid,headRefName,title,url'],
+      ['gh api -X PUT repos/o/r/pulls/12/merge', api, 'pr view 12 -R o/r --json headRefOid,headRefName,title,url']] as const) {
+      const want = stubbed(literal);
+      assert.equal(want.r.status, 2);
+      assert.match(want.r.stderr, /board could not confirm/);
+      assert.deepEqual(want.calls, [call]);
+      for (const c of spellings) {
+        const got = stubbed(c);
+        assert.equal(got.r.status, 2, `${c}: ${got.r.stderr}`);
+        assert.deepEqual(got.calls, want.calls, c);
+        assert.match(got.r.stderr, /board could not confirm/, c);
+      }
+    }
+    // fail closed: unreadable words, wrappers, substitutions, compound commands, a merge that is not the plain command
+    for (const c of refused) {
+      const r = stubbed(c);
+      assert.equal(r.r.status, 2, `${c} exited ${r.r.status}: ${r.r.stderr}`);
+      assert.match(r.r.stderr, /^dask-merge-gate: refused:/, c);
+      assert.deepEqual(r.calls, [], c);
+    }
+    // searching for the merge text, echoing it, and ordinary gh or compound commands pass silently with no gh call
+    for (const c of passes) {
+      const r = stubbed(c);
+      assert.equal(r.r.status, 0, `${c}: ${r.r.stderr}`);
+      assert.equal(r.r.stderr, '', c);
+      assert.deepEqual(r.calls, [], c);
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 // ---------- installer ----------
 
 function fakeTools(dir: string, claudeHasForeignMcp: boolean) {

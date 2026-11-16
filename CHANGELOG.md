@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Merge gate: decides on what bash will run. It splits the command into simple commands and decodes each word like
+  bash (quotes, backslashes, `$'…'` escapes), so `gh pr m$'\x65'rge 12` is checked like `gh pr merge 12`; a gh
+  command or gh-like command word with words it cannot read (`$X`, globs, `$"…"`) is refused, so is a command whose
+  quotes or substitutions it cannot close for sure; a merge hidden in a substitution inside `${…}`, `$[…]` or `"…"` is
+  refused, while a quoted or bracketed default such as `"${x:-'(default)'}"` or `${x:-{}}` passes; and `grep`, `echo`,
+  `cat`, `head`, `tail` and `wc` (also by path, like `/bin/echo`) on their own pass whatever text they search or print.
+
 ## 1.1.1 — 2026-11-16
 
 - Rethink cards: while a rethink card is open (not done, not cancelled), the card it replaces no longer asks you for a
