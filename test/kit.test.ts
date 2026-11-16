@@ -223,7 +223,9 @@ test('merge gate: a merge is decided from decoded shell words of each simple com
     // review R1-R2 (Real case: a merge in a process substitution inside ${…}, or in '…' inside arithmetic, which bash runs)
     'echo ${x:- >(gh pr m""erge 12)}', `echo $['$(gh pr m""erge 12)' +1]`, `echo $(( '$(gh pr mer\\ge 12)' + 1 ))`,
     // Real case: the same '…' in a default inside arithmetic, which bash reads as if in "…" and so runs
-    `echo $(( \${x:-'$(gh pr mer\\ge 12)'} + 1 ))`, `echo $[ \${x:-'$(gh pr mer\\ge 12)'} + 1 ]`];
+    `echo $(( \${x:-'$(gh pr mer\\ge 12)'} + 1 ))`, `echo $[ \${x:-'$(gh pr mer\\ge 12)'} + 1 ]`,
+    // review R4 (Real case: a quoted default holds a literal <( and a real merge follows) and R5 ($'…' in arithmetic)
+    'echo "${x:-<(ignored}" ; gh pr mer\\ge 12 ; echo ") }"', `echo $(( $'$(gh pr m""erge 12)' + 1 ))`];
   const passes = [`grep -F 'gh pr m""erge' test/kit.test.ts`, "grep -n 'gh pr merge' README.md", 'echo "gh pr merge 12"',
     'git status && npm test', 'gh pr view 12', 'gh pr list', 'grep -n merge README.md', '"$HOME/bin/tool" run',
     // review R4-R6 (Real case: an agent searches for `case`, prints a default in quotes, or calls echo by its path)

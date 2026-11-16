@@ -156,6 +156,8 @@ class Reader:
                 continue
             if c == "$":
                 nx = s[self.i + 1:self.i + 2]
+                if nx == "'" and arith:  # in arithmetic $'…' is not decoded and its substitutions still run (R5)
+                    self.i += 1; continue
                 if nx == "'":
                     v = self.ansi_c()
                     if v is None: ok = False
@@ -225,7 +227,7 @@ class Reader:
             if c == '"': self.i += 1; self.dquote(None, '"'); continue
             if c == "`": self.backtick(); continue
             if c == "$" and self.expansion(dq or open_ == "["): continue
-            if s.startswith(("<(", ">("), self.i):
+            if not dq and s.startswith(("<(", ">("), self.i):  # inside "…" bash keeps <( as text (R4)
                 self.i += 2; self.out.compound = True; self.commands(True, True); continue
             if c == "'":
                 j = s.find("'", self.i + 1)
