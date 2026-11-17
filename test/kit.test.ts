@@ -290,6 +290,81 @@ test('merge gate: a merge is decided from decoded shell words of each simple com
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('merge gate: every (context, opener) cell of the gate quote table, checked against the system bash', () => {
+  // Real case: an agent, or a prompt-injected command, hides a merge behind a quote or substitution opener in a quoting
+  // context (inside "…", ${…}, arithmetic, backticks, a here-document) where the gate could read the opener one way and
+  // bash another. Each cell of the gate's own table gets rows; the system bash, with gh as a printing shell function and
+  // only the system bin folders on PATH, says whether the merge really runs.
+  const gatePath = path.join(ROOT, 'bin/dask-merge-gate');
+  const table = JSON.parse(execFileSync('python3', [gatePath, '--table'], { encoding: 'utf8' })) as { contexts: string[]; openers: string[] };
+  const M = 'gh pr m""erge 12';
+  // how a payload is put in each context, the text that leaves it back to the top level, and the text that re-enters it
+  const places: Record<string, { wrap: (p: string) => string; out: string; back: string }[]> = {
+    top: [{ wrap: p => `echo ${p}`, out: '', back: '' }],
+    cmdsub: [{ wrap: p => `echo $(echo ${p})`, out: ')', back: '$(echo ' }],
+    backtick: [{ wrap: p => `echo \`echo ${p}\``, out: '`', back: '`echo ' }],
+    dq: [{ wrap: p => `echo "${p}"`, out: '"', back: '"' }],
+    heredoc: [{ wrap: p => `cat <<E\n${p}\nE`, out: '\nE\ntrue', back: '\ncat <<E\n' }],
+    brace: [{ wrap: p => `echo \${x:-${p}}`, out: '}', back: '${x:-' }],
+    brace_dq: [{ wrap: p => `echo "\${x:-${p}}"`, out: '}"', back: '"${x:-' }],
+    bracket: [{ wrap: p => `echo $[ ${p} ]`, out: ' ]', back: '$[ ' }],
+    arith: [{ wrap: p => `echo $(( ${p} ))`, out: ' ))', back: '$(( ' }, { wrap: p => `(( ${p} ))`, out: ' ))', back: '(( ' }],
+  };
+  // each opener as written (its open and close text); a substitution opener runs its body, the others hold a $(…)
+  const shapes: Record<string, [string, string]> = { "'": ["'", "'"], '"': ['"', '"'], "$'": ["$'", "'"], '$"': ['$"', '"'],
+    '\\': ['\\', ''], '`': ['`', '`'], '$(': ['$(', ')'], '${': ['${x:-', '}'], '$[': ['$[ ', ' ]'], '<(': ['<(', ')'], '>(': ['>(', ')'] };
+  const runs = new Set(['`', '$(', '<(', '>(']);
+  const rows: { ctx: string; op: string; row: string; merge: boolean }[] = [];
+  for (const ctx of table.contexts) {
+    assert.ok(places[ctx], `the grid has no place for context ${ctx}`);
+    for (const op of table.openers) {
+      assert.ok(shapes[op], `the grid has no shape for opener ${op}`);
+      const [o, c] = shapes[op];
+      for (const { wrap, out, back } of places[ctx]) {
+        const hide = ` ; ${M} ; echo ${back}`;
+        // inside the opener, past the context's end, and past it behind a backslash: one of them runs the merge in
+        // bash when the opener is read the other way; and a plain row that must pass
+        for (const p of [o + (runs.has(op) ? M : `$(${M})`) + c, o + out + hide + c, `${o}\\${out}${hide}${c}`]) rows.push({ ctx, op, row: wrap(p), merge: true });
+        rows.push({ ctx, op, row: wrap(`${o}a${c}`), merge: false });
+      }
+    }
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dasks-grid-'));
+  try {
+    const ghLog = path.join(dir, 'gh.args');
+    fs.writeFileSync(path.join(dir, 'gh'), `#!/bin/bash\nprintf '%s\\n' "$*" >> "${ghLog}"\necho '{"headRefOid":"${'a'.repeat(40)}","headRefName":"human/demo.t-x","title":"demo.t-x: x","url":"u"}'\n`, { mode: 0o755 });
+    const bashLog = path.join(dir, 'bash.args');
+    const script = path.join(dir, 'row.sh');
+    const bashRuns = (row: string) => {
+      fs.rmSync(bashLog, { force: true });
+      // a process substitution runs on its own: wait a moment for it
+      fs.writeFileSync(script, `gh() { printf '%s\\n' "$*" >> "${bashLog}"; }\n${row}\n${/[<>]\(/.test(row) ? '/bin/sleep 0.3\n' : ''}`);
+      spawnSync('/bin/bash', [script], { env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }, input: '', encoding: 'utf8', timeout: 10000 });
+      return fs.existsSync(bashLog) && fs.readFileSync(bashLog, 'utf8').split('\n').includes('pr merge 12');
+    };
+    const gate = (row: string) => {
+      fs.rmSync(ghLog, { force: true });
+      const r = spawnSync('python3', [gatePath], { input: JSON.stringify({ tool_input: { command: row } }), env: { ...process.env, PATH: `${dir}:/usr/bin:/bin`, DASKS_URL: 'http://127.0.0.1:9' }, encoding: 'utf8' });
+      return { status: r.status, stderr: r.stderr, calls: fs.existsSync(ghLog) ? fs.readFileSync(ghLog, 'utf8').trim() : '' };
+    };
+    assert.ok(bashRuns(M) && !bashRuns(`echo '${M}'`), 'the bash oracle sees a plain merge and not a quoted one');
+    const bad: string[] = [];
+    const log = ['| context | opener | row | bash runs the merge | gate exit |', '|---|---|---|---|---|'];
+    let ran = 0;
+    for (const { ctx, op, row, merge } of rows) {
+      const g = gate(row);
+      const b = merge && bashRuns(row);
+      ran += b ? 1 : 0;
+      log.push(`| ${ctx} | ${op.replace('|', '\\|')} | ${JSON.stringify(row).replace(/\|/g, '\\|')} | ${merge ? (b ? 'yes' : 'no') : 'plain'} | ${g.status} |`);
+      if (b && (g.status !== 2 || !/^dask-merge-gate: refused:/.test(g.stderr) || g.calls)) bad.push(`bash runs the merge, gate exit ${g.status}: ${JSON.stringify(row)} ${g.stderr.trim()}`);
+      if (!merge && (g.status !== 0 || g.stderr || g.calls)) bad.push(`plain row, gate exit ${g.status}: ${JSON.stringify(row)} ${g.stderr.trim()}`);
+    }
+    if (process.env.DASK_GATE_GRID_LOG) fs.writeFileSync(process.env.DASK_GATE_GRID_LOG, log.join('\n') + '\n');
+    assert.ok(ran > table.contexts.length, `bash ran the merge in only ${ran} rows: the oracle is not working`);
+    assert.deepEqual(bad, []);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 // ---------- installer ----------
 
 function fakeTools(dir: string, claudeHasForeignMcp: boolean) {
