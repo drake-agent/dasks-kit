@@ -70,6 +70,8 @@ struct Harness {
     let audit = MemoryAudit()
     let exec = FakeExecutor()
     let resolver = FakeResolver()
+    /// Replaces the fake resolver when set (the real-file tests use RealResolver).
+    var commandResolver: CommandResolver?
     var output: [String] { box.lines }
     private let box = Box()
     final class Box { var lines: [String] = [] }
@@ -78,7 +80,7 @@ struct Harness {
         var ancestors = [Ancestor(pid: 4242, path: "/bin/zsh")]
         if let a = agentAncestor { ancestors.append(Ancestor(pid: 100, path: "/usr/local/bin/\(a)")) }
         let box = self.box
-        return SecretCommands(store: store, prompts: prompts, audit: audit, executor: exec, resolver: resolver,
+        return SecretCommands(store: store, prompts: prompts, audit: audit, executor: exec, resolver: commandResolver ?? resolver,
                        caller: Caller(ancestors: given ?? ancestors, environment: [:]), out: { box.lines.append($0) })
     }
 
