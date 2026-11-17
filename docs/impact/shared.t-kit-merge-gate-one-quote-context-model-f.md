@@ -19,8 +19,9 @@ Builds on #13's branch (launch base 2233ec8). The earlier impact files stay: the
   - `main()`: `dask-merge-gate --table` prints the table as JSON for the grid test. Hook mode (stdin JSON) unchanged.
   - Review pass 1 (R1-R4): `Reader.delimiter(raw)` removes only quotes from a here-document delimiter (bash expands
     nothing there), replacing the value-or-raw guess; `read()` finds `let`-like builtins behind `command`/`builtin`
-    like it finds shells; new `shell_code()`: `eval` runs its words joined by spaces, `sh -c code args` runs only the
-    code word, its arguments are read as data the code may eval (a quote error in data does not refuse).
+    like it finds shells; new `shell_code()`: `eval` runs its words joined by spaces. R4 (`bash -c code -- "don't"`
+    refused) was fixed by reading data arguments apart, which review pass 2 broke (R5: `eval "$1$2"` joins them), so
+    that fix was taken back: every argument of a shell is read as code again, as on the launch base; R4 stays open.
   - Unchanged: `target`, the board `merge-ok` check, `refuse`, `gh`, `fail_closed`, `decide`.
 - `test/kit.test.ts`: new grid test after test 3; tests 1-3 unchanged (only the `spawn` import was added).
 - `CHANGELOG.md`: the one Unreleased gate line gets the table.

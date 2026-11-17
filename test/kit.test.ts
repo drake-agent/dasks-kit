@@ -387,17 +387,18 @@ test('merge gate: every (context, opener) cell of the gate quote table, checked 
 });
 
 test('merge gate: here-document delimiters, eval words and shell arguments are read as bash runs them', () => {
-  // Real case (review R1-R4): a merge after a here-document whose delimiter looks like a variable, a merge eval builds
-  // from two words, a subscript `let` evaluates behind `command`/`builtin`, data `bash -c` evals, and an agent passing
-  // data with a quote to `bash -c`. bash runs the first five (checked with a printing gh); the last two are ordinary.
+  // Real case (review R1-R3, R5): a merge after a here-document whose delimiter looks like a variable, a merge eval
+  // builds from two words, a subscript `let` evaluates behind `command`/`builtin`, and data words `bash -c` evals
+  // (alone or joined): bash runs all of them (checked with a printing gh). A here-document with a `$` in its quoted
+  // delimiter is ordinary. Data with a lone quote after `bash -c code` stays refused (R4 left open: the code may eval it).
   const gate = (command: string) => spawnSync('python3', [path.join(ROOT, 'bin/dask-merge-gate')], { input: JSON.stringify({ tool_input: { command } }), env: { ...process.env, PATH: '/usr/bin:/bin', DASKS_URL: 'http://127.0.0.1:9' }, encoding: 'utf8' });
   for (const c of ['cat <<"$DELIM"\nhello\n$DELIM\ngh pr m""erge 12', `eval 'gh pr' 'm""erge 12'`, `command let 'a[$(gh pr m""erge 12)]=1'`,
-    `builtin let 'a[$(gh pr m""erge 12)]=1'`, `bash -c 'eval "$1"' _ 'gh pr m""erge 12'`]) {
+    `builtin let 'a[$(gh pr m""erge 12)]=1'`, `bash -c 'eval "$1"' _ 'gh pr m""erge 12'`, `bash -c 'eval "$1$2"' _ 'g"' '"h pr m""erge 12'`]) {
     const r = gate(c);
     assert.equal(r.status, 2, `${c} exited ${r.status}: ${r.stderr}`);
     assert.match(r.stderr, /^dask-merge-gate: refused:/, c);
   }
-  for (const c of [`bash -c 'printf "%s\\n" "$1"' -- "don't"`, 'cat <<"$D"\nhi\n$D']) {
+  for (const c of ['cat <<"$D"\nhi\n$D']) {
     const r = gate(c);
     assert.equal(r.status, 0, `${c}: ${r.stderr}`);
     assert.equal(r.stderr, '', c);
