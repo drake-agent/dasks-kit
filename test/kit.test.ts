@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { loadConfig, projectsConfigErrors } from '../src/lib/config.ts';
 import { loadBoard } from '../src/lib/load.ts';
 import { check } from '../src/lib/check.ts';
@@ -290,7 +290,7 @@ test('merge gate: a merge is decided from decoded shell words of each simple com
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('merge gate: every (context, opener) cell of the gate quote table, checked against the system bash', () => {
+test('merge gate: every (context, opener) cell of the gate quote table, checked against the system bash', async () => {
   // Real case: an agent, or a prompt-injected command, hides a merge behind a quote or substitution opener in a quoting
   // context (inside "…", ${…}, arithmetic, backticks, a here-document) where the gate could read the opener one way and
   // bash another. Each cell of the gate's own table gets rows; the system bash, with gh as a printing shell function and
@@ -302,6 +302,8 @@ test('merge gate: every (context, opener) cell of the gate quote table, checked 
   const places: Record<string, { wrap: (p: string) => string; out: string; back: string }[]> = {
     top: [{ wrap: p => `echo ${p}`, out: '', back: '' }],
     cmdsub: [{ wrap: p => `echo $(echo ${p})`, out: ')', back: '$(echo ' }],
+    cmdsub_dq: [{ wrap: p => `echo "\${x:-$(echo ${p})}"`, out: ')}"', back: '"${x:-$(echo ' }],
+    procsub: [{ wrap: p => `cat <(echo ${p})`, out: ')', back: '<(echo ' }],
     backtick: [{ wrap: p => `echo \`echo ${p}\``, out: '`', back: '`echo ' }],
     dq: [{ wrap: p => `echo "${p}"`, out: '"', back: '"' }],
     heredoc: [{ wrap: p => `cat <<E\n${p}\nE`, out: '\nE\ntrue', back: '\ncat <<E\n' }],
@@ -331,34 +333,53 @@ test('merge gate: every (context, opener) cell of the gate quote table, checked 
   }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dasks-grid-'));
   try {
-    const ghLog = path.join(dir, 'gh.args');
-    fs.writeFileSync(path.join(dir, 'gh'), `#!/bin/bash\nprintf '%s\\n' "$*" >> "${ghLog}"\necho '{"headRefOid":"${'a'.repeat(40)}","headRefName":"human/demo.t-x","title":"demo.t-x: x","url":"u"}'\n`, { mode: 0o755 });
-    const bashLog = path.join(dir, 'bash.args');
-    const script = path.join(dir, 'row.sh');
-    const bashRuns = (row: string) => {
-      fs.rmSync(bashLog, { force: true });
+    fs.writeFileSync(path.join(dir, 'gh'), `#!/bin/bash\nprintf '%s\\n' "$*" >> "$GH_LOG"\necho '{"headRefOid":"${'a'.repeat(40)}","headRefName":"human/demo.t-x","title":"demo.t-x: x","url":"u"}'\n`, { mode: 0o755 });
+    const run = (cmd: string, args: string[], env: Record<string, string>, input: string) => new Promise<{ status: number | null; stderr: string }>(resolve => {
+      const p = spawn(cmd, args, { env });
+      let stderr = '';
+      p.stderr.on('data', d => { stderr += d; });
+      p.stdout.resume();
+      p.stdin.on('error', () => {});
+      const kill = setTimeout(() => p.kill('SIGKILL'), 10000);
+      p.on('close', status => { clearTimeout(kill); resolve({ status, stderr }); });
+      p.stdin.end(input);
+    });
+    const read = (f: string) => fs.existsSync(f) ? fs.readFileSync(f, 'utf8').trim() : '';
+    // the oracle: the system bash runs the row with gh as a printing shell function and only the system bin folders
+    const bashRuns = async (row: string, k: number) => {
+      const log = path.join(dir, `bash${k}.args`);
+      const script = path.join(dir, `row${k}.sh`);
       // a process substitution runs on its own: wait a moment for it
-      fs.writeFileSync(script, `gh() { printf '%s\\n' "$*" >> "${bashLog}"; }\n${row}\n${/[<>]\(/.test(row) ? '/bin/sleep 0.3\n' : ''}`);
-      spawnSync('/bin/bash', [script], { env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }, input: '', encoding: 'utf8', timeout: 10000 });
-      return fs.existsSync(bashLog) && fs.readFileSync(bashLog, 'utf8').split('\n').includes('pr merge 12');
+      fs.writeFileSync(script, `gh() { printf '%s\\n' "$*" >> "${log}"; }\n${row}\n${/[<>]\(/.test(row) ? '/bin/sleep 0.3\n' : ''}`);
+      await run('/bin/bash', [script], { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }, '');
+      return read(log).split('\n').includes('pr merge 12');
     };
-    const gate = (row: string) => {
-      fs.rmSync(ghLog, { force: true });
-      const r = spawnSync('python3', [gatePath], { input: JSON.stringify({ tool_input: { command: row } }), env: { ...process.env, PATH: `${dir}:/usr/bin:/bin`, DASKS_URL: 'http://127.0.0.1:9' }, encoding: 'utf8' });
-      return { status: r.status, stderr: r.stderr, calls: fs.existsSync(ghLog) ? fs.readFileSync(ghLog, 'utf8').trim() : '' };
+    // the gate run: its exit code, stderr and gh calls (gh is a stub that logs them; the board is a closed port)
+    const gate = async (row: string, k: number) => {
+      const ghLog = path.join(dir, `gh${k}.args`);
+      const r = await run('python3', [gatePath], { ...process.env, PATH: `${dir}:/usr/bin:/bin`, DASKS_URL: 'http://127.0.0.1:9', GH_LOG: ghLog } as Record<string, string>, JSON.stringify({ tool_input: { command: row } }));
+      return { ...r, calls: read(ghLog) };
     };
-    assert.ok(bashRuns(M) && !bashRuns(`echo '${M}'`), 'the bash oracle sees a plain merge and not a quoted one');
+    assert.ok(await bashRuns(M, -1) && !await bashRuns(`echo '${M}'`, -2), 'the bash oracle sees a plain merge and not a quoted one');
+    const results = new Array<{ g: { status: number | null; stderr: string; calls: string }; b: boolean }>(rows.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: 8 }, async () => {
+      for (let k = next++; k < rows.length; k = next++) {
+        const { row, merge } = rows[k];
+        const [g, b] = await Promise.all([gate(row, k), merge ? bashRuns(row, k) : Promise.resolve(false)]);
+        results[k] = { g, b };
+      }
+    }));
     const bad: string[] = [];
     const log = ['| context | opener | row | bash runs the merge | gate exit |', '|---|---|---|---|---|'];
     let ran = 0;
-    for (const { ctx, op, row, merge } of rows) {
-      const g = gate(row);
-      const b = merge && bashRuns(row);
+    rows.forEach(({ ctx, op, row, merge }, k) => {
+      const { g, b } = results[k];
       ran += b ? 1 : 0;
       log.push(`| ${ctx} | ${op.replace('|', '\\|')} | ${JSON.stringify(row).replace(/\|/g, '\\|')} | ${merge ? (b ? 'yes' : 'no') : 'plain'} | ${g.status} |`);
       if (b && (g.status !== 2 || !/^dask-merge-gate: refused:/.test(g.stderr) || g.calls)) bad.push(`bash runs the merge, gate exit ${g.status}: ${JSON.stringify(row)} ${g.stderr.trim()}`);
       if (!merge && (g.status !== 0 || g.stderr || g.calls)) bad.push(`plain row, gate exit ${g.status}: ${JSON.stringify(row)} ${g.stderr.trim()}`);
-    }
+    });
     if (process.env.DASK_GATE_GRID_LOG) fs.writeFileSync(process.env.DASK_GATE_GRID_LOG, log.join('\n') + '\n');
     assert.ok(ran > table.contexts.length, `bash ran the merge in only ${ran} rows: the oracle is not working`);
     assert.deepEqual(bad, []);

@@ -8,6 +8,9 @@
   quotes or substitutions it cannot close for sure; a merge hidden in a substitution inside `${…}`, `$[…]` or `"…"` is
   refused, while a quoted or bracketed default such as `"${x:-'(default)'}"` or `${x:-{}}` passes; and `grep`, `echo`,
   `cat`, `head`, `tail` and `wc` (also by path, like `/bin/echo`) on their own pass whatever text they search or print.
+  What each quote or substitution opener means in each quoting context comes from one table in the gate; where bash
+  versions read an opener differently, every reading is checked, and a test runs every cell of that table through
+  the system bash.
 
 ## 1.1.1 — 2026-11-16
 
