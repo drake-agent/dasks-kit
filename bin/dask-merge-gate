@@ -190,7 +190,9 @@ class Reader:
                 if self.i < len(s) and s[self.i] not in "\n;&|()<>":
                     w = self.word(cmd, ctx)  # in ((…)) a < is an operator: its operand is still arithmetic (R5)
                     if rd in ("<<", "<<-") and not arith:
-                        self.heredocs.append((w.value if w.value is not None else w.raw, rd == "<<-", not self.quoted(w.raw)))
+                        delim, quoted = self.delimiter(w.raw)
+                        if delim is None: self.out.broken = True  # the gate cannot know where the body ends
+                        else: self.heredocs.append((delim, rd == "<<-", not quoted))
                 continue
             sep = next((o for o in SEPARATORS if s.startswith(o, self.i)), None)
             if sep:
@@ -296,10 +298,29 @@ class Reader:
             return None
         raise ValueError("no reading for meaning %r" % (m,))
 
-    def quoted(self, raw):
-        """Whether a here-document delimiter is quoted in any way (then its body does not expand)."""
-        return any(self.opener("top", k)[1] in ("squote", "dquote", "ansi_c", "locale", "escape")
-                   for k in range(self.i - len(raw), self.i))
+    @staticmethod
+    def delimiter(raw):
+        """(a here-document delimiter after quote removal only, whether any of it was quoted): bash expands nothing in
+        it (R1), so `<<"$D"` ends at a line `$D`. (None, True) for an opener the gate does not guess there."""
+        r, buf, quoted = Reader(raw, Parsed()), [], False
+        while r.i < len(raw):
+            op, m = r.opener("top")
+            if m == "dquote":  # "…": only its escapes are removed
+                quoted, r.i = True, r.i + len(op)
+                while r.i < len(raw):
+                    op2, m2 = r.opener("dq")
+                    if m2 == "close": r.i += len(op2); break
+                    if m2 in ESCAPES: buf.append(r.apply(op2, m2, "dq", None)); continue
+                    buf.append(raw[r.i]); r.i += 1
+                else: return None, True
+                continue
+            if m in ("squote", "escape"):
+                quoted, v = True, r.apply(op, m, "top", None)
+                if v is None or r.out.broken: return None, True
+                buf.append(v); continue
+            if op: return None, True  # $'…', $"…", a substitution
+            buf.append(raw[r.i]); r.i += 1
+        return "".join(buf), quoted
 
     def quoted_runs(self, body):
         """A '…' whose substitutions bash still runs (inside "${…}", $[…] or arithmetic): read them as commands."""
@@ -397,15 +418,39 @@ def read(cmd):
     while i < len(out.cmds):  # out.cmds grows: code inside code is read too
         ws = lead(out.cmds[i])[1]; i += 1
         if not ws: continue
-        n = next((n for n, w in enumerate(ws) if name(w) in SHELL_CODE and (n == 0 or name(ws[0]) in WRAPPERS)), None)
+        at = lambda names: next((n for n, w in enumerate(ws) if name(w) in names and (n == 0 or name(ws[0]) in WRAPPERS)), None)
+        n = at(SHELL_CODE)
+        if n is not None:
+            code, data = shell_code(ws[n], ws[n + 1:])
+            for text in code: out.compound = True; Reader(text, out).commands(True, False, "top")
+            for text in data:  # positional parameters: data the code may still eval; a quote error in data is not one
+                out.compound = True; side = Parsed(); Reader(text, side).commands(True, False, "top"); out.cmds += side.cmds
+            continue
+        n = at(EVAL_ARGS)  # also through `command let …` or `builtin let …` (R3)
         if n is not None:
             for w in ws[n + 1:]:
-                if w.value is not None: out.compound = True; Reader(w.value, out).commands(True, False, "top")
-        elif name(ws[0]) in EVAL_ARGS:
-            for w in ws[1:]:
                 if w.value is not None and any(m in w.value for m in SUBST_SYNTAX):
                     out.compound = True; Reader(w.value, out).dquote(None, "heredoc")
     return out
+
+def shell_code(sh, args):
+    """(texts run as code, texts passed as data) for eval, source or a shell and its arguments."""
+    vals = [w.value for w in args]
+    known = [v for v in vals if v is not None]
+    if name(sh) == "eval":  # eval runs its words joined by spaces (R2); a word the gate cannot read stays unreadable
+        return [" ".join(v if v is not None else "$__dask_unknown" for v in vals)], []
+    if name(sh) in ("source", "."): return known, []
+    k, has_c = 0, False
+    while k < len(vals):  # the shell's options: -c makes the first other word the code, the words after it data (R4)
+        v = vals[k]
+        if v is None: return known, []  # an option the gate cannot read: every word is read as code
+        if v == "--": k += 1; break
+        if v in ("-o", "+o", "-O", "+O"): k += 2; continue
+        if len(v) > 1 and v[0] in "-+":
+            has_c = has_c or (v[0] == "-" and v[1] != "-" and "c" in v); k += 1; continue
+        break
+    if not has_c: return known, []
+    return [v for v in vals[k:k + 1] if v is not None], [v for v in vals[k + 1:] if v is not None]
 
 # ---------- deciding ----------
 
