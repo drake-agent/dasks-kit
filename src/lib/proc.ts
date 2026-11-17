@@ -3,14 +3,23 @@
 // it started. Never throws: a missing binary is code -1 with the reason in err.
 import { spawn } from 'node:child_process';
 
-export interface ProcResult { code: number; out: string; err: string; timedOut: boolean }
+/** truncated: present (true) only when stdout or stderr went past maxOut and the rest was dropped; out and err then
+ *  hold the first maxOut characters each. A result that was not cut has no such key. */
+export interface ProcResult { code: number; out: string; err: string; timedOut: boolean; truncated?: true }
 
 export function runBounded(cmd: string, args: string[], o: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs: number; maxOut?: number }): Promise<ProcResult> {
   const max = o.maxOut ?? 1024 * 1024;
   return new Promise((resolve) => {
-    let out = '', err = '', done = false, timedOut = false;
+    let out = '', err = '', done = false, timedOut = false, truncated = false;
     let child: ReturnType<typeof spawn>;
-    const end = (code: number) => { if (!done) { done = true; clearTimeout(timer); resolve({ code, out, err, timedOut }); } };
+    const end = (code: number) => { if (!done) { done = true; clearTimeout(timer); resolve({ code, out, err, timedOut, ...(truncated ? { truncated: true as const } : {}) }); } };
+    /** s plus as much of chunk d as fits under max; anything left over marks the result cut. */
+    const add = (s: string, d: Buffer | string) => {
+      const c = String(d);
+      if (s.length + c.length <= max) return s + c;
+      truncated = true;
+      return s.length < max ? s + c.slice(0, max - s.length) : s;
+    };
     try { child = spawn(cmd, args, { cwd: o.cwd, env: o.env ?? process.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] }); }
     catch (e: any) { resolve({ code: -1, out: '', err: e.message, timedOut: false }); return; }
     const timer = setTimeout(() => {
@@ -18,8 +27,8 @@ export function runBounded(cmd: string, args: string[], o: { cwd?: string; env?:
       try { process.kill(-child.pid!, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* gone */ } }
       end(-1);
     }, o.timeoutMs);
-    child.stdout!.on('data', (d) => { if (out.length < max) out += d; });
-    child.stderr!.on('data', (d) => { if (err.length < max) err += d; });
+    child.stdout!.on('data', (d) => { out = add(out, d); });
+    child.stderr!.on('data', (d) => { err = add(err, d); });
     child.on('error', (e) => { err += e.message; end(-1); });
     child.on('close', (code) => end(code ?? -1));
   });
