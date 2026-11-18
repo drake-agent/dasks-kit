@@ -9,6 +9,7 @@ import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { task, tempRepo } from './helpers.ts';
 import { serve } from './state-support.ts';
+import { runBounded } from '../src/lib/proc.ts';
 import { Backup, BACKUP_WARN_AFTER, backupConfigErrors, backupView, forbiddenPaths, pushArgs, remoteProblem, remoteShown } from '../src/lib/backup.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
@@ -182,4 +183,43 @@ test('server: backup now and status; a failing remote is a health warning (200, 
     const chk = spawnSync(process.execPath, [path.join(ROOT, 'src/cli/check.ts'), 'check'], { encoding: 'utf8', env: { ...process.env, DASKS_ROOT: root, DASKS_CONFIG: cfg } });
     assert.match(chk.stdout, /warn {2}run\/backup\.json: board backup: 3 pushes in a row failed.*git push failed/);
   } finally { await srv.stop(); cleanup(); fs.rmSync(remote, { recursive: true, force: true }); }
+});
+
+test('runBounded says when it cut stdout or stderr at maxOut, and says nothing when the output fit', async () => {
+  // Real case: `git log --name-only` on a board whose history since the last good push lists more than 64 MiB of paths
+  // (the first push of a large old board): the caller only sees what fit under the cap, so it must be told.
+  const node = (js: string, maxOut: number) => runBounded(process.execPath, ['-e', js], { timeoutMs: 30_000, maxOut });
+  const both = await node("process.stdout.write('x'.repeat(5000)); process.stderr.write('y'.repeat(5000))", 1000);
+  assert.equal(both.code, 0);
+  assert.equal(both.truncated, true, 'output past maxOut is reported as cut');
+  assert.equal(both.out.length, 1000);
+  assert.equal(both.err.length, 1000);
+  assert.equal((await node("process.stderr.write('y'.repeat(5000))", 1000)).truncated, true, 'a cut stderr counts too');
+  const fit = await node("process.stdout.write('x'.repeat(1000))", 1000);
+  assert.equal(fit.out.length, 1000);
+  assert.ok(!('truncated' in fit), 'output that fit looks as it always did');
+});
+
+test('a path listing cut at the cap fails the backup and never pushes, even when the cut part hides a key file', async () => {
+  // Real case: a board whose history since the last good push lists more than 64 MiB of paths (the first push of a large
+  // old board). git log lists the newest commit first, so an old secrets/ledger.key sits past the cap and the scan never
+  // sees it. The test lowers the cap instead of writing 64 MiB of file names.
+  const { root, cleanup } = tempRepo([task({ id: 'beta.t-one' })]);
+  const remote = bare();
+  try {
+    commit(root, 'secrets/ledger.key', 'not a real key');
+    for (let i = 0; i < 80; i++) fs.writeFileSync(path.join(root, 'data', `notes-${String(i).padStart(3, '0')}-${'n'.repeat(40)}.md`), 'x');
+    git(root, 'add', '-A'); git(root, 'commit', '-qm', 'many notes');
+    const s = await new Backup(root, { remote, every_min: 10 }, 'mini', { listMaxOut: 2048 }).tick();
+    assert.equal(s.failures, 1, s.last_error ?? '');
+    assert.match(s.last_error!, /too large to check/);
+    assert.ok(!/ledger|notes-|secrets/.test(s.last_error!), 'the reason names no path');
+    assert.ok(!s.last_error!.includes(remote), 'the reason names no remote');
+    assert.equal(s.last_ok_sha, null);
+    assert.equal(tip(remote, 'dasks-board-mini'), '', 'nothing was pushed');
+    // The same history under the real cap: the key file is there to be found, so the cut above really hid it.
+    const full = await new Backup(root, { remote, every_min: 10 }, 'mini').tick();
+    assert.match(full.last_error!, /refused: the commits to push carry secrets\/ledger\.key/);
+    assert.equal(tip(remote, 'dasks-board-mini'), '', 'still nothing pushed');
+  } finally { cleanup(); fs.rmSync(remote, { recursive: true, force: true }); }
 });
