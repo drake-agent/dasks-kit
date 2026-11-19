@@ -15,6 +15,8 @@ export const DEFAULT_BACKUP: BackupConfig = { remote: '', every_min: 10 };
 export const BACKUP_WARN_AFTER = 3;
 const PUSH_TIMEOUT_MS = 120_000;
 const LOCAL_TIMEOUT_MS = 30_000;
+/** The most path listing (git log --name-only) a push is checked against; past it the push is refused. */
+const LIST_MAX_OUT = 64 * 1024 * 1024;
 
 const BRANCH_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/;
 
@@ -138,10 +140,13 @@ const gitEnv = (): NodeJS.ProcessEnv => ({ ...process.env, GIT_TERMINAL_PROMPT: 
  *  rejects: any error, a status file that cannot be written included, is a failed push with its reason. */
 export class Backup {
   private busy: Promise<BackupStatus> | null = null;
-  private root: string; private cfg: BackupConfig; private machine: string;
+  private root: string; private cfg: BackupConfig; private machine: string; private listMaxOut: number;
   /** The last status, kept in memory too: when the file cannot be written the count still goes on. */
   private last: BackupStatus | null = null;
-  constructor(root: string, cfg: BackupConfig, machine: string) { this.root = root; this.cfg = cfg; this.machine = machine; }
+  /** o.listMaxOut: the cap on the path listing a push is checked against (tests lower it; production keeps the default). */
+  constructor(root: string, cfg: BackupConfig, machine: string, o: { listMaxOut?: number } = {}) {
+    this.root = root; this.cfg = cfg; this.machine = machine; this.listMaxOut = o.listMaxOut ?? LIST_MAX_OUT;
+  }
 
   status(): BackupStatus {
     const branch = backupBranch(this.cfg, this.machine);
@@ -176,11 +181,13 @@ export class Backup {
     if (!force && sha === s.last_ok_sha && !s.failures && !s.last_error) return s;
     // Every path any commit about to leave touches (all history on the first push). -z: raw paths, NUL-separated, never
     // quoted (git quotes a path with non-ASCII bytes, which no pattern would match).
-    const log = (r: string[]) => runBounded('git', ['-C', this.root, 'log', '-z', '--name-only', '--format=', ...r], { timeoutMs: LOCAL_TIMEOUT_MS, maxOut: 64 * 1024 * 1024 });
+    const log = (r: string[]) => runBounded('git', ['-C', this.root, 'log', '-z', '--name-only', '--format=', ...r], { timeoutMs: LOCAL_TIMEOUT_MS, maxOut: this.listMaxOut });
     const names = await log(s.last_ok_sha ? [`${s.last_ok_sha}..${sha}`] : [sha]);
     // A last good commit that history no longer has (the repo was replaced): check everything.
     const all = names.code !== 0 && s.last_ok_sha ? await log([sha]) : names;
     if (all.code !== 0) return fail(`could not list the commits to push (${why(all)})`);
+    // A cut listing hides whatever came after the cap: fail closed, and name no path from it.
+    if (all.truncated) return fail('refused: the list of commits to push is too large to check (paths past the size cap were not seen); nothing was pushed');
     const bad = [...new Set(forbiddenPaths(all.out.split('\0').map((p) => p.replace(/^\n+/, '')).filter(Boolean)))];
     if (bad.length) return fail(`refused: the commits to push carry ${bad.slice(0, 5).join(', ')}, which must never leave this Mac; take them out of the board's history first`);
     const r = await runBounded('git', ['-C', this.root, ...pushArgs(this.cfg.remote, sha, s.branch)], { env: gitEnv(), timeoutMs: PUSH_TIMEOUT_MS });

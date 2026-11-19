@@ -80,6 +80,31 @@ test('migrate: a board without a schema file gets a backup bundle, then one comm
   } finally { cleanup(); fs.rmSync(clone, { recursive: true, force: true }); }
 });
 
+test('migrate: a backup bundle that cannot be written stops the migration before any commit; the board is unchanged', () => {
+  // Real case: a backup that cannot be written at server start, e.g. a full disk or a taken path (here: a directory already at the bundle path).
+  const { root, cleanup } = tempRepo([task({ id: 'beta.t-one' }), task({ id: 'alpha.t-two' })]);
+  try {
+    unstamp(root);
+    const now = new Date('2026-11-15T01:02:03.456Z');
+    const taken = path.join(git(root, 'rev-parse', '--path-format=absolute', '--git-common-dir'), 'dasks-backups', `${now.toISOString().replace(/[:.]/g, '-')}-schema-0.bundle`);
+    fs.mkdirSync(taken, { recursive: true }); fs.writeFileSync(path.join(taken, 'keep'), 'x'); // a non-empty directory: no user, root included, can replace it with a file
+    const tasksDir = path.join(root, 'data/tasks');
+    const bytes = () => new Map((fs.readdirSync(tasksDir, { recursive: true }) as string[]).filter((f) => fs.statSync(path.join(tasksDir, f)).isFile()).map((f) => [f, fs.readFileSync(path.join(tasksDir, f))]));
+    const head = git(root, 'rev-parse', 'HEAD'); const count = git(root, 'rev-list', '--count', 'HEAD'); const files = bytes();
+    assert.equal(files.size, 2);
+    assert.throws(() => migrateBoard(root, now), /bundle/);
+    assert.equal(git(root, 'rev-parse', 'HEAD'), head);
+    assert.equal(git(root, 'rev-list', '--count', 'HEAD'), count);
+    assert.equal(fs.existsSync(path.join(root, SCHEMA_REL)), false);
+    assert.equal(boardSchema(root), 0);
+    assert.deepEqual(bytes(), files);
+    assert.equal(git(root, 'status', '--porcelain'), '');
+    // The repo lock was released: with the path free, the next start migrates.
+    fs.rmSync(taken, { recursive: true });
+    assert.equal(migrateBoard(root, now).to, SCHEMA_VERSION);
+  } finally { cleanup(); }
+});
+
 test('migrate 1 -> 2: retired review fields on a 1.0.0 card are dropped, so the card loads and checks clean', () => {
   const { root, cleanup } = tempRepo([task({ id: 'beta.t-one' })]);
   try {

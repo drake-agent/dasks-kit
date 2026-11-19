@@ -82,7 +82,8 @@ server this Mac can push to without a prompt: an ssh key or a credential helper)
   branch that has commits this board does not is reported, not overwritten.
 - Only commits leave the Mac. `run/` (live state) is not committed, and the token store, the passphrase and the login
   secrets live in `~/.dasks`, outside the data repo. Before each push the paths of every new commit are checked anyway;
-  a commit that carries `run/…`, a key, a token store or a passphrase file stops the push.
+  a commit that carries `run/…`, a key, a token store or a passphrase file stops the push. A list of paths too large
+  to check whole (past 64 MiB, e.g. the first push of a large old board) stops it too: the backup fails and says so.
 - Only these remote forms are taken: `https://host/path` (no user name or token in it: use a credential helper),
   `ssh://[user@]host/path`, `user@host:path` and an absolute local path. Anything else, any `<transport>::` form
   included, is refused at start. `/api/backup` and `dasks backup status` show the remote's host and path only.
