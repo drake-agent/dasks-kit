@@ -108,3 +108,52 @@ test('bin/verify-decisions.ts: passes the good fixture, fails the tamper fixture
     assert.equal(verifyCli(path.join(d, 'cut.jsonl'), key, ['--no-head']).code, 0, '--no-head checks the chain only');
   } finally { fs.rmSync(d, { recursive: true, force: true }); }
 });
+
+/** Runs fn with fs.writeSync replaced: writes to the ledger file (matched by inode) go through `ledgerWrite`,
+ *  every other write (the head's temp file) passes through unchanged. */
+function withLedgerWrites<T>(ledger: string, ledgerWrite: (real: typeof fs.writeSync, fd: number, buf: Buffer, call: number) => number, fn: () => T): T {
+  const real = fs.writeSync;
+  const ino = fs.statSync(ledger).ino;
+  let call = 0;
+  (fs as any).writeSync = (fd: number, data: any, ...rest: any[]) => {
+    if (fs.fstatSync(fd).ino !== ino) return (real as any)(fd, data, ...rest);
+    const buf = typeof data === 'string' ? Buffer.from(data, 'utf8')
+      : Buffer.from(data.buffer, data.byteOffset + (rest[0] ?? 0), rest[1] ?? data.byteLength - (rest[0] ?? 0));
+    return ledgerWrite(real, fd, buf, call++);
+  };
+  try { return fn(); } finally { (fs as any).writeSync = real; }
+}
+
+test('short writes: an append keeps writing until every byte of a multi-byte entry is on disk', () => {
+  // Real case: a signal or a nearly full disk makes write(2) return fewer bytes than asked; the rest must still be written.
+  const d = tmp(); const f = path.join(d, 'ledger.jsonl'); const hf = path.join(d, 'ledger.head');
+  try {
+    appendDecision(f, KEY, input('shared.t-a'), new Date(), hf);
+    const korean = { ...input('shared.t-b'), scope: 'card: shared.t-b\n범위: 결정 장부에 한국어로 적힌 승인', comment: '짧은 쓰기에도 끝까지 써야 한다' };
+    const e = withLedgerWrites(f, (real, fd, buf) => real(fd, buf, 0, Math.min(5, buf.length)), () => appendDecision(f, KEY, korean, new Date(), hf));
+    assert.equal(e.seq, 2); assert.equal(e.comment, korean.comment);
+    const r = verifyLedger(fs.readFileSync(f, 'utf8'), KEY, readHead(hf));
+    assert.equal(r.ok, true, r.error); assert.equal(r.count, 2);
+    assert.equal(readHead(hf)!.seq, 2, 'head counts the new entry');
+  } finally { fs.rmSync(d, { recursive: true, force: true }); }
+});
+
+for (const [name, fail] of [
+  ['throws ENOSPC', (): number => { throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' }); }],
+  ['returns 0', (): number => 0],
+] as const) {
+  test(`short writes: a write that ${name} part way fails the append, keeps the head and leaves the torn tail visible`, () => {
+    // Real case: the disk fills up in the middle of an entry; the decision must not be reported saved or signed into the head.
+    const d = tmp(); const f = path.join(d, 'ledger.jsonl'); const hf = path.join(d, 'ledger.head');
+    try {
+      appendDecision(f, KEY, input('shared.t-a'), new Date(), hf);
+      const headBefore = fs.readFileSync(hf);
+      const korean = { ...input('shared.t-b'), comment: '디스크가 가득 찼을 때의 승인' };
+      assert.throws(() => withLedgerWrites(f, (real, fd, buf, call) => call === 0 ? real(fd, buf, 0, Math.min(7, buf.length)) : fail(),
+        () => appendDecision(f, KEY, korean, new Date(), hf)));
+      assert.ok(fs.readFileSync(hf).equals(headBefore), 'head file unchanged');
+      assert.equal(verifyLedger(fs.readFileSync(f, 'utf8'), KEY, readHead(hf)).ok, false, 'torn tail fails verification');
+      assert.throws(() => appendDecision(f, KEY, input('shared.t-c'), new Date(), hf), /incomplete/);
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+}

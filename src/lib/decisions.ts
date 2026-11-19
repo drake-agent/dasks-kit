@@ -131,7 +131,15 @@ function appendEntries(file: string, key: Buffer, inputs: DecisionInput[], now: 
     last = JSON.stringify(e);
   }
   const fd = fs.openSync(file, 'a', 0o600);
-  try { fs.writeSync(fd, out.map((e) => JSON.stringify(e) + '\n').join('')); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  try {
+    const buf = Buffer.from(out.map((e) => JSON.stringify(e) + '\n').join(''), 'utf8');
+    for (let off = 0; off < buf.length;) {
+      const n = fs.writeSync(fd, buf, off, buf.length - off);
+      if (!(n > 0)) throw new Error(`ledger write stopped after ${off} of ${buf.length} bytes`);
+      off += n;
+    }
+    fs.fsyncSync(fd);
+  } finally { fs.closeSync(fd); }
   if (headFile) writeHead(headFile, key, lines.length + out.length, last);
   return out as unknown as Decision[];
 }
