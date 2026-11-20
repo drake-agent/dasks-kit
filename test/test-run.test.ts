@@ -137,6 +137,18 @@ test("R2: a failing test marked todo: '' does not fail the run", { timeout: 60_0
   }
 });
 
+// Review pass 1 (Codex sol, dasks-kit PR 24): P1 a todo test whose late async error fails its file still exited 0.
+test('P1: a late uncaught error after a failing todo test fails the run, as node --test does', { timeout: 60_000 }, () => {
+  const { dir, write } = rig();
+  try {
+    write('late.test.mjs', `test('todo', { todo: true }, () => { setTimeout(() => { throw new Error('late'); }, 10); throw new Error('todo'); });\ntest('wait', () => new Promise((r) => setTimeout(r, 100)));`);
+    const r = spawnSync(process.execPath, [RUNNER, '--test-force-exit', 'late.test.mjs'], { cwd: dir, env: env(), encoding: 'utf8', timeout: 50_000 });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('R3: a file time counts its load and after hooks, not only its test bodies', { timeout: 60_000 }, () => {
   const { dir, write } = rig();
   try {

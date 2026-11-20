@@ -8,7 +8,7 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "test": "node scripts/test-wall.ts node scripts/test-run.ts --min-concurrency=6 --test-timeout=900000 --test-force-exit --import=./test/file-limit-preload.ts test/*.test.ts",
+    "test": "node scripts/test-wall.ts node scripts/test-run.ts --min-concurrency=4 --test-timeout=900000 --test-force-exit --import=./test/file-limit-preload.ts test/*.test.ts",
     "check": "bin/dasks-check",
     "start": "bin/dasks-server",
     "typecheck": "tsc -p . && tsc -p test",

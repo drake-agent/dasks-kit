@@ -106,8 +106,10 @@ async function main(argv: string[]) {
   stream.on('test:fail', (d: any) => {
     if (!marked(d.todo) && !marked(d.skip)) failed = true;
   });
+  // Any summary counts, a file's too: a late uncaught error in a file fails that file's summary while the run's own
+  // summary can still say success (review pass 1, P1); `node --test` exits 1 then.
   stream.on('test:summary', (d: any) => {
-    if (d.file === undefined && d.success === false) failed = true;
+    if (d.success === false) failed = true;
   });
   // A file's time is how long its process lived (scripts/test-time-preload.ts); the sum of its top-level tests is the
   // floor, and the only number for a file whose process was killed before it could write.
