@@ -226,6 +226,18 @@ flowchart LR
 
 Run the tests with `npm ci && npm test`.
 
+### Test order
+
+`npm test` runs the files through `scripts/test-run.ts`, not `node --test`, because `node --test <files>` sorts the files
+by name: a slow file late in the alphabet started near the end and the run waited for it alone. The runner hands
+`node:test` `run()` (which keeps the order) the files longest-first by `test/file-times.json`, so the slow files start
+at once and the short ones fill the gaps. Everything else is as `node --test`: concurrency cores minus one, one process
+per file, `--test-timeout`, `--test-force-exit` and `--import` passed to every file, TAP on a pipe, exit 1 on a failure.
+A file missing from `test/file-times.json` (a new one) starts first. On GitHub Actions the run prints
+`test-run: file-times {…}`; refresh the times from a green run with
+`gh run view <run> -R drake-agent/dasks-kit --log | sed -n 's/.*test-run: file-times //p' > /tmp/t.json && node scripts/test-run.ts --times-from=/tmp/t.json`.
+Stale times only cost speed, never correctness.
+
 ## Uninstall
 
 ```bash

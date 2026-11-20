@@ -90,7 +90,7 @@ const lastLine = (s: string) => lines(s).at(-1) ?? '';
 
 test('the test script runs the suite through the wall cap', { timeout: 60_000 }, () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-  assert.equal(pkg.scripts.test, 'node scripts/test-wall.ts node --test --test-timeout=900000 --test-force-exit --import=./test/file-limit-preload.ts test/*.test.ts');
+  assert.equal(pkg.scripts.test, 'node scripts/test-wall.ts node scripts/test-run.ts --min-concurrency=4 --test-timeout=900000 --test-force-exit --import=./test/file-limit-preload.ts test/*.test.ts');
 });
 
 test('a busy loop is stopped at the wall cap and its file is named', { timeout: 60_000 }, async () => {
