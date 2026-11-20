@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { loadConfig, projectsConfigErrors } from '../src/lib/config.ts';
 import { loadBoard } from '../src/lib/load.ts';
 import { check } from '../src/lib/check.ts';
@@ -191,6 +191,66 @@ test('merge gate: the PR is looked up in the repo the command names (-R, gh api 
     ]);
     assert.match(gate('gh pr merge -R other/repo').stderr, /name the PR too/);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('merge gate: a merge passes only when it is pinned to the head the board approved', async () => {
+  // Real case: an agent's Bash merge command seen by the Claude Code PreToolUse hook after the user approved head A on the board
+  const A = 'a'.repeat(40), B = 'b'.repeat(40);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dasks-gate-pin-'));
+  // stub board: ok only for card demo.t-pin at head A
+  const board = spawn('python3', ['-c', [
+    'import http.server, json, urllib.parse',
+    'class H(http.server.BaseHTTPRequestHandler):',
+    '    def do_GET(self):',
+    '        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)',
+    `        ok = q.get("card") == ["demo.t-pin"] and q.get("sha") == ["${A}"]`,
+    '        b = json.dumps({"ok": ok}).encode(); self.send_response(200); self.end_headers(); self.wfile.write(b)',
+    '    def log_message(self, *a): pass',
+    's = http.server.HTTPServer(("127.0.0.1", 0), H); print(s.server_port, flush=True); s.serve_forever()',
+  ].join('\n')], { stdio: ['ignore', 'pipe', 'inherit'] });
+  try {
+    const port = await new Promise<string>((resolve) => board.stdout!.once('data', (d) => resolve(String(d).trim())));
+    const pr = (branch: string) => fs.writeFileSync(path.join(dir, 'pr.json'), JSON.stringify({ headRefOid: A, headRefName: branch, title: 't', url: 'u' }));
+    fs.writeFileSync(path.join(dir, 'gh'), `#!/bin/bash\ncat "${dir}/pr.json"\n`, { mode: 0o755 });
+    const gate = (command: string) => spawnSync('python3', [path.join(ROOT, 'bin/dask-merge-gate')], { input: JSON.stringify({ tool_input: { command } }), env: { ...process.env, PATH: `${dir}:/usr/bin:/bin`, DASKS_URL: `http://127.0.0.1:${port}` }, encoding: 'utf8' });
+    pr('human/demo.t-pin');
+    for (const c of [
+      'gh pr merge 12 --squash',
+      `gh pr merge 12 --squash --match-head-commit ${B}`,
+      `gh pr merge 12 --auto --squash --match-head-commit ${A}`,
+      'gh api -X PUT repos/o/r/pulls/12/merge',
+      `gh api -X PUT repos/o/r/pulls/12/merge -f sha=${B}`,
+      `gh pr merge 12 --squash --match-head-commit ${A.slice(0, 12)}`,
+      `gh pr merge 12 --squash --match-head-commit ${A} --match-head-commit=${B}`,
+      `gh api -X PUT repos/o/r/pulls/12/merge -f sha=${A} --input body.json`,
+      `gh api -X PUT repos/o/r/pulls/12/merge -H sha=${A}`,
+      `gh pr merge 12 --squash --match-head-commit ${A} --au$'to'`,
+      `gh api -X PUT repos/o/r/pulls/12/merge -f sha=${A} $'--input' body.json`,
+      `gh pr merge 12 --squash --match-head-commit ${A} --{auto,x}`,
+    ]) {
+      const r = gate(c);
+      assert.equal(r.status, 2, c);
+      assert.match(r.stderr, /refused/, c);
+    }
+    for (const c of ['gh pr merge 12 --squash', `gh pr merge 12 --match-head-commit ${A.slice(0, 12)}`, `gh pr merge 12 --match-head-commit ${A} --match-head-commit ${B}`]) {
+      assert.match(gate(c).stderr, new RegExp(`--match-head-commit ${A}.*-f sha=${A}`), c);
+    }
+    for (const c of [
+      `gh pr merge 12 --squash --match-head-commit ${A}`,
+      `gh pr merge 12 --squash --match-head-commit=${A}`,
+      `gh pr merge 12 --squash --match-head-commit=${A.toUpperCase()}`,
+      `gh api -X PUT repos/o/r/pulls/12/merge -f sha=${A}`,
+      `gh api -X PUT repos/o/r/pulls/12/merge --raw-field=sha=${A} -f merge_method=squash`,
+      `gh api --method PUT repos/o/r/pulls/12/merge -F sha=${A}`,
+    ]) {
+      const r = gate(c);
+      assert.equal(r.status, 0, c + ': ' + r.stderr);
+    }
+    pr('human/demo.t-nook');
+    const no = gate(`gh pr merge 12 --squash --match-head-commit ${A}`);
+    assert.equal(no.status, 2);
+    assert.match(no.stderr, /no merge OK/);
+  } finally { board.kill(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 // ---------- installer ----------

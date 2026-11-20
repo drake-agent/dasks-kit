@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Merge gate: a merge must now name the approved head, so a push after the check makes GitHub refuse it. `gh pr merge`
+  needs `--match-head-commit <sha>` and a `gh api …/pulls/<n>/merge` needs a `sha=<sha>` field, the full 40-hex PR head
+  the board approved. A merge with no pin, a short or other sha, two different pins, `gh pr merge --auto` or
+  `gh api --input` is refused, and so is any `$`, glob or brace in a merge command; the reason names the head and the
+  flag to add. `dask merge` already pins its merges.
+
 ## 1.1.1 — 2026-11-16
 
 - Rethink cards: while a rethink card is open (not done, not cancelled), the card it replaces no longer asks you for a
