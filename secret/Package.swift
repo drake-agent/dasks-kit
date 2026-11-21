@@ -10,6 +10,6 @@ let package = Package(
     targets: [
         .target(name: "SecretCore"),
         .executableTarget(name: "dasks-secret", dependencies: ["SecretCore"]),
-        .testTarget(name: "SecretCoreTests", dependencies: ["SecretCore"]),
+        .testTarget(name: "SecretCoreTests", dependencies: ["SecretCore", "dasks-secret"]),
     ]
 )

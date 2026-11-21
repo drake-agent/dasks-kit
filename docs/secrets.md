@@ -124,5 +124,6 @@ node --test --import=./test/file-limit-preload.ts test/secrets.test.ts   # dask 
 ```
 
 The Keychain, the windows and Touch ID sit behind protocols (`SecretStore`, `HumanPrompts`, `CommandExecutor`), so the
-tests use fakes. A CI job could run `swift test` too: on a `macos-latest` runner, add a step `run: swift test` with
+tests use fakes. The command resolver is the exception: `RealResolverTests` runs the real one (PATH lookup, realpath,
+file fingerprint) on temp files, so an edited executable or a retargeted symlink must still end in `target_changed`. A CI job could run `swift test` too: on a `macos-latest` runner, add a step `run: swift test` with
 `working-directory: secret` (the Command Line Tools are already there).
