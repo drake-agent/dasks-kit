@@ -206,7 +206,7 @@ async function gateRig() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dasks-gate1-'));
   fs.writeFileSync(path.join(dir, 'gh'), `#!/bin/bash\nprintf '%s\\n' "$*" >> "$STUB_DIR/gh.args"\ncase "$1 $2" in\n  "pr view") printf '%s\\n' "$STUB_VIEW"; exit "\${STUB_VIEW_EXIT:-0}";;\n  "api graphql") printf '%s\\n' "$STUB_GQL"; exit "\${STUB_GQL_EXIT:-0}";;\nesac\nexit 0\n`, { mode: 0o755 });
   fs.writeFileSync(path.join(dir, 'board.py'), [
-    'import http.server, json, os, sys, urllib.parse',
+    'import http.server, json, os, socketserver, sys, urllib.parse',
     'd, card, sha = sys.argv[1:4]',
     'class H(http.server.BaseHTTPRequestHandler):',
     '    def do_GET(self):',
@@ -216,14 +216,18 @@ async function gateRig() {
     "        body = json.dumps({'ok': ok}).encode()",
     "        self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)",
     '    def log_message(self, *a): pass',
-    "s = http.server.HTTPServer(('127.0.0.1', 0), H)",
+    // TCPServer, not HTTPServer: HTTPServer's bind looks 127.0.0.1 up in DNS (getfqdn), which stalled past the wait on CI
+    "s = socketserver.TCPServer(('127.0.0.1', 0), H)",
     "p = os.path.join(d, 'board.port')",
     "open(p + '.tmp', 'w').write(str(s.server_address[1])); os.rename(p + '.tmp', p)",
     's.serve_forever()',
   ].join('\n'));
-  const board = spawn('python3', [path.join(dir, 'board.py'), dir, GATE_CARD, GATE_A], { stdio: 'ignore' });
+  const board = spawn('python3', [path.join(dir, 'board.py'), dir, GATE_CARD, GATE_A], { stdio: ['ignore', 'ignore', 'pipe'] });
+  let boardErr = '';
+  board.stderr!.on('data', (b) => { boardErr += b; });
   const portFile = path.join(dir, 'board.port');
-  for (let i = 0; i < 400 && !fs.existsSync(portFile); i++) await new Promise((r) => setTimeout(r, 25));
+  for (let i = 0; i < 400 && !fs.existsSync(portFile) && board.exitCode === null; i++) await new Promise((r) => setTimeout(r, 25));
+  if (!fs.existsSync(portFile)) { board.kill(); fs.rmSync(dir, { recursive: true, force: true }); throw new Error(`stub board did not start: ${boardErr}`); }
   const env: Record<string, string | undefined> = { ...process.env, PATH: `${dir}:/usr/bin:/bin`, DASKS_HOME: dir, DASKS_URL: `http://127.0.0.1:${fs.readFileSync(portFile, 'utf8')}`, STUB_DIR: dir, STUB_VIEW: GATE_VIEW, STUB_GQL: gateGql(GATE_A, false) };
   for (const k of ['DASKS_CA_FILE', 'DASK_MERGE_GATE', 'STUB_VIEW_EXIT', 'STUB_GQL_EXIT']) delete env[k];
   const take = (f: string) => { const p = path.join(dir, f); const s = fs.existsSync(p) ? fs.readFileSync(p, 'utf8').trim() : ''; fs.rmSync(p, { force: true }); return s ? s.split('\n') : []; };
