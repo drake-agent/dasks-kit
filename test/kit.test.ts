@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { loadConfig, projectsConfigErrors } from '../src/lib/config.ts';
 import { loadBoard } from '../src/lib/load.ts';
 import { check } from '../src/lib/check.ts';
@@ -191,6 +191,146 @@ test('merge gate: the PR is looked up in the repo the command names (-R, gh api 
     ]);
     assert.match(gate('gh pr merge -R other/repo').stderr, /name the PR too/);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// One allowed merge shape. A stub gh logs its calls and answers from STUB_* env; a stub board in its own process (spawnSync
+// blocks this one) logs its calls and answers /api/merge-ok ok only for GATE_CARD at head A, unless board.no exists.
+const GATE_A = '0123456789abcdef0123456789abcdef01234567';
+const GATE_B = '1'.repeat(40);
+const GATE_CARD = 'shared.t-demo';
+const GATE_VIEW = JSON.stringify({ headRefOid: GATE_A, headRefName: `human/${GATE_CARD}`, title: 't', url: 'https://github.com/o/r/pull/12' });
+const gateGql = (head: string, queue?: unknown) => JSON.stringify({ data: { repository: { pullRequest: { headRefOid: head, ...(queue === undefined ? {} : { isMergeQueueEnabled: queue }) } } } });
+const SHAPED = `gh pr merge 12 -R o/r --squash --match-head-commit ${GATE_A}`;
+
+async function gateRig() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dasks-gate1-'));
+  fs.writeFileSync(path.join(dir, 'gh'), `#!/bin/bash\nprintf '%s\\n' "$*" >> "$STUB_DIR/gh.args"\ncase "$1 $2" in\n  "pr view") printf '%s\\n' "$STUB_VIEW"; exit "\${STUB_VIEW_EXIT:-0}";;\n  "api graphql") printf '%s\\n' "$STUB_GQL"; exit "\${STUB_GQL_EXIT:-0}";;\nesac\nexit 0\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(dir, 'board.py'), [
+    'import http.server, json, os, sys, urllib.parse',
+    'd, card, sha = sys.argv[1:4]',
+    'class H(http.server.BaseHTTPRequestHandler):',
+    '    def do_GET(self):',
+    "        with open(os.path.join(d, 'board.log'), 'a') as f: f.write(self.path + '\\n')",
+    '        u = urllib.parse.urlparse(self.path); q = urllib.parse.parse_qs(u.query)',
+    "        ok = not os.path.exists(os.path.join(d, 'board.no')) and u.path == '/api/merge-ok' and q.get('card') == [card] and q.get('sha') == [sha]",
+    "        body = json.dumps({'ok': ok}).encode()",
+    "        self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)",
+    '    def log_message(self, *a): pass',
+    "s = http.server.HTTPServer(('127.0.0.1', 0), H)",
+    "p = os.path.join(d, 'board.port')",
+    "open(p + '.tmp', 'w').write(str(s.server_address[1])); os.rename(p + '.tmp', p)",
+    's.serve_forever()',
+  ].join('\n'));
+  const board = spawn('python3', [path.join(dir, 'board.py'), dir, GATE_CARD, GATE_A], { stdio: 'ignore' });
+  const portFile = path.join(dir, 'board.port');
+  for (let i = 0; i < 400 && !fs.existsSync(portFile); i++) await new Promise((r) => setTimeout(r, 25));
+  const env: Record<string, string | undefined> = { ...process.env, PATH: `${dir}:/usr/bin:/bin`, DASKS_HOME: dir, DASKS_URL: `http://127.0.0.1:${fs.readFileSync(portFile, 'utf8')}`, STUB_DIR: dir, STUB_VIEW: GATE_VIEW, STUB_GQL: gateGql(GATE_A, false) };
+  for (const k of ['DASKS_CA_FILE', 'DASK_MERGE_GATE', 'STUB_VIEW_EXIT', 'STUB_GQL_EXIT']) delete env[k];
+  const take = (f: string) => { const p = path.join(dir, f); const s = fs.existsSync(p) ? fs.readFileSync(p, 'utf8').trim() : ''; fs.rmSync(p, { force: true }); return s ? s.split('\n') : []; };
+  const gate = (command: string, extra: Record<string, string> = {}) => {
+    take('gh.args'); take('board.log');
+    const r = spawnSync('python3', [path.join(ROOT, 'bin/dask-merge-gate')], { input: JSON.stringify({ tool_input: { command } }), env: { ...env, ...extra }, encoding: 'utf8' });
+    return { status: r.status, stderr: r.stderr, gh: take('gh.args'), board: take('board.log') };
+  };
+  return { dir, gate, stop: () => { board.kill(); fs.rmSync(dir, { recursive: true, force: true }); } };
+}
+
+test('merge gate: the one allowed shape, pinned to the approved head with no merge queue, passes', async () => {
+  // Real case: an agent's Bash merge command seen by the Claude Code PreToolUse hook after the user approved head A on the board
+  const rig = await gateRig();
+  try {
+    for (const c of [SHAPED, `gh pr merge 12 --match-head-commit ${GATE_A} --merge -R o/r`, `gh pr merge 12 --rebase -R o/r --match-head-commit ${GATE_A}`]) {
+      const r = rig.gate(c);
+      assert.equal(r.status, 0, `${c}\n${r.stderr}`);
+      assert.equal(r.gh.length, 2, c);
+      assert.equal(r.gh[0], 'pr view 12 -R o/r --json headRefOid,headRefName,title,url', c);
+      assert.match(r.gh[1], /^api graphql --hostname github\.com /, c);
+      for (const part of ['isMergeQueueEnabled', 'headRefOid', 'owner=o', 'name=r', 'number=12']) assert.ok(r.gh[1].split(/\s+/).some((w) => w.includes(part)), `${part} in ${r.gh[1]}`);
+      assert.deepEqual(r.board, [`/api/merge-ok?card=${GATE_CARD}&sha=${GATE_A}`], c);
+    }
+  } finally { rig.stop(); }
+});
+
+test('merge gate: other merges are refused with the allowed shape as the hint', async () => {
+  // Real case: an agent's Bash merge command seen by the Claude Code PreToolUse hook after the user approved head A on the board
+  const rig = await gateRig();
+  const P = 'gh pr merge 12 -R o/r';
+  try {
+    // after today's lookup, which only fills the hint: no queue read, no board call
+    for (const c of [
+      `${P} --squash`,
+      `gh pr merge 12 --squash --match-head-commit ${GATE_A}`,
+      `${P} --squash --match-head-commit ${GATE_B}`,
+      `${P} --squash --match-head-commit ${GATE_A.toUpperCase()}`,
+      `${P} --squash --match-head-commit ${GATE_A.slice(0, 12)}`,
+      `${P} --squash --match-head-commit=${GATE_A}`,
+      `${P} --auto --squash --match-head-commit ${GATE_A}`,
+      `${P} --admin --squash --match-head-commit ${GATE_A}`,
+      `${P} -d --squash --match-head-commit ${GATE_A}`,
+      `${P} --squash --match-head-commit ${GATE_A} --disable-auto`,
+      `${P} --squash --squash --match-head-commit ${GATE_A}`,
+      `${P} --squash --rebase --match-head-commit ${GATE_A}`,
+      `${P} -s --match-head-commit ${GATE_A}`,
+      `${P} --squash --match-head-commit ${GATE_A} --subject Fix`,
+      `${P} --squash --match-head-commit ${GATE_A} --body-file notes/msg.txt`,
+      `gh api -X PUT repos/o/r/pulls/12/merge -f sha=${GATE_A} -f merge_method=squash`,
+    ]) {
+      const r = rig.gate(c);
+      assert.equal(r.status, 2, c);
+      assert.ok(r.stderr.includes('gh pr merge 12') && r.stderr.includes(`--match-head-commit ${GATE_A}`), `${c}\n${r.stderr}`);
+      assert.ok(!r.gh.some((l) => l.startsWith('api graphql')), `${c}: ${r.gh}`);
+      assert.deepEqual(r.board, [], c);
+      if (!c.includes(' -R ') && !c.startsWith('gh api')) assert.ok(r.stderr.includes('<owner>/<repo>'), `${c}\n${r.stderr}`);
+    }
+    // non-plain text, a first word other than gh, or a bad -R value: refused before any gh or board call
+    for (const c of [
+      `${P} --squash --match-head-commit ${GATE_A} --subject "Fix [approval]"`,
+      `${P} --squash --match-head-commit "${GATE_A}"`,
+      `${P} --squash --match-head-commit ${GATE_A} --subject=a\\ b`,
+      `${P} --squash --match-head-commit ${GATE_A} --subject *`,
+      `gh pr merge 12 -R host.example/o/r --squash --match-head-commit ${GATE_A}`,
+      `gh pr merge 12 -R git@host.example:o/r --squash --match-head-commit ${GATE_A}`,
+      `/usr/local/bin/gh pr merge 12 -R o/r --squash --match-head-commit ${GATE_A}`,
+    ]) {
+      const r = rig.gate(c);
+      assert.equal(r.status, 2, c);
+      assert.ok(r.stderr.includes('gh pr merge') && r.stderr.includes('--match-head-commit <head>'), `${c}\n${r.stderr}`);
+      assert.deepEqual(r.gh, [], c);
+      assert.deepEqual(r.board, [], c);
+    }
+  } finally { rig.stop(); }
+});
+
+test('merge gate: the allowed shape fails closed when the board, gh or the queue read cannot confirm it', async () => {
+  // Real case: an agent's Bash merge command seen by the Claude Code PreToolUse hook after the user approved head A on the board
+  const rig = await gateRig();
+  try {
+    const cases: [string, Record<string, string>][] = [
+      ['board unreachable', { DASKS_URL: 'http://127.0.0.1:9' }],
+      ['board CA file missing', { DASKS_CA_FILE: path.join(rig.dir, 'no-such-ca.pem') }],
+      ['pr view not json', { STUB_VIEW: 'not json' }],
+      ['gh exits 1', { STUB_VIEW_EXIT: '1' }],
+      ['no head', { STUB_VIEW: JSON.stringify({ headRefName: `human/${GATE_CARD}`, title: 't', url: 'https://github.com/o/r/pull/12' }) }],
+      ['queue true', { STUB_GQL: gateGql(GATE_A, true) }],
+      ['queue missing', { STUB_GQL: gateGql(GATE_A) }],
+      ['graphql head B', { STUB_GQL: gateGql(GATE_B, false) }],
+      ['url names another repo', { STUB_VIEW: GATE_VIEW.replace('/o/r/', '/o/other/') }],
+      ['url names another PR', { STUB_VIEW: GATE_VIEW.replace('/pull/12', '/pull/13') }],
+      ['graphql exits 1', { STUB_GQL_EXIT: '1' }],
+      ['graphql not json', { STUB_GQL: 'not json' }],
+    ];
+    for (const [why, env] of cases) {
+      const r = rig.gate(SHAPED, env);
+      assert.equal(r.status, 2, `${why}\n${r.stderr}`);
+      assert.match(r.stderr, /gh pr merge 12 -R o\/r --squash --match-head-commit /, why);
+    }
+    assert.match(rig.gate(SHAPED, { STUB_GQL: gateGql(GATE_A, true) }).stderr, /merge queue/);
+    assert.equal(rig.gate('git status', { DASKS_CA_FILE: path.join(rig.dir, 'no-such-ca.pem') }).status, 0);
+    fs.writeFileSync(path.join(rig.dir, 'board.no'), '');
+    const no = rig.gate(SHAPED);
+    assert.equal(no.status, 2, 'the board answers not ok');
+    assert.equal(no.board.length, 1);
+  } finally { rig.stop(); }
 });
 
 // ---------- installer ----------
