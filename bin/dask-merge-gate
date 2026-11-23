@@ -16,7 +16,7 @@ backslashes, globs or `$`); after `gh pr merge <digits>` come exactly three opti
 its own word: one of --squash/--merge/--rebase, `-R <owner>/<repo>` (two parts, no host, `:` or `@`) and
 `--match-head-commit <head>` with the PR's head as 40 lowercase hex. Every other merge is refused with that shape as the
 hint, every `gh api` merge and any other option (--auto, --admin, -d, --subject, …) included. A non-plain command, a path
-before gh or a bad -R value is refused before any gh or board call; other merges are looked up first, only to fill the hint.
+before gh or a bad -R/--repo value (any spelling) is refused before any gh or board call; other merges are looked up first, only to fill the hint.
 For the allowed shape the gate reads the PR (`gh pr view`), checks that its url is that repo and number, asks GitHub's
 GraphQL API on that host (`isMergeQueueEnabled`, `headRefOid`) and lets it through only when the merge queue is off and
 the head still equals the pin, and the board holds the user's OK for that card at that head. Anything it cannot read
@@ -151,8 +151,9 @@ def main():
     if not PLAIN.fullmatch(cmd): refuse("a merge command is plain text only: no quotes, backslashes, globs, `$` or other shell syntax", hint)
     words = cmd.split()
     if words[0] != "gh": refuse("a merge command starts with gh itself, not a path to it", hint)
-    if any(w == "-R" and not REPO.fullmatch(words[i + 1] if i + 1 < len(words) else "") for i, w in enumerate(words)):
-        refuse("-R takes owner/repo only (no host, `:` or `@` form)", hint)
+    named = [words[i + 1] if i + 1 < len(words) else "" for i, w in enumerate(words) if w in ("-R", "--repo")]
+    named += [w[2:] for w in words if w.startswith("-R") and len(w) > 2] + [w[7:] for w in words if w.startswith("--repo=")]
+    if not all(REPO.fullmatch(r) for r in named): refuse("-R takes owner/repo only (no host, `:` or `@` form)", hint)
     info = gh_json("pr", "view", *([sel] if sel else []), *(["-R", repo] if repo else []), "--json", "headRefOid,headRefName,title,url", hint=hint)
     sha = dig(info, "headRefOid")
     if not isinstance(sha, str) or not SHA.fullmatch(sha): refuse("gh pr view gave no head commit for this PR", hint)

@@ -290,6 +290,9 @@ test('merge gate: other merges are refused with the allowed shape as the hint', 
       `${P} --squash --match-head-commit ${GATE_A} --subject *`,
       `gh pr merge 12 -R host.example/o/r --squash --match-head-commit ${GATE_A}`,
       `gh pr merge 12 -R git@host.example:o/r --squash --match-head-commit ${GATE_A}`,
+      `gh pr merge 12 -Rhost.example/o/r --squash --match-head-commit ${GATE_A}`,
+      `gh pr merge 12 --repo=host.example/o/r --squash --match-head-commit ${GATE_A}`,
+      `gh pr merge 12 --repo host.example/o/r --squash --match-head-commit ${GATE_A}`,
       `/usr/local/bin/gh pr merge 12 -R o/r --squash --match-head-commit ${GATE_A}`,
     ]) {
       const r = rig.gate(c);
