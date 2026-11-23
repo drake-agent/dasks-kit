@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""dask-merge-gate — optional Claude Code PreToolUse hook (Bash): an agent's `gh pr merge` runs only when the board holds
-the human user's signed merge OK for that PR's card at exactly the PR's head.
+"""dask-merge-gate — optional Claude Code PreToolUse hook (Bash): an agent's merge runs only in one plain shape, pinned to
+the head the human user approved on the board, on a PR with no merge queue:
+
+  gh pr merge <n> -R <owner>/<repo> --squash|--merge|--rebase --match-head-commit <head>
 
   dask-merge-gate        reads the hook JSON on stdin; exit 0 = allow (silent), exit 2 = refuse (reason on stderr)
   DASK_MERGE_GATE=0      turns it off
@@ -8,8 +10,17 @@ the human user's signed merge OK for that PR's card at exactly the PR's head.
 What counts as a merge: `gh pr merge …` and `gh api …/pulls/<n>/merge`. Commands with no merge pass with no gh call.
 Fail closed: a merge command must be one plain command. Indirection (eval, source, `sh -c`, xargs, a variable as the
 command word) and compound commands (`;`, `&&`, `||`, `|`, `&`, subshells, newlines) are refused, since the gate checks
-exactly one PR and could not see what else would run. The PR is looked up in the repo the command names (`-R`/`--repo`,
-or the `repos/<owner>/<repo>/` of a `gh api` path), else the current one.
+exactly one PR and could not see what else would run.
+The allowed shape: the first word is `gh` itself (no path); the text is only `A-Za-z0-9_./:=@+,%-` and spaces (no quotes,
+backslashes, globs or `$`); after `gh pr merge <digits>` come exactly three options in any order, each once and each value
+its own word: one of --squash/--merge/--rebase, `-R <owner>/<repo>` (two parts, no host, `:` or `@`) and
+`--match-head-commit <head>` with the PR's head as 40 lowercase hex. Every other merge is refused with that shape as the
+hint, every `gh api` merge and any other option (--auto, --admin, -d, --subject, …) included. A non-plain command, a path
+before gh or a bad -R value is refused before any gh or board call; other merges are looked up first, only to fill the hint.
+For the allowed shape the gate reads the PR (`gh pr view`), checks that its url is that repo and number, asks GitHub's
+GraphQL API on that host (`isMergeQueueEnabled`, `headRefOid`) and lets it through only when the merge queue is off and
+the head still equals the pin, and the board holds the user's OK for that card at that head. Anything it cannot read
+(gh failing, bad JSON, no head, no queue answer, the board or its CA file) refuses with exit 2.
 How the user approves: the agent moves the card to blocked-on-user with needs_user starting `head <40-char sha> …`
 (`dasks update <card> --status blocked-on-user --needs-user "head <sha> merge PR #N? If approved, it merges." --what … --why … --do … --rec …
 --after …`); the user logs in on the board and taps approve. GET /api/merge-ok?card=&sha= then answers ok for that head
@@ -28,23 +39,42 @@ CLIENT = _client()
 BOARD = (os.environ.get("DASKS_URL") or CLIENT.get("url") or "http://127.0.0.1:4747").rstrip("/")
 # An https board signed by its own CA: $DASKS_CA_FILE, else client.json "ca" (install.sh --ca-file).
 CA = os.environ.get("DASKS_CA_FILE") or CLIENT.get("ca") or ""
-if CA:
-    import ssl
-    urllib.request.install_opener(urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=CA))))
 CARD_RE = re.compile(r"[a-z][a-z0-9]{0,23}\.t-[a-z0-9]+(?:-[a-z0-9]+)*")
 MERGE_TEXT = re.compile(r"\bpr\b[\s\S]*\bmerge\b|pulls/\d+/merge|mergePullRequest|enablePullRequestAutoMerge", re.I)
 INDIRECT = re.compile(r"\beval\b|\bsource\b|(^|[;&|]\s*)\.\s|\b(?:ba|z)?sh\s+-\w*c\b|\bxargs\b|\$\(|`|\$\{?[A-Za-z_]+\}?\s+pr\b")
 # `gh pr merge` options that take a value: the value is never the PR.
 VALUE_OPTS = {"-R", "--repo", "-b", "--body", "-F", "--body-file", "-t", "--subject", "-A", "--author-email", "--match-head-commit"}
+PLAIN = re.compile(r"[A-Za-z0-9_./:=@+,%\- ]+")
+NUMBER, REPO, SHA = re.compile(r"[0-9]+"), re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"), re.compile(r"[0-9a-f]{40}")
+METHODS = {"--squash", "--merge", "--rebase"}
+HOST = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*"
+QUEUE_QUERY = ("query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name)"
+               "{pullRequest(number:$number){headRefOid isMergeQueueEnabled}}}")
 
-def refuse(why):
+def shape(n="", repo="", head=""):
+    """The one allowed merge, filled with what the gate read and placeholders for the rest."""
+    return "gh pr merge %s -R %s --squash --match-head-commit %s" % (
+        n if NUMBER.fullmatch(n or "") else "<n>", repo if REPO.fullmatch(repo or "") else "<owner>/<repo>",
+        head if SHA.fullmatch(head or "") else "<head>")
+
+def refuse(why, hint=None):
+    if hint: why += ("\n  the one merge the gate allows: %s\n  (--squash, --merge or --rebase; -R and --match-head-commit with the "
+                     "head the user approved on the board; each once, nothing else, no quotes)" % hint)
     print("dask-merge-gate: refused: " + why, file=sys.stderr); sys.exit(2)
 
-def gh(*args):
+def gh(*args, hint=None):
     try: r = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=15)
-    except (OSError, subprocess.SubprocessError) as e: refuse("gh failed (%s)" % e)
-    if r.returncode != 0: refuse("gh %s failed: %s" % (" ".join(args[:3]), (r.stderr or r.stdout).strip()[:200]))
+    except (OSError, subprocess.SubprocessError) as e: refuse("gh failed (%s)" % e, hint)
+    if r.returncode != 0: refuse("gh %s failed: %s" % (" ".join(args[:3]), (r.stderr or r.stdout).strip()[:200]), hint)
     return r.stdout
+
+def gh_json(*args, hint=None):
+    try: return json.loads(gh(*args, hint=hint))
+    except ValueError: refuse("gh %s did not answer JSON" % " ".join(args[:2]), hint)
+
+def dig(j, *keys):
+    for k in keys: j = j.get(k) if isinstance(j, dict) else None
+    return j
 
 def words_of(cmd):
     """The command as words; refuses anything that is not exactly one simple command."""
@@ -84,6 +114,29 @@ def target(cmd):
     if repo and not sel: refuse("-R names another repo: name the PR too")
     return repo, sel
 
+def pinned(words):
+    """(n, repo, pin) when `words` are exactly the allowed shape, else None."""
+    if words[:3] != ["gh", "pr", "merge"] or len(words) < 4 or not NUMBER.fullmatch(words[3]): return None
+    opts, i = {}, 4
+    while i < len(words):
+        w = words[i]
+        if w in METHODS: key, i = "method", i + 1
+        elif w in ("-R", "--match-head-commit") and i + 1 < len(words): key, i = w, i + 2
+        else: return None
+        if key in opts: return None
+        opts[key] = words[i - 1]
+    if len(opts) != 3 or not REPO.fullmatch(opts["-R"]) or not SHA.fullmatch(opts["--match-head-commit"]): return None
+    return words[3], opts["-R"], opts["--match-head-commit"]
+
+def board_ok(card, sha):
+    q = urllib.parse.urlencode({"card": card, "sha": sha})
+    handlers = []
+    if CA:
+        import ssl
+        handlers.append(urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=CA)))
+    with urllib.request.build_opener(*handlers).open(BOARD + "/api/merge-ok?" + q, timeout=15) as r:
+        return json.loads(r.read() or b"{}").get("ok") is True
+
 def main():
     if os.environ.get("DASK_MERGE_GATE") == "0": return
     try: payload = json.load(sys.stdin)
@@ -93,18 +146,44 @@ def main():
     if not isinstance(cmd, str) or not MERGE_TEXT.search(cmd) or "gh" not in cmd: return
     if INDIRECT.search(cmd): refuse("the merge command uses indirection the gate cannot read; run a plain `gh pr merge <n>`")
     repo, sel = target(cmd)
-    info = json.loads(gh("pr", "view", *([sel] if sel else []), *(["-R", repo] if repo else []), "--json", "headRefOid,headRefName,title,url"))
-    branch, title, sha = info.get("headRefName") or "", info.get("title") or "", info.get("headRefOid") or ""
-    m = re.fullmatch(r"(?:human|dasks)/(%s)" % CARD_RE.pattern, branch) or re.match(r"(%s):" % CARD_RE.pattern, title)
-    if not m: refuse("%s has no Dasks card (branch human/<card> or dasks/<card>, or a `<card>:` title); the human merges it" % info.get("url", "this PR"))
+    hint = shape(sel, repo)
+    # Before any gh or board call: the words gh would get must be the space-split text.
+    if not PLAIN.fullmatch(cmd): refuse("a merge command is plain text only: no quotes, backslashes, globs, `$` or other shell syntax", hint)
+    words = cmd.split()
+    if words[0] != "gh": refuse("a merge command starts with gh itself, not a path to it", hint)
+    if any(w == "-R" and not REPO.fullmatch(words[i + 1] if i + 1 < len(words) else "") for i, w in enumerate(words)):
+        refuse("-R takes owner/repo only (no host, `:` or `@` form)", hint)
+    info = gh_json("pr", "view", *([sel] if sel else []), *(["-R", repo] if repo else []), "--json", "headRefOid,headRefName,title,url", hint=hint)
+    sha = dig(info, "headRefOid")
+    if not isinstance(sha, str) or not SHA.fullmatch(sha): refuse("gh pr view gave no head commit for this PR", hint)
+    hint = shape(sel, repo, sha)
+    got = pinned(words)
+    if not got: refuse("this is not the one merge shape the gate allows", hint)
+    n, repo, pin = got
+    if pin != sha: refuse("--match-head-commit %s is not the PR's head %s" % (pin, sha), hint)
+    branch, title = info.get("headRefName") or "", info.get("title") or ""
+    m = (isinstance(branch, str) and re.fullmatch(r"(?:human|dasks)/(%s)" % CARD_RE.pattern, branch)) or \
+        (isinstance(title, str) and re.match(r"(%s):" % CARD_RE.pattern, title))
+    if not m: refuse("%s has no Dasks card (branch human/<card> or dasks/<card>, or a `<card>:` title); the human merges it" % info.get("url", "this PR"), hint)
     card = m.group(1)
-    q = urllib.parse.urlencode({"card": card, "sha": sha})
-    try:
-        with urllib.request.urlopen(BOARD + "/api/merge-ok?" + q, timeout=15) as r: ok = json.loads(r.read() or b"{}").get("ok") is True
-    except Exception as e: refuse("the board could not confirm a merge OK (%s)" % e)
+    # The queue question goes to the host the PR lives on, so its url must be this repo and number.
+    u = re.fullmatch(r"https://(%s)/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([0-9]+)" % HOST, str(info.get("url") or ""), re.I)
+    if not u or ("%s/%s" % (u.group(2), u.group(3))).lower() != repo.lower() or u.group(4) != n:
+        refuse("gh pr view's url is not PR %s of %s, so the gate cannot tell where to ask about the merge queue" % (n, repo), hint)
+    owner, name = repo.split("/")
+    q = gh_json("api", "graphql", "--hostname", u.group(1).lower(), "-f", "query=" + QUEUE_QUERY, "-f", "owner=" + owner,
+                "-f", "name=" + name, "-F", "number=" + n, hint=hint)
+    pr = dig(q, "data", "repository", "pullRequest")
+    if not isinstance(q, dict) or q.get("errors") or not isinstance(pr, dict): refuse("could not read the merge queue for this PR", hint)
+    if pr.get("isMergeQueueEnabled") is True:
+        refuse("this PR's base uses a merge queue, which can land a head nobody approved; the human merges it", hint)
+    if pr.get("isMergeQueueEnabled") is not False: refuse("could not read whether a merge queue is on for this PR", hint)
+    if pr.get("headRefOid") != pin: refuse("GitHub's head for this PR is not --match-head-commit %s" % pin, hint)
+    try: ok = board_ok(card, sha)
+    except Exception as e: refuse("the board could not confirm a merge OK (%s)" % e, hint)
     if not ok:
         refuse("no merge OK from the user for %s at head %s. Ask on the board: set the card to blocked-on-user with needs_user "
-               "starting `head %s`, and wait for the user to approve it there" % (card, sha[:12], sha))
+               "starting `head %s`, and wait for the user to approve it there" % (card, sha[:12], sha), hint)
 
 if __name__ == "__main__":
     main()

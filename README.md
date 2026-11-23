@@ -47,7 +47,7 @@ The installer asks for a board login passphrase (12+ characters). Run it again a
 | `--port N` | serve the board on port N (default 4747); every client follows it |
 | `--passphrase-file F` | read the passphrase from the first line of F instead of asking |
 | `--with-runner` | also install the card runner (see [Runner](#runner)) |
-| `--with-merge-gate` | add a Claude Code hook: `gh pr merge` runs only after you approve that PR head |
+| `--with-merge-gate` | add a Claude Code hook: an agent's merge runs only as `gh pr merge <n> -R <owner>/<repo> --squash\|--merge\|--rebase --match-head-commit <head>`, pinned to the PR head you approved on the board, on a PR with no merge queue; any other merge is refused with that shape as the hint |
 | `--listen ADDR` | also serve the board on this address, for other Macs ([docs/fleet.md](docs/fleet.md)) |
 | `--tls-cert F --tls-key F [--ca-file F]` | serve HTTPS (required with a `--listen` address beyond this Mac; [docs/fleet.md](docs/fleet.md#tls)) |
 | `--join URL --token-file F [--ca-file F]` | this Mac joins a board on another Mac: clients, skills and runner only ([docs/fleet.md](docs/fleet.md)) |

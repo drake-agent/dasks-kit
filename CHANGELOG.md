@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Merge gate (`--with-merge-gate`): an agent's merge now passes only in one plain shape,
+  `gh pr merge <n> -R <owner>/<repo> --squash|--merge|--rebase --match-head-commit <head>`: each option once, no other
+  options, no quotes or other shell syntax, `gh` itself as the first word, the pin equal to the PR's head and to the head
+  you approved on the board, and no merge queue on the PR (GitHub's `isMergeQueueEnabled`, asked on the PR's own host).
+  Every other merge, `gh api` merges included, is refused (exit 2) with that shape filled in as the hint. A gh, queue,
+  board or board CA file failure now refuses with exit 2 instead of crashing.
+
 ## 1.1.1 — 2026-11-16
 
 - Rethink cards: while a rethink card is open (not done, not cancelled), the card it replaces no longer asks you for a
