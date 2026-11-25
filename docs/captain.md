@@ -149,7 +149,7 @@ While it is on:
   stage (todo, lane `spec-rework`, its owner next), where the spec writer can still ask you. A run that hits `retry_cap`
   goes there too instead of `failed-terminal`; its failed runs still count, so nobody claims it before a reset.
 - **What still reaches you:** anything at the spec stage (a card not yet in doing), your own writes, a taste pick
-  (`kind: taste`), and a question about money, deleting data, a secret, a physical device or a UI or design choice.
+  (`kind: taste`), and a question about money, deleting data, a secret or credential (a token, key, password or login), a physical device or a UI or design choice. A person who moves a quiet review card by hand needs no decision first.
 
 ### Where reviews come from
 

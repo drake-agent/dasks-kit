@@ -746,6 +746,12 @@ def cmd_captain_merge(a, method, dry):
         # The lease must outlast the merge call: renewed now with room to spare, and the call is cut off well before.
         held = lease_renew_problem(me, lease_id, max(int(cap.get("lease_sec") or 0), 180))
         if held: die("not merged: %s" % held, 3)
+        # Merging on hands-off mode alone: the owner may have turned it off since the checks, so read it again now.
+        if cap.get("hands_off") is True and cap.get("auto_merge") is not True:
+            now = call("GET", "/api/captain", who=me, missing_ok=False) or {}
+            if now.get("hands_off") is not True and now.get("auto_merge") is not True:
+                ok = call("GET", "/api/merge-ok?" + urllib.parse.urlencode({"card": cid, "sha": sha}), who=me, missing_ok=False) or {}
+                if ok.get("ok") is not True: raise ReadyForHuman(sha)
         gh_merge(pr, method, sha, min(int(os.environ.get("DASKS_MERGE_TIMEOUT_SEC") or 60), 60))
     except ReadyForHuman as e:
         print("dask: %s; it waits for your merge OK on the board for this exact head" % e, file=sys.stderr)

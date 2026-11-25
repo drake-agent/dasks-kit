@@ -4,6 +4,7 @@
 // DASKS_PROG (set by the `dasks` wrapper) only changes the name shown in help and errors.
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { BoardError, client, envActor, machineName, IDEA_STATUSES, LESSON_STATUSES, STRUCTURES } from './board-client.mjs';
 
 const PROG = /^(gb|dasks)$/.test(process.env.DASKS_PROG || '') ? process.env.DASKS_PROG : 'dasks';
@@ -287,14 +288,14 @@ async function main() {
       return show(await board.summary(), (r) => (r.summary ? r.summary.text : `no summary yet (the board writes one each day at ${r.at})`));
     case 'hands-off': {
       if (!['on', 'off', 'status'].includes(args[0])) die(`usage: ${PROG} hands-off on | off | status`);
-      const r = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', new URL('../src/cli/hands-off.ts', import.meta.url).pathname, args[0]], { stdio: 'inherit' });
+      const r = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', fileURLToPath(new URL('../src/cli/hands-off.ts', import.meta.url)), args[0]], { stdio: 'inherit' });
       process.exitCode = r.status ?? 1;
       return;
     }
     case 'machine': {
       const [sub, name] = args;
       if (!['add', 'list', 'revoke'].includes(sub) || (sub !== 'list' && !name)) die(`usage: ${PROG} machine add <name> | list | revoke <name>`);
-      const tool = new URL('../bin/dasks-tokens.ts', import.meta.url).pathname;
+      const tool = fileURLToPath(new URL('../bin/dasks-tokens.ts', import.meta.url));
       const r = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', tool, 'machine', sub, ...(name ? [name] : [])], { stdio: 'inherit' });
       process.exitCode = r.status ?? 1;
       return;

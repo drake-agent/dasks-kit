@@ -63,7 +63,7 @@ import { itemsProgress, itemsView, reportItem, seedItems } from './lib/items.ts'
 import { assertTouchesFree, repoKey } from './lib/claim-guard.ts';
 import { migrateBoard, SchemaTooNew, SCHEMA_VERSION } from './lib/migrate.ts';
 import { nodeProblem } from './lib/node-floor.ts';
-import { buildStage, handsOffNote, handsOffOn, handsOffWrite, personOnly } from './lib/hands-off.ts';
+import { buildStage, handsOffMove, handsOffNote, handsOffOn, handsOffWrite, personOnly } from './lib/hands-off.ts';
 import { type Body, parseAnswer, parseCardAction, parseChat, parseLease, parseLeaseCheck, parseNodePatch, parseOutcomeOrFail, parseResetAttempts, parseTaskPatch, versionOf } from './lib/bodies.ts';
 
 const ROOT = boardRoot();
@@ -416,7 +416,7 @@ const quietReview = (t: Task) => t.status === 'review' && handsOffOn(ROOT) && !p
 /** The approve/reject question a card asks on the board, unless it waits on a user decision instead. fresh (the write
  *  checks and POST /api/decisions, read from disk): the rethink card's state is only cached, so a replaced card still
  *  asks there; it is left out of the lists only. */
-const boardDecision = (t: Task, fresh = false) => (liveAsk(t, fresh) ? null : fresh ? decisionRequest(t) : askOf(t));
+const boardDecision = (t: Task, fresh = false) => (liveAsk(t, fresh) || quietReview(t) ? null : fresh ? decisionRequest(t) : askOf(t));
 
 /** GET /api/asks: the open user decisions, newest first. */
 function asksDoc() {
@@ -667,7 +667,8 @@ const statKey = (f: string) => { try { const s = fs.statSync(f); return `${s.mti
 function unparkWrite(id: string, fields: Record<string, unknown>, actor: string, note: string | undefined, text: string, opts: { context?: unknown; warnings?: string[] }, sweep = false): string | undefined {
   // Hands-off mode (src/lib/hands-off.ts): a build-stage card is not put on the person for anything but a person-only matter.
   const was = handsOffOn(ROOT) && actor !== 'user' ? readTask(ROOT, id) : null;
-  const h = was ? handsOffWrite(was, fields, text, { actor, hasAsk: false, owner: cardOwner(was) }) : null;
+  const ctx = opts.context && typeof opts.context === 'object' ? Object.values(opts.context as Record<string, unknown>).filter((v) => typeof v === 'string').join(' ') : '';
+  const h = was ? handsOffWrite(was, fields, `${text} ${ctx}`, { actor, hasAsk: false, owner: cardOwner(was) }) : null;
   if (h) {
     for (const [k, v] of Object.entries(h.fields)) if (v === undefined) delete fields[k]; else fields[k] = v;
     if (fields.status !== 'review') opts.context = undefined;
@@ -1382,8 +1383,12 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
       // Hands-off mode: a build-stage card's ask is kept as a card note unless it is a taste pick or a person-only matter.
       const asked = validateAsk(body).length ? null : pickAsk(body);
       if (asked && handsOffOn(ROOT) && asked.kind !== 'taste' && !personOnly(JSON.stringify(asked)) && buildStage(readTask(ROOT, id))) {
-        const note = handsOffNote(readTask(ROOT, id), asked.wants);
-        const task = withRepoLock(ROOT, () => updateTask(ROOT, id, {}, who, { appendNote: note, warnings: [] }));
+        let note = '';
+        const task = withRepoLock(ROOT, () => {
+          const cur = readTask(ROOT, id);
+          note = handsOffNote(cur, asked.wants);
+          return updateTask(ROOT, id, handsOffMove(cur, cardOwner(cur)), who, { appendNote: note, warnings: [] });
+        });
         reloadAfterWrite();
         return send(res, 200, { routed: 'note', note, task: publicTask(task) });
       }

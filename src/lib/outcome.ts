@@ -195,7 +195,8 @@ export function recordOutcome(root: string, id: string, body: Record<string, unk
       const live = askLive(root, cur, open);
       // Hands-off: a person-only matter parks, an infra note runs again, anything else is kept as a note (needs-spec).
       const r = !handsOff || live ? parkRoute(said, !!input.ask || live) : mine ? 'park' : parkRoute(said, false) === 'retry' ? 'retry' : 'kept';
-      if (r === 'kept') { state = 'needs-spec'; handsOffSaid = said; }
+      // A review card stays in review for the captain; any other card goes back to its spec stage.
+      if (r === 'kept') { state = cur.status === 'review' ? 'needs-review' : 'needs-spec'; handsOffSaid = said; }
       if (r === 'retry') { state = 'failed'; cause = 'infra'; rerouted = r; }
       else if (r === 'rework') { state = 'needs-spec'; rerouted = r; }
     }
@@ -223,19 +224,22 @@ export function recordOutcome(root: string, id: string, body: Record<string, unk
     // The capped run still counts as failed, so the card is not claimed again until its attempts are reset.
     if (capped && handsOff) handsOffSaid = `retry cap reached: ${input.note}`;
     const statuses: Record<OutcomeKind, Status> = { done: 'done', failed: 'todo', 'needs-review': 'review', 'needs-user': 'blocked-on-user', 'needs-spec': 'todo' };
-    const status = ended ? cur.status : capped ? (handsOffSaid ? 'todo' : 'blocked-on-user') : statuses[state];
+    const stays = !!handsOffSaid && cur.status === 'review';
+    const status = ended ? cur.status : capped ? (stays ? 'review' : handsOffSaid ? 'todo' : 'blocked-on-user') : statuses[state];
     const owner = cardOwner(cur);
     const nextOwner = capped || state === 'needs-spec' ? owner : caused ? 'retry' : { done: '', failed: 'fix', 'needs-review': 'reviewer', 'needs-user': owner }[state];
     const at = isoLocal();
     const kinds: Record<OutcomeKind, Route['kind'] | null> = { done: null, failed: 'fix', 'needs-review': 'reviewer', 'needs-user': 'needs-user', 'needs-spec': 'spec-rework' };
-    const kind = capped ? (handsOffSaid ? 'spec-rework' : 'failed-terminal') : state === 'needs-spec' ? 'spec-rework' : caused ? 'retry' : kinds[state];
+    const kind = capped ? (stays ? 'reviewer' : handsOffSaid ? 'spec-rework' : 'failed-terminal') : state === 'needs-spec' ? 'spec-rework' : caused ? 'retry' : kinds[state];
     const route: Route | undefined = kind && !terminal ? { kind, job: `${job}:${kind}`, next_owner: nextOwner, at } : undefined;
     const reason = capped
       ? (capByFailures ? `retry cap reached after ${failures} failed runs; the card's owner to check. ${input.note}` : `retry cap reached after ${causedCount} quota or rate-limit failures; the card's owner to check. ${input.note}`).slice(0, 1500)
       : input.note;
+    // A review card that stays in review (hands-off) keeps its status and its context block: no move is written.
     const patch: Record<string, string> = ended ? { result: [input.note, ...input.evidence.slice(0, 1)].join('\n') }
+      : stays ? { next_owner: nextOwner, needs_user: '', result: [input.note, ...input.evidence.slice(0, 1)].join('\n') }
       : { status, next_owner: nextOwner, result: [input.note, ...input.evidence.slice(0, 1)].join('\n') };
-    if (capped) patch.lane = handsOffSaid ? 'spec-rework' : 'failed-terminal';
+    if (capped && !stays) patch.lane = handsOffSaid ? 'spec-rework' : 'failed-terminal';
     if (capped && handsOffSaid) patch.needs_user = '';
     if (!ended && state === 'needs-spec') { patch.lane = 'spec-rework'; patch.needs_user = ''; }
     if (!ended && status === 'blocked-on-user') patch.needs_user = reason;
@@ -253,7 +257,7 @@ export function recordOutcome(root: string, id: string, body: Record<string, unk
     // may have written none), so its handoff and ledger record are never refused for context.
     const have: Record<string, string | undefined> = ended ? (parseContext(cur.body) ?? {}) : {};
     const fill = (k: string) => (ended && have[k] && /[\p{L}\p{N}]/u.test(have[k]!) ? '' : reason);
-    const context = asked ? asked.context : ['review', 'blocked-on-user'].includes(status) ? { what: fill('what'), why: fill('why'), do: fill('do'), rec: fill('rec'), after: fill('after') } : undefined;
+    const context = asked ? asked.context : !stays && ['review', 'blocked-on-user'].includes(status) ? { what: fill('what'), why: fill('why'), do: fill('do'), rec: fill('rec'), after: fill('after') } : undefined;
     const as = state !== input.state || cause !== input.cause ? { as_state: state, ...(cause ? { as_cause: cause } : {}) } : {};
     const next = updateTask(root, id, patch, actor, { ...opts, context, body: input.handoff !== undefined ? withHandoff(cur.body, input.handoff) : undefined, action: 'outcome', outcome: state, appendNote: asked ? `${asked.note} · ${note}` : note,
       extraFiles: (response) => [...(asked ? [asked.file] : []), { rel, content: JSON.stringify({ ...input, job, id, run_id: runId, attempt, reset_epoch: epoch, actor, at, version: Number(response.version), ...(route ? { route } : {}), ...as, ...(terminal ? { status_kept: terminal } : {}), response } satisfies OutcomeRecord) + '\n' }] });
