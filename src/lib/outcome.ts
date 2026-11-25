@@ -126,6 +126,14 @@ function payload(input: OutcomeInput, job: string): string {
 // One status change per job end: the run's outcome is the mover. A launcher close (`job_end: <run_id>` on a status write)
 // that lands first leaves this marker, and a later outcome for that run then keeps the status.
 export const jobEndRel = (id: string, runId: string, attempt: number) => `data/job-ends/${createHash('sha256').update(JSON.stringify([id, runId, attempt])).digest('hex')}.json`;
+/** The job-end marker of a run: undefined `to` when it cannot be read (it still counts as ended); null when there is none. */
+function jobEndMark(root: string, id: string, runId: string, attempt: number): { to?: string } | null {
+  const f = path.join(root, jobEndRel(id, runId, attempt));
+  if (!fs.existsSync(f)) return null;
+  try { const j = JSON.parse(fs.readFileSync(f, 'utf8')); return { to: typeof j?.to === 'string' ? j.to : undefined }; } catch { return {}; }
+}
+/** The record outcome-or-fail writes for a job that ended without a result (src/lib/bodies.ts parseOutcomeOrFail). */
+const isFallback = (o: OutcomeRecord) => o.state === 'failed' && o.note === 'ended without a result' && !o.as_state;
 export function runOutcome(root: string, t: Task): OutcomeRecord | undefined {
   return t.run_id ? taskOutcomes(root, t.id).find((o) => o.run_id === t.run_id && o.attempt === Number(t.attempt)) : undefined;
 }
@@ -167,6 +175,9 @@ export function recordOutcome(root: string, id: string, body: Record<string, unk
     if (global && global.id !== id) throw new HttpError(409, 'job belongs to another card', { rule: 'outcome-job' });
     // outcome-or-fail only asks whether this never-started card already has an outcome, so later edits do not matter here.
     if (missingOnly && !previous && !cur.run_id) previous = outcomes.find((o) => o.job === implicit) ?? anyImplicit;
+    // A needs-spec question that arrives after the launcher's outcome-or-fail fallback recorded the run as failed replaces
+    // that fallback (same run record), so the question reaches the card's owner instead of a 409.
+    if (previous && !missingOnly && input.state === 'needs-spec' && isFallback(previous) && !terminal) previous = undefined;
     if (previous) {
       if (missingOnly || payload(previous, previous.job) === payload(input, job)) return previous.response ?? cur;
       throw new HttpError(409, 'a different outcome for this run is already recorded', { rule: 'outcome-conflict' });
@@ -203,8 +214,10 @@ export function recordOutcome(root: string, id: string, body: Record<string, unk
     // Except a late needs-spec (a build that stopped to send its question back to the card's owner): when the run's job end
     // closed it first (as failed), or the outcome is replayed later, the card that run left in todo (unclaimed, not yet in
     // spec-rework) still goes to spec-rework for its owner, with the question kept.
-    const lateSpec = !terminal && state === 'needs-spec' && cur.status === 'todo' && !cur.claimed_by && cur.lane !== 'spec-rework';
-    const ended = !!terminal || !lateSpec && !!cur.run_id && fs.existsSync(path.join(root, jobEndRel(id, runId, attempt)));
+    // Only while the card is still where that job end put it (its marker's `to`): a card its owner moved since keeps its lane.
+    const endMark = cur.run_id ? jobEndMark(root, id, runId, attempt) : null;
+    const lateSpec = !terminal && state === 'needs-spec' && !!endMark && endMark.to === 'todo' && cur.status === 'todo' && !cur.claimed_by && cur.lane !== 'spec-rework';
+    const ended = !!terminal || !lateSpec && !!endMark;
     // Either limit caps the card, whichever this run reports: dispatch (assertRetryAllowed) checks both, so a card is
     // never sent back to todo while it can no longer be claimed (e.g. retry_cap lowered between runs).
     const capByQuota = causedCount >= cfg.quota_retry_cap;

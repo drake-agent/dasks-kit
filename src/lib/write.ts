@@ -1043,8 +1043,10 @@ export function nearDuplicate(tasks: Pick<Task, 'id' | 'goal' | 'status' | 'titl
     const ownId = own !== '' && new RegExp(`^${own}(?:-\\d+)?$`).test(t.id.slice(goal.length + 3));
     return !ownId || titleSlug(tt, false) === whole;
   };
+  // A title with no letters or digits at all ("🔔") has no normalized form: only the same title, exactly, repeats it.
+  const exact = key === '' ? title.normalize('NFKC').trim() : '';
   const hits = tasks.filter((t) => t.goal === goal && !['done', 'cancelled'].includes(t.status)
-    && ((key !== '' && normTitle(String(t.title ?? '')) === key) || idRepeats(t)));
+    && ((key !== '' && normTitle(String(t.title ?? '')) === key) || (exact !== '' && String(t.title ?? '').normalize('NFKC').trim() === exact) || idRepeats(t)));
   hits.sort((a, b) => String(a.created ?? '').localeCompare(String(b.created ?? '')) || a.id.localeCompare(b.id));
   return hits[0]?.id ?? null;
 }

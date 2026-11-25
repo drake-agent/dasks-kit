@@ -212,6 +212,18 @@ test('near-duplicate: "Phase" while "Phase 2" is open, and two long titles equal
   } finally { await b.stop(); }
 });
 
+test('near-duplicate: an exact repeat of a title with no letters or digits ("🔔") is still refused; another such title is not', async () => {
+  const b = await board([], { todo_limit: 100 });
+  try {
+    const a = await b.call('POST', '/api/tasks', post('🔔'));
+    assert.equal(a.status, 201, JSON.stringify(a.json));
+    const again = await b.call('POST', '/api/tasks', post('🔔', { body: '## Context\nanother reason' }));
+    assert.equal(again.status, 409, JSON.stringify(again.json));
+    assert.equal(again.json.existing, a.json.id);
+    assert.equal((await b.call('POST', '/api/tasks', post('🔕'))).status, 201, 'a different symbol-only title is a new card');
+  } finally { await b.stop(); }
+});
+
 test('the todo limit holds only creates that land in todo: a create filed into review at the limit is written', async () => {
   const b = await board([todo('beta.t-a'), todo('beta.t-b')], { todo_limit: 2 });
   try {
