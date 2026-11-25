@@ -202,6 +202,29 @@ warns about that. It never holds a claim or a start, and it never changes depend
   and writes one note on the card. Only file entries count: a directory or glob entry never makes this warning (it
   already locks by overlap), and a file the card creates is not in the map yet. A repo with no map gives no warnings.
 
+## Live window
+
+While a build, review or fix runs, the card's panel on the board shows what the agent is doing now and what it has
+changed so far. Every 15 s the runner reads the new lines of the phase's log (a Claude tool call or text, a Codex output
+line) and the worktree's changes since the run started (committed or not; untracked files are listed without content),
+and posts them to `POST /api/tasks/<card>/live` with its agent token. When the phase ends it posts the last state once
+more, marked ended, and the panel keeps showing it. Each update carries an increasing `seq`; the board ignores one that
+arrives after a newer one, so a slow update of an earlier phase never replaces a later state.
+
+<img alt="A card panel's live window: the newest steps, then the changed files and their diff" src="assets/live-window.jpg" width="480">
+
+- **Nothing secret leaves the machine.** The runner redacts every step and the diff before it sends them, and the board
+  does it again before it keeps them, secret command-line flags included (`-a`, `-p<pw>`, `--password`, `--token`,
+  `-u user:pass`, …). A file whose name says env, key, secret, token, password or credential, a credential file
+  (`.pgpass`, `.netrc`, `.git-credentials`, kubeconfig, `.docker/config.json`, keys and certificates, …), a config
+  format (`.yaml`, `.toml`, `.ini`, `.plist`, …), and a new or renamed file of `KEY=value` lines show only their header
+  line, never their content. A rename is judged by both names.
+- **Bounded.** The board keeps the newest 40 steps of 240 characters, 30 files and 16 KB of diff per card, for at most
+  64 cards, in memory only: nothing goes to `data/`, nothing is committed, and a board restart empties it.
+- **Never in the way.** One post at a time, each waited for at most 5 s, and the end of a phase waits at most 5 s for
+  the last one. A board error is skipped, a board without the route turns it off for that phase, and nothing
+  decides anything from it. `DASKS_RUNNER_LIVE_MS` sets the interval; `0` turns it off.
+
 ## Turn it on
 
 1. Give each project the checkout its cards build in (a git repo with a GitHub remote, `gh auth login` done), in

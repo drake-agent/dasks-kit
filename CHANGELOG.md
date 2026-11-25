@@ -11,6 +11,14 @@
   message) into the store's own bare export repo, and `compare --export` checks it. In sqlite mode the backup exports
   first and pushes that branch, the digest and the decisions witness read its history, a schema migration keeps a copy
   of the db, and `dasks check`, `dasks-digest` and `bin/verify-decisions.ts` read the store. `restore --from <copy>` puts such a copy back and resumes the export. See docs/storage.md.
+- Live window: while the runner builds, reviews or fixes a card, it posts the agent's newest steps and the worktree's
+  diff since the run started to `POST /api/tasks/<card>/live` (agent token), and `GET /api/tasks/<card>/live` reads
+  them back. Both sides redact secrets; sensitive and config files show no content; steps, files and diff bytes are
+  capped, and the board keeps it in memory only, never in `data/`. `DASKS_RUNNER_LIVE_MS` sets the interval (`0` = off).
+  See docs/runner.md.
+- Card panel: a "Live" section shows a running card's newest steps, its phase, and the changed files with a coloured
+  diff (folded); it updates on the board's `live` event and keeps the last state after the run. A card without live
+  data shows nothing new.
 
 ## 1.1.1 — 2026-11-16
 

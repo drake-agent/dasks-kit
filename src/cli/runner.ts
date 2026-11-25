@@ -153,6 +153,7 @@ function flowEnv(cfg: RunnerConfig): FlowEnv {
     track: (card, agent) => { if (agent) active.set(card, agent); else active.delete(card); },
     rethinks: cfg.rethinks,
     codemap: (repo) => codemap.view(repo),
+    liveMs: Number(process.env.DASKS_RUNNER_LIVE_MS ?? 15_000),
   };
 }
 
