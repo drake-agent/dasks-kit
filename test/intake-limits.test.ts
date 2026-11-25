@@ -165,6 +165,81 @@ test('a done or cancelled task with the same title → no 409', async () => {
   } finally { await b.stop(); }
 });
 
+test('near-duplicate: titles with no a-z0-9 (fallback slug "task") match by normalized title only, not by the t-task id', async () => {
+  // Every title with no Latin letters or digits gets the slug "task"; the id rule refused each new one as a repeat of t-task.
+  const b = await board([todo('beta.t-task-4', { title: '사주 용어 정리' })], { todo_limit: 100 });
+  try {
+    const other = await b.call('POST', '/api/tasks', post('명리 해석 카드'));
+    assert.equal(other.status, 201, JSON.stringify(other.json));
+    const same = await b.call('POST', '/api/tasks', post('사주  용어 정리!'));
+    assert.equal(same.status, 409, JSON.stringify(same.json));
+    assert.equal(same.json.rule, 'near-duplicate');
+    assert.equal(same.json.existing, 'beta.t-task-4');
+    // A literal English "Task" has the real slug task: its id match stays.
+    const lit = await b.call('POST', '/api/tasks', post('Task'));
+    assert.equal(lit.status, 409, JSON.stringify(lit.json));
+    assert.equal(lit.json.existing, 'beta.t-task-4');
+    // An explicit id with another such title is not refused either.
+    const id = await b.call('POST', '/api/tasks', post('리더 용어 카드', { id: 'beta.t-reader-terms' }));
+    assert.equal(id.status, 201, JSON.stringify(id.json));
+  } finally { await b.stop(); }
+});
+
+test('near-duplicate: "Phase" while "Phase 2" is open, and two long titles equal in their first 40 slug characters, are new cards', async () => {
+  const first = 'Audit finding in the board server write path: replay window';
+  const second = 'Audit finding in the board server write path: intake limit';
+  const b = await board([todo('beta.t-phase-2', { title: 'Phase 2' })], { todo_limit: 100 });
+  try {
+    const p = await b.call('POST', '/api/tasks', post('Phase'));
+    assert.equal(p.status, 201, JSON.stringify(p.json));
+    assert.equal(p.json.id, 'beta.t-phase');
+    // The same title with another body is still a repeat (normalized title).
+    const again = await b.call('POST', '/api/tasks', post('Phase', { body: '## Context\nanother reason' }));
+    assert.equal(again.status, 409, JSON.stringify(again.json));
+    assert.equal(again.json.existing, 'beta.t-phase');
+    const a = await b.call('POST', '/api/tasks', post(first));
+    assert.equal(a.status, 201, JSON.stringify(a.json));
+    const c = await b.call('POST', '/api/tasks', post(second));
+    assert.equal(c.status, 201, JSON.stringify(c.json));
+    assert.notEqual(c.json.id, a.json.id);
+    // A real repeat of a long title is still refused and points at the original; an identical retry is still the replay.
+    const rep = await b.call('POST', '/api/tasks', post(first, { body: '## Context\nanother reason' }));
+    assert.equal(rep.status, 409, JSON.stringify(rep.json));
+    assert.equal(rep.json.existing, a.json.id);
+    const retry = await b.call('POST', '/api/tasks', post(second));
+    assert.equal(retry.status, 200, JSON.stringify(retry.json));
+    assert.equal(retry.headers.get('x-dasks-replayed'), c.json.id);
+  } finally { await b.stop(); }
+});
+
+test('near-duplicate: an exact repeat of a title with no letters or digits ("🔔") is still refused; another such title is not', async () => {
+  const b = await board([], { todo_limit: 100 });
+  try {
+    const a = await b.call('POST', '/api/tasks', post('🔔'));
+    assert.equal(a.status, 201, JSON.stringify(a.json));
+    const again = await b.call('POST', '/api/tasks', post('🔔', { body: '## Context\nanother reason' }));
+    assert.equal(again.status, 409, JSON.stringify(again.json));
+    assert.equal(again.json.existing, a.json.id);
+    assert.equal((await b.call('POST', '/api/tasks', post('🔕'))).status, 201, 'a different symbol-only title is a new card');
+  } finally { await b.stop(); }
+});
+
+test('the todo limit holds only creates that land in todo: a create filed into review at the limit is written', async () => {
+  const b = await board([todo('beta.t-a'), todo('beta.t-b')], { todo_limit: 2 });
+  try {
+    const review = await b.call('POST', '/api/tasks', post('Card for an open PR', {
+      status: 'review', pr: 'https://github.com/example/app/pull/7', pr_summary: 'A PR opened without a card.',
+      what: 'A PR opened without a card', why: 'it still needs its review', do: 'Read the PR', rec: 'Review it', after: 'It lands',
+    }));
+    assert.equal(review.status, 201, JSON.stringify(review.json));
+    assert.equal(review.json.status, 'review');
+    assert.ok(fs.existsSync(path.join(b.root, 'data/tasks/beta/t-card-for-an-open-pr.md')));
+    const plain = await b.call('POST', '/api/tasks', post('A plain todo card'));
+    assert.equal(plain.status, 202, 'a todo create at the limit still becomes an idea');
+    assert.equal(plain.json.intake, 'idea');
+  } finally { await b.stop(); }
+});
+
 test('/api/ready is strict by default; ?all=1 and ?require_spec_ready=0 give the full list; ?all=x → 400', async () => {
   const b = await board([todo('beta.t-nospc', { title: 'No spec yet' })], { todo_limit: 100 });
   try {

@@ -226,7 +226,8 @@ test('3 history: effective who is recorded, survives release, a long activity lo
   okStatus(await c.g.put(id, card(), A), 200);
   okStatus(await c.g.claim(id, B, { who: C }), 200, 'B claims for C');
   assert.deepEqual(history(c.root, id), { partial: false, who: [C, B] });
-  okStatus(await c.g.release(id, B, { who: C }), 200);
+  // Releasing for someone else needs force: the board checks the caller, not the who it sends.
+  okStatus(await c.g.release(id, B, { who: C, force: true }), 200);
   // More than MAX_ACTIVITY activity entries: the claim is long gone from the capped log.
   const [g, slug] = id.split(/\.(.*)/s);
   const act = path.join(c.root, `data/activity/${g}/${slug}.jsonl`);

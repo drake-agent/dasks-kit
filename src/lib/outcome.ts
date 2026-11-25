@@ -25,7 +25,7 @@ export interface OutcomeInput { state: OutcomeKind; note: string; evidence: stri
 /** as_state / as_cause: what the board did with a needs-user outcome that carried no real decision (src/lib/park.ts). The
  *  record keeps the job's own state, so a replay of the same outcome still matches it. */
 /** status_kept: the card was done/cancelled when this outcome landed; it was recorded but moved nothing (no route, no ask). */
-export interface OutcomeRecord extends OutcomeInput { id: string; job: string; at: string; actor: string; version: number; route?: Route; reset_epoch?: number; response?: Task; as_state?: OutcomeKind; as_cause?: OutcomeCause; status_kept?: 'done' | 'cancelled' }
+export interface OutcomeRecord extends OutcomeInput { id: string; job: string; at: string; actor: string; version: number; route?: Route; reset_epoch?: number; response?: Task; as_state?: OutcomeKind; as_cause?: OutcomeCause; status_kept?: 'done' | 'cancelled'; fallback?: true }
 interface Route { kind: 'reviewer' | 'fix' | 'retry' | 'failed-terminal' | 'needs-user' | 'spec-rework'; job: string; next_owner: string; at: string }
 
 // `Decision:` and `Learned:` lines from a job's RESULT.md. Short single lines, capped, and never anything shaped like a
@@ -127,6 +127,15 @@ function payload(input: OutcomeInput, job: string): string {
 // One status change per job end: the run's outcome is the mover. A launcher close (`job_end: <run_id>` on a status write)
 // that lands first leaves this marker, and a later outcome for that run then keeps the status.
 export const jobEndRel = (id: string, runId: string, attempt: number) => `data/job-ends/${createHash('sha256').update(JSON.stringify([id, runId, attempt])).digest('hex')}.json`;
+/** The job-end marker of a run: undefined `to` when it cannot be read (it still counts as ended); null when there is none. */
+function jobEndMark(root: string, id: string, runId: string, attempt: number): { to?: string } | null {
+  const f = path.join(root, jobEndRel(id, runId, attempt));
+  if (!boardFiles.existsSync(f)) return null;
+  try { const j = JSON.parse(boardFiles.readFileSync(f, 'utf8')); return { to: typeof j?.to === 'string' ? j.to : undefined }; } catch { return {}; }
+}
+/** The record outcome-or-fail wrote for a job that ended without a result: only it carries `fallback: true`. An outcome an
+ *  agent posted itself, whatever its text, is never replaced. */
+const isFallback = (o: OutcomeRecord) => o.fallback === true;
 export function runOutcome(root: string, t: Task): OutcomeRecord | undefined {
   return t.run_id ? taskOutcomes(root, t.id).find((o) => o.run_id === t.run_id && o.attempt === Number(t.attempt)) : undefined;
 }
@@ -168,6 +177,9 @@ export function recordOutcome(root: string, id: string, body: Record<string, unk
     if (global && global.id !== id) throw new HttpError(409, 'job belongs to another card', { rule: 'outcome-job' });
     // outcome-or-fail only asks whether this never-started card already has an outcome, so later edits do not matter here.
     if (missingOnly && !previous && !cur.run_id) previous = outcomes.find((o) => o.job === implicit) ?? anyImplicit;
+    // A needs-spec question that arrives after the launcher's outcome-or-fail fallback recorded the run as failed replaces
+    // that fallback (same run record), so the question reaches the card's owner instead of a 409.
+    if (previous && !missingOnly && input.state === 'needs-spec' && isFallback(previous) && !terminal) previous = undefined;
     if (previous) {
       if (missingOnly || payload(previous, previous.job) === payload(input, job)) return previous.response ?? cur;
       throw new HttpError(409, 'a different outcome for this run is already recorded', { rule: 'outcome-conflict' });
@@ -212,7 +224,13 @@ export function recordOutcome(root: string, id: string, body: Record<string, unk
     // are not applied as a move here either (done -> blocked-on-user is not a legal move); the failed run still counts,
     // so the next claim is refused at the cap (assertRetryAllowed).
     // A closed card keeps its status the same way (terminal), with no route, ask or cap at all.
-    const ended = !!terminal || !!cur.run_id && boardFiles.existsSync(path.join(root, jobEndRel(id, runId, attempt)));
+    // Except a late needs-spec (a build that stopped to send its question back to the card's owner): when the run's job end
+    // closed it first (as failed), or the outcome is replayed later, the card that run left in todo (unclaimed, not yet in
+    // spec-rework) still goes to spec-rework for its owner, with the question kept.
+    // Only while the card is still where that job end put it (its marker's `to`): a card its owner moved since keeps its lane.
+    const endMark = cur.run_id ? jobEndMark(root, id, runId, attempt) : null;
+    const lateSpec = !terminal && state === 'needs-spec' && !!endMark && endMark.to === 'todo' && cur.status === 'todo' && !cur.claimed_by && cur.lane !== 'spec-rework';
+    const ended = !!terminal || !lateSpec && !!endMark;
     // Either limit caps the card, whichever this run reports: dispatch (assertRetryAllowed) checks both, so a card is
     // never sent back to todo while it can no longer be claimed (e.g. retry_cap lowered between runs).
     const capByQuota = causedCount >= cfg.quota_retry_cap;
@@ -260,7 +278,7 @@ export function recordOutcome(root: string, id: string, body: Record<string, unk
     const context = asked ? asked.context : !stays && ['review', 'blocked-on-user'].includes(status) ? { what: fill('what'), why: fill('why'), do: fill('do'), rec: fill('rec'), after: fill('after') } : undefined;
     const as = state !== input.state || cause !== input.cause ? { as_state: state, ...(cause ? { as_cause: cause } : {}) } : {};
     const next = updateTask(root, id, patch, actor, { ...opts, context, body: input.handoff !== undefined ? withHandoff(cur.body, input.handoff) : undefined, action: 'outcome', outcome: state, appendNote: asked ? `${asked.note} · ${note}` : note,
-      extraFiles: (response) => [...(asked ? [asked.file] : []), { rel, content: JSON.stringify({ ...input, job, id, run_id: runId, attempt, reset_epoch: epoch, actor, at, version: Number(response.version), ...(route ? { route } : {}), ...as, ...(terminal ? { status_kept: terminal } : {}), response } satisfies OutcomeRecord) + '\n' }] });
+      extraFiles: (response) => [...(asked ? [asked.file] : []), { rel, content: JSON.stringify({ ...input, job, id, run_id: runId, attempt, reset_epoch: epoch, actor, at, version: Number(response.version), ...(route ? { route } : {}), ...as, ...(terminal ? { status_kept: terminal } : {}), ...(missingOnly ? { fallback: true as const } : {}), response } satisfies OutcomeRecord) + '\n' }] });
     if (input.state === 'needs-user') {
       try { decisionsToday(root, at.slice(0, 10)); } catch { /* GET rebuilds the projection from the committed ledger */ }
     }

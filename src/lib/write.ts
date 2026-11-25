@@ -810,7 +810,11 @@ export function updateTask(root: string, id: string, patch: TaskPatch, actor: st
     } else if (opts.claim?.op === 'release') {
       if (opts.claim.runId && cur.run_id !== opts.claim.runId)
         throw new HttpError(409, `the card is on another run now (${cur.run_id || 'none'}); nothing released`, { rule: 'run', run_id: cur.run_id ?? '', current_version: curVersion });
-      if (holder && holder !== opts.claim.who && !opts.claim.force)
+      // The caller is the request's actor, never the `who` it sends: a release naming someone else, or of a claim the
+      // actor does not hold, needs force.
+      if (opts.claim.who !== actor && !opts.claim.force)
+        throw new HttpError(409, `release names ${opts.claim.who}, not the caller ${actor}; pass force=true to release for someone else`, { claimed_by: holder, claimed_at: cur.claimed_at ?? '', current_version: curVersion });
+      if (holder && holder !== actor && !opts.claim.force)
         throw new HttpError(409, `task is held by ${holder}; pass force=true to release it`, { claimed_by: holder, claimed_at: cur.claimed_at ?? '', current_version: curVersion });
       next.claimed_by = ''; next.claimed_at = ''; next.claim_seen = '';
       // A released claim goes back to the pool (otherwise its owner would still "hold" a doing task).
@@ -1010,8 +1014,14 @@ export function appendNote(body: string, line: string): string {
   return `${section}\n- ${clean}${rest ? `\n${rest.replace(/^\n+/, '\n')}` : ''}\n`;
 }
 
+/** The title's own slug (cut to 40 characters; cut=false: whole), '' when it has no a-z0-9 (a title in another script). */
+const titleSlug = (s: string, cut = true): string => {
+  const f = s.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return cut ? f.slice(0, 40).replace(/-+$/, '') : f;
+};
+
 export function slugify(s: string): string {
-  return s.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '') || 'task';
+  return titleSlug(s) || 'task';
 }
 
 export interface NewTask { [k: string]: unknown }
@@ -1039,12 +1049,24 @@ export interface IntakeIdea { intake: 'idea'; goal: string; open_todo: number; l
 /** Title as compared for a near-duplicate: NFKC, lowercase, each run of non-letters/digits one space, trimmed. */
 export const normTitle = (s: string): string => s.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 
-/** The oldest open task of the goal that this title repeats (same normTitle, or id <goal>.t-<slug> / <slug>-N), or null. */
+/** The oldest open task of the goal that this title repeats (same normTitle, or id <goal>.t-<slug> / <slug>-N), or null.
+ *  The id rule is off for a title with no slug of its own (no a-z0-9: every such title shares the `task` fallback). An id
+ *  made from its card's own title slug counts only when the whole slugs match: 'Phase' does not repeat 'Phase 2'
+ *  (t-phase-2), and two long titles that share their first 40 slug characters are two cards. */
 export function nearDuplicate(tasks: Pick<Task, 'id' | 'goal' | 'status' | 'title' | 'created'>[], goal: string, title: string): string | null {
-  const key = normTitle(title), base = `${goal}.t-${slugify(title)}`;
+  const key = normTitle(title), slug = titleSlug(title), whole = titleSlug(title, false), base = `${goal}.t-${slug}`;
   const slugRe = new RegExp(`^${base.replace(/\./g, '\\.')}(?:-\\d+)?$`); // ids are [a-z0-9.-] only
+  const idRepeats = (t: Pick<Task, 'id' | 'title'>) => {
+    if (slug === '' || !slugRe.test(t.id)) return false;
+    const tt = String(t.title ?? ''), own = titleSlug(tt);
+    // The id is the open card's own title slug (with -N): then the whole slugs decide; else the id alone does.
+    const ownId = own !== '' && new RegExp(`^${own}(?:-\\d+)?$`).test(t.id.slice(goal.length + 3));
+    return !ownId || titleSlug(tt, false) === whole;
+  };
+  // A title with no letters or digits at all ("🔔") has no normalized form: only the same title, exactly, repeats it.
+  const exact = key === '' ? title.normalize('NFKC').trim() : '';
   const hits = tasks.filter((t) => t.goal === goal && !['done', 'cancelled'].includes(t.status)
-    && ((key !== '' && normTitle(String(t.title ?? '')) === key) || slugRe.test(t.id)));
+    && ((key !== '' && normTitle(String(t.title ?? '')) === key) || (exact !== '' && String(t.title ?? '').normalize('NFKC').trim() === exact) || idRepeats(t)));
   hits.sort((a, b) => String(a.created ?? '').localeCompare(String(b.created ?? '')) || a.id.localeCompare(b.id));
   return hits[0]?.id ?? null;
 }
@@ -1102,7 +1124,8 @@ function findReplay(root: string, base: string, explicit: boolean, goal: string,
     if (!boardFiles.existsSync(path.join(root, taskRelPath(id)))) return null;
     let t: Task | null = null;
     try { t = readTask(root, id); } catch { /* unparseable: never a replay target */ }
-    if (t && t.goal === goal && t.title === title && bodyKey(t.body ?? '') === key) {
+    // A finished card is not the create the client is retrying: cancelling a card and filing it again makes a new one.
+    if (t && !TERMINAL.includes(t.status) && t.goal === goal && t.title === title && bodyKey(t.body ?? '') === key) {
       const age = now.getTime() - Date.parse(t.created);
       if (age >= 0 && age <= CREATE_REPLAY_MS) return t;
     }
@@ -1172,7 +1195,8 @@ export function createTaskOrIdea(root: string, input: NewTask, actor: string, no
       if (ce.length) throw new HttpError(400, ce.join('; '), { rule: 'context' });
     }
     // Intake brake, after the replay check: near-duplicate (409), then the goal's todo
-    // limit (the create becomes an idea). Exempt actors and idea promotion (a deliberate create) skip both.
+    // limit (the create becomes an idea). Exempt actors and idea promotion (a deliberate create) skip both. The limit
+    // counts todo cards, so it holds only a create that lands in todo (a card filed straight into review is written).
     const ik = copts.intake;
     if (ik && !copts.idea && !copts.extraFiles && !ik.exempt_actors.includes(actor)) {
       const mine = goalTasks(root, goal);
@@ -1181,7 +1205,7 @@ export function createTaskOrIdea(root: string, input: NewTask, actor: string, no
         if (dup) throw new HttpError(409, `near-duplicate of ${dup}`, { rule: 'near-duplicate', existing: dup });
       }
       const limit = intakeLimit(ik, goal), n = mine.filter((x) => x.status === 'todo').length;
-      if (limit > 0 && n >= limit) return intakeIdea(root, input, actor, goal, n, limit, now);
+      if (t.status === 'todo' && limit > 0 && n >= limit) return intakeIdea(root, input, actor, goal, n, limit, now);
     }
     const entry: Activity = { at: ts, actor, action: 'create', to: t.status, ...(copts.idea ? { note: `from idea ${copts.idea}` } : {}) };
     commitFiles(root, [

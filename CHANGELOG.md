@@ -58,6 +58,19 @@
 - Tests: tearing down a test server that was already killed by a signal returns at once instead of hanging until the
   test timeout. The fleet test checks that `dasks machine list` never prints the whole token secret (it took the
   part after the second `_`, which can be a short fragment because the secret may hold `_`, and failed by chance).
+- Card create: the near-duplicate check no longer refuses a title whose slug has no a-z0-9 (they all share the `task`
+  fallback id), a title like `Phase` while `Phase 2` (`<goal>.t-phase-2`) is open, or two long titles that share only their
+  first 40 slug characters. A real repeat (the same normalized title) is still 409.
+- Card create: the intake todo limit holds only a create that lands in todo; a card filed straight into review at the limit
+  is written instead of becoming an idea.
+- Card create: a retry is never replayed onto a done or cancelled card; filing the same create again after a cancel makes a
+  new card.
+- Release: the board checks the caller (the request's actor), not the `who` it sends. Releasing a claim you do not hold, or
+  naming someone else, needs `force`.
+- Outcomes: a needs-spec outcome that arrives after the run was already closed as failed (or is sent again) still moves the
+  card to spec-rework for its owner, with the question kept.
+- Ideas: the ideas file cap is 8 KB per idea (300 ideas), so the 300-idea count is the limit, also for ideas written in
+  3-byte characters (the fixed 128 KB cap refused new ideas after about 100 long ones).
 
 ## 1.1.1 — 2026-11-16
 

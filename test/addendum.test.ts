@@ -165,6 +165,24 @@ test('ideas: add, edit with versions, drop/reopen, promote = task + links both w
   } finally { cleanup(); }
 });
 
+test('ideas: the count cap binds, not the byte cap: 299 open ideas with every field full of 3-byte text take one more', async () => {
+  // A full idea in Korean is about 7.4 KB; a fixed 128 KB file cap refused new ideas after about 100 of them.
+  const { root, cleanup } = tempRepo();
+  try {
+    const { MAX_IDEAS } = await import('../src/lib/ideas.ts');
+    const at = '2026-11-25T10:00:00+09:00';
+    const ko = (n: number) => '필터 변경 뒤 이전 요청이 새 결과를 덮어써요'.repeat(40).slice(0, n);
+    const full = () => ({ title: ko(120), title_ko: ko(120), title_en: ko(120), note: ko(600), note_ko: ko(600), note_en: ko(600), source: ko(300) });
+    const ideas = Array.from({ length: MAX_IDEAS - 1 }, (_, n) => ({ id: `beta.i-f${n}`, ...full(), added_by: 'helper', added_at: at, status: 'open', version: 1, updated: at, updated_by: 'helper' }));
+    fs.mkdirSync(path.join(root, 'data/ideas'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'data/ideas/beta.json'), JSON.stringify({ app: 'beta', version: 1, updated: at, updated_by: 'helper', ideas }));
+    git(root, ['add', '-A']); git(root, ['commit', '-qm', 'many ideas']);
+    assert.ok(fs.statSync(path.join(root, 'data/ideas/beta.json')).size > 512 * 1024, 'well past the old cap');
+    assert.equal(addIdea(root, 'beta', full(), 'helper').status, 'open');
+    assert.equal(status(() => addIdea(root, 'beta', full(), 'helper')), 413, 'the 301st is refused by the count cap');
+  } finally { cleanup(); }
+});
+
 test('lock: nested withRepoLock in the same process runs inside the outer one', () => {
   const { root, cleanup } = tempRepo();
   try {

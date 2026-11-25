@@ -247,3 +247,75 @@ test('closed card: run-less outcome-or-fail returns the current run\'s stored re
     const got = await oof.json(); assert.equal(got.status, 'done'); assert.equal(Number(got.attempt), 2); assert.equal(head(root), before);
   } finally { await s.stop(); cleanup(); }
 });
+
+// A build stops to send its question back to the card's owner and its run is closed as failed first; the needs-spec
+// outcome arrives later (or is replayed). Whatever the end order, the card goes to spec-rework with the question kept.
+test('job_end failed first: a late needs-spec outcome still sends the card to spec-rework, also when replayed', async () => {
+  const { root, cleanup } = tempRepo([task()]); const s = await serve(root);
+  const Q = 'the spec must say which of the two stores is kept';
+  try {
+    const run = await claimRun(s);
+    const fin = await s.post(card, { status: 'todo', result: 'run/job.log', note: 'claim: #job-a closed (failed)', job_end: run.run_id }, 'job-runner');
+    assert.equal(fin.status, 200, await fin.clone().text()); assert.equal((await fin.json()).status, 'todo');
+    const late = { state: 'needs-spec', note: Q, evidence: ['run/job.log'], run_id: run.run_id };
+    const r = await s.post(card + '/outcome', late); assert.equal(r.status, 200, await r.clone().text());
+    let t = await (await fetch(s.url + card)).json();
+    assert.deepEqual([t.status, t.lane, t.needs_user ?? ''], ['todo', 'spec-rework', '']);
+    assert.ok(String(t.body).includes(Q), 'the question is kept in the note');
+    // the same outcome again: one outcome, same card, no new commit
+    const before = head(root);
+    assert.equal((await s.post(card + '/outcome', late)).status, 200);
+    t = await (await fetch(s.url + card)).json();
+    assert.deepEqual([t.status, t.lane, t.outcomes.length], ['todo', 'spec-rework', 1]); assert.equal(head(root), before);
+  } finally { await s.stop(); cleanup(); }
+});
+
+test('outcome-or-fail first: a later needs-spec outcome for the same run replaces the fallback failure, question kept', async () => {
+  const { root, cleanup } = tempRepo([task()]); const s = await serve(root);
+  const Q = 'Which store should be kept?';
+  try {
+    const run = await claimRun(s);
+    assert.equal((await s.post(card, { status: 'todo', result: 'run/job.log', note: 'claim: #job-a closed (failed)', job_end: run.run_id }, 'job-runner')).status, 200);
+    const fb = await s.post(card + '/outcome-or-fail', { run_id: run.run_id, job: 'job-a', log: 'run/job.log' }, 'job-runner');
+    assert.equal(fb.status, 200, await fb.clone().text());
+    const late = { state: 'needs-spec', note: Q, evidence: ['run/job.log'], run_id: run.run_id };
+    const r = await s.post(card + '/outcome', late); assert.equal(r.status, 200, await r.clone().text());
+    let t = await (await fetch(s.url + card)).json();
+    assert.deepEqual([t.status, t.lane], ['todo', 'spec-rework']);
+    assert.ok(String(t.body).includes(Q), 'the question is kept');
+    assert.equal((await s.post(card + '/outcome', late)).status, 200, 'the same needs-spec again is a replay');
+    // a fallback that arrives after the needs-spec answers with the stored one and changes nothing
+    assert.equal((await s.post(card + '/outcome-or-fail', { run_id: run.run_id, job: 'job-a', log: 'run/job.log' }, 'job-runner')).status, 200);
+    t = await (await fetch(s.url + card)).json();
+    assert.deepEqual([t.status, t.lane, t.outcomes.length], ['todo', 'spec-rework', 1]);
+  } finally { await s.stop(); cleanup(); }
+});
+
+test('a late needs-spec outcome leaves a card alone that its owner moved after the job end put it elsewhere', async () => {
+  const { root, cleanup } = tempRepo([task()]); const s = await serve(root);
+  try {
+    const run = await claimRun(s);
+    const fin = await s.post(card, { status: 'review', pr: 'https://github.com/example-org/dasks/pull/14', note: 'claim: #job-a closed (done)', job_end: run.run_id, ...ctx }, 'job-runner');
+    assert.equal(fin.status, 200, await fin.clone().text());
+    assert.equal((await s.post(card, { status: 'todo', lane: 'none', note: 'owner: back to the queue' }, 'beta-lead')).status, 200);
+    const r = await s.post(card + '/outcome', { state: 'needs-spec', note: 'late question', evidence: ['run/job.log'], run_id: run.run_id });
+    assert.equal(r.status, 200, await r.clone().text());
+    const t = await (await fetch(s.url + card)).json();
+    assert.deepEqual([t.status, t.lane], ['todo', 'none'], "the owner's lane is kept");
+  } finally { await s.stop(); cleanup(); }
+});
+
+test('a failed outcome an agent posted itself is never replaced by a later needs-spec, whatever its note', async () => {
+  const { root, cleanup } = tempRepo([task()]); const s = await serve(root);
+  try {
+    const run = await claimRun(s);
+    assert.equal((await s.post(card, { status: 'todo', result: 'run/job.log', note: 'claim: #job-a closed (failed)', job_end: run.run_id }, 'job-runner')).status, 200);
+    const own = await s.post(card + '/outcome', { state: 'failed', note: 'ended without a result', evidence: ['run/job.log'], decisions: ['Keep the existing store'], run_id: run.run_id });
+    assert.equal(own.status, 200, await own.clone().text());
+    const late = await s.post(card + '/outcome', { state: 'needs-spec', note: 'Which store should be kept?', evidence: ['run/job.log'], run_id: run.run_id });
+    assert.equal(late.status, 409, await late.clone().text());
+    const t = await (await fetch(s.url + card)).json();
+    assert.equal(t.outcomes.length, 1);
+    assert.deepEqual(t.outcomes[0].decisions, ['Keep the existing store'], 'the decision is kept');
+  } finally { await s.stop(); cleanup(); }
+});
