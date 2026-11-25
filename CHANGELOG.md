@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Hands-off mode, off by default: `dasks hands-off on|off|status` sets `hands_off.enabled` in `config.json`, read on
+  each request (no restart). While it is on, `GET /api/merge-ok` answers 410 and `dask captain-merge` lands a card on
+  green CI and a clean review without a merge OK; review cards show no approve/reject; a build-stage park, question,
+  ask, needs-user outcome or retry cap becomes a card note (a doing card goes back to its spec stage) unless it is a
+  taste pick or about money, deleting data, a secret, a physical device or a UI choice. `/api/status`, `/api/health`,
+  `/api/board` and `/api/captain` report `hands_off`. See docs/captain.md.
+
 ## 1.1.1 — 2026-11-16
 
 - Rethink cards: while a rethink card is open (not done, not cancelled), the card it replaces no longer asks you for a

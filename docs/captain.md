@@ -122,6 +122,35 @@ session on every Mac.
 Anything else: nothing is merged, the card stays in review with a note and a message to you saying why, and the command
 exits 3. That is the expected outcome for a risky change, not an error to work around.
 
+### Hands-off mode
+
+Hands-off mode is for a board whose owner wants to be asked only what a person must answer. It is off by default, and
+off the board behaves as described above. Turn it on or off on the board's Mac:
+
+```bash
+dasks hands-off on      # or: off, status
+```
+
+That writes `"hands_off": { "enabled": true }` in the board's `config.json`. The server reads the switch on each
+request, so no restart is needed. `GET /api/status`, `/api/health`, `/api/board` and `/api/captain` carry
+`hands_off: true|false`, and the board's top bar shows a small "hands-off: on" badge while it is on.
+
+While it is on:
+
+- **No merge OK.** `GET /api/merge-ok` answers 410, and the optional merge gate refuses a hand-typed `gh pr merge` with
+  a pointer to `dask captain-merge`. `dask captain-merge` merges a card that passes the three rules above as with
+  `auto_merge: true` (the machine rule and `same_machine_review` included). It never asks "Merge this PR?"; a refusal
+  leaves a card note and sends you no message, and the captain looks next.
+- **Review cards ask you nothing.** A card in review has no approve/reject on the board. A machine's write that would
+  park a review card on you (blocked-on-user, or a new `needs_user`) is kept as a card note, and the card stays in review
+  for the captain.
+- **Build-stage stops never wait on you.** For a card in doing or review, a machine's park, a new `needs_user`, a
+  `POST /api/asks` conflict ask and a `needs-user` outcome are kept as a card note. A doing card goes back to its spec
+  stage (todo, lane `spec-rework`, its owner next), where the spec writer can still ask you. A run that hits `retry_cap`
+  goes there too instead of `failed-terminal`; its failed runs still count, so nobody claims it before a reset.
+- **What still reaches you:** anything at the spec stage (a card not yet in doing), your own writes, a taste pick
+  (`kind: taste`), and a question about money, deleting data, a secret, a physical device or a UI or design choice.
+
 ### Where reviews come from
 
 The runner claims a card as `runner@<machine>` beside its build tool's name (`claude@<machine>`) and records its

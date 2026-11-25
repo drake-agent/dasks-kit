@@ -19,7 +19,7 @@ carry `Authorization: Bearer <token>` (see [auth.md](auth.md)). The MCP server a
 | `GET /api/status`, `/api/status/<app>` | where each project stands, or one project; `?format=text` for plain text ([below](#project-status)) |
 | `GET /api/versions` | each goal with a `version_target`: `milestone`, `total`, `done`, `open`, `ready`, `gate_card` ([versions.md](versions.md)) |
 | `GET /api/tasks/<id>/messages` | card messages (`/messages/wait` long-polls, `/participants` lists who is on the card) |
-| `GET /api/merge-ok?card=&sha=` | `{ok: true}` only when you approved a merge of that card at exactly that head |
+| `GET /api/merge-ok?card=&sha=` | `{ok: true}` only when you approved a merge of that card at exactly that head; 410 in hands-off mode ([captain.md](captain.md#hands-off-mode)) |
 | `GET /api/views`, `/api/ideas`, `/api/lessons` | project pages, ideas for later, lessons |
 | `GET /api/tasks/<id>/review-runs` | the recorded cross-model reviews of the card, one row per pass |
 | `GET /api/fleet`, `/api/whoami` | runners' heartbeats; who your token says you are ([fleet.md](fleet.md)) |
