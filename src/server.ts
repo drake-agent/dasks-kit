@@ -34,8 +34,10 @@ import { CaptainChat, CaptainLease } from './lib/captain.ts';
 import { intakeReport } from './lib/intake.ts';
 import { digestText } from './lib/digest.ts';
 import { capFile } from './lib/file-cap.ts';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { gzipSync } from 'node:zlib';
+import { randomBytes } from 'node:crypto';
+import { sameBytes } from './lib/same-bytes.ts';
+import { gzip, gzipSync } from 'node:zlib';
+import { promisify } from 'node:util';
 import { acceptsGzip, etagMatches, filterTaskList, pageTasks, parseTaskQuery, projectTask } from './lib/task-reads.ts';
 import { corruptJournalHelp, corruptJournals, createTaskOrIdea, type CreateOpts, git, HttpError, isOwnEcho, lastCommitted, committedSinceReload, readTask, recoverRepo, sanitizeActor, updateNode, updateTask, type UpdateOpts, commitFiles, withRepoLock } from './lib/write.ts';
 import { localDate } from './lib/rollup.ts';
@@ -54,6 +56,7 @@ import { assertSpecSize, parseSpecPut, parseVersionParam, readSpec, SPEC_MAX_BOD
 import { appendReviewRun, parseReviewRun, readReviewRuns, REVIEW_RUN_MAX_BODY } from './lib/review-runs.ts';
 import { LiveStore } from './lib/live-window.ts';
 import { cardsWithMessages, moveCursor, readCursor, startText } from './lib/start.ts';
+import { commitAfterSend } from './lib/commit-after-send.ts';
 import { blockSpec, committedSpecIndex, headSha, reviewSpec, type SpecIndex, unblockSpec } from './lib/spec-state.ts';
 import { DS_FILE_RE, MIME, STATIC } from './lib/server-static.ts';
 import { applyAnswer, type Ask, askLive, askRequest, asksLedgerPath, checkAnswer, createAsk, openAsks, readAsks } from './lib/asks.ts';
@@ -108,6 +111,14 @@ const CODE = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(CODE, 'public');
 const MAX_BODY = 64 * 1024;
 let boardCache: { key: string; body: Record<string, any> } | null = null;
+/** How long one built /api/board reply (JSON and gzip) is served again for the same key. */
+const BOARD_REPLY_MS = 3000;
+const gzipAsync = promisify(gzip);
+/** The /api/board gzip. DASKS_TEST_BOARD_GZIP_DELAY_MS (tests only) holds it that long, so a write can land meanwhile. */
+const BOARD_GZIP_DELAY_MS = Number(process.env.DASKS_TEST_BOARD_GZIP_DELAY_MS ?? 0) || 0;
+const boardGzip = (json: string): Promise<Buffer> => BOARD_GZIP_DELAY_MS > 0
+  ? new Promise((r) => setTimeout(r, BOARD_GZIP_DELAY_MS)).then(() => gzipAsync(json)) : gzipAsync(json);
+let boardReply: { key: string; at: number; json: string; gz: Promise<Buffer> | null } | null = null;
 let digestCache: { key: string; text: string } | null = null;
 const headOf = () => { try { return git(ROOT, ['rev-parse', 'HEAD']).trim(); } catch { return ''; } };
 
@@ -480,7 +491,7 @@ async function answerAsk(req: http.IncomingMessage, res: http.ServerResponse, ca
     }
     if (!live || !want || live.id !== ask) throw new HttpError(409, `${card} is not waiting on this decision`);
     if (revision !== want.revision) throw new HttpError(409, 'the card changed since it was shown; reload it', { current: want });
-    if (!timingSafeEqual(Buffer.from(sha256(scope)), Buffer.from(sha256(want.scope)))) throw new HttpError(409, 'scope differs from what the card asks now', { current: want });
+    if (!sameBytes(Buffer.from(sha256(scope)), Buffer.from(sha256(want.scope)))) throw new HttpError(409, 'scope differs from what the card asks now', { current: want });
     if (!want.choices.includes(choice)) throw new HttpError(409, `choice must be ${want.choices.join(' | ')}`);
     checkAnswer(ROOT, card, choice, comment); // an answer that could not be applied is refused, not signed
     const e = appendDecision(ASKS_LEDGER, key, { who: 'user', session: human.sidHash, card, revision, choice, scope, comment }, new Date(), asksHead());
@@ -542,6 +553,20 @@ function rawActor(req: http.IncomingMessage): string {
   if (t !== undefined) return t;
   const s = sanitizeActor(req.headers['x-dasks-actor'], '');
   return s;
+}
+
+/** May this /api/start request move `who`'s read cursor? auth off or warn: yes (warn withholds nothing). enforce: only
+ *  when a token proves the name: the network gate already checked it, or the bearer token checks out for the actor
+ *  header now. Anyone else still gets the text, as a peek. */
+function startCursorCaller(req: http.IncomingMessage, who: string): boolean {
+  if (cfg.auth.mode !== 'enforce') return true;
+  const proved = tokenActor.get(req);
+  if (proved !== undefined) return proved === who;
+  const raw = req.headers['x-dasks-actor'];
+  const r = checkToken(bearerOf(req), typeof raw === 'string' && raw.trim() ? raw.trim() : undefined, tokenStore);
+  if (!r.ok || r.actor !== who) return false;
+  noteTokenUse(r.id);
+  return true;
 }
 
 // ---------- agent tokens (docs/auth.md) ----------
@@ -863,7 +888,7 @@ async function decide(req: http.IncomingMessage, res: http.ServerResponse) {
   if (first) return send(res, 409, { error: 'already decided', decision: first });
   if (!want) return send(res, 409, { error: `${card} is not asking for a decision` });
   if (revision !== want.revision) return send(res, 409, { error: 'the card changed since it was shown; reload it', current: want });
-  if (!timingSafeEqual(Buffer.from(sha256(scope)), Buffer.from(want.scope_hash))) return send(res, 409, { error: 'scope differs from what the card asks now', current: want });
+  if (!sameBytes(Buffer.from(sha256(scope)), Buffer.from(want.scope_hash))) return send(res, 409, { error: 'scope differs from what the card asks now', current: want });
   if (!(CHOICES as readonly string[]).includes(choice)) return send(res, 409, { error: `choice must be ${CHOICES.join(' | ')}` });
   // The baseline is fixed from a fresh verification (a repair committed without touching the witness file leaves a cached
   // failure): it never swallows this decision. No baseline = the ledger does not verify now: refuse, append nothing.
@@ -1021,28 +1046,48 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
     if (p === '/api/merge-ok') return mergeOkRead(res, url);
     if (p === '/api/board') {
       // check() and the roll-up only change with the data (or the date, for "late"): computed once per version and day,
-      // and with the config that decides which lanes are valid.
-      const key = `${version}|${localDate(new Date())}|${lanesKey()}|${handsOffOn(ROOT)}`;
-      if (boardCache?.key !== key) {
-        const r = check(board);
-        boardCache = { key, body: {
-          version, northstar: board.northstar, goals: board.goals,
-          // done_at: the move to done (activity), for "done in 24h"; `updated` moves with any note. Only recent cards are read.
-          tasks: board.tasks.map((t) => { const o = publicTask(t); if (t.status !== 'done' || !(Date.now() - Date.parse(t.updated) < 7 * 86_400_000)) return o; const ms = lastDone(t.id); return ms === null ? o : { ...o, done_at: new Date(ms).toISOString() }; }),
-          links: board.links, rollup: rollup(board),
-          check: { errors: r.errors.length, warnings: r.warnings.length, issues: [...r.errors, ...r.warnings].slice(0, 20) },
-          lanes: laneList(),
-        } };
+      // and with the config that decides which lanes are valid (and the hands-off switch, which hides review decisions).
+      // Every open page refetches the board on each change event:
+      // the whole reply (and its gzip) is built once per key and reused for BOARD_REPLY_MS, so a burst of reloads does not
+      // stringify and compress it again per tab on the main thread. `now` and `stuck` may be that old.
+      const build = () => {
+        const handsOff = handsOffOn(ROOT);
+        const key = `${version}|${localDate(new Date())}|${lanesKey()}|${handsOff}`;
+        if (boardCache?.key !== key) {
+          const r = check(board);
+          boardCache = { key, body: {
+            version, northstar: board.northstar, goals: board.goals,
+            // done_at: the move to done (activity), for "done in 24h"; `updated` moves with any note. Only recent cards are read.
+            tasks: board.tasks.map((t) => { const o = publicTask(t); if (t.status !== 'done' || !(Date.now() - Date.parse(t.updated) < 7 * 86_400_000)) return o; const ms = lastDone(t.id); return ms === null ? o : { ...o, done_at: new Date(ms).toISOString() }; }),
+            links: board.links, rollup: rollup(board),
+            check: { errors: r.errors.length, warnings: r.warnings.length, issues: [...r.errors, ...r.warnings].slice(0, 20) },
+            lanes: laneList(),
+          } };
+        }
+        const t0 = Date.now();
+        if (boardReply?.key !== key || t0 - boardReply.at >= BOARD_REPLY_MS) {
+          const { version: v0, ...rest } = boardCache.body;
+          const now = new Date(t0);
+          boardReply = { key, at: t0, json: JSON.stringify({ version: v0, now: now.toISOString(), ...rest, projects: cfg.projects, hands_off: handsOff, stuck: stuckReport(board, now, cfg.stuck, replaced) }), gz: null };
+        }
+        return boardReply;
+      };
+      let reply = build();
+      // gzip once per reply, off the main thread, for clients that accept it (browsers, fetch); the same accept rule as send().
+      if (acceptsGzip(req.headers['accept-encoding'])) {
+        const head = { 'Content-Type': 'application/json; charset=utf-8', 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding', 'Cache-Control': 'no-store', ...SECURITY_HEADERS };
+        if (req.method === 'HEAD') { res.writeHead(200, head); return res.end(); }
+        for (let tries = 0; ; tries++) {
+          const r0 = reply;
+          const body = await (r0.gz ??= boardGzip(r0.json).catch((e) => { r0.gz = null; throw e; }));
+          // A write that finished while the gzip ran moved the version: a reply is never older than it. Send the reply
+          // built now (its own gzip, or plain after two tries).
+          reply = build();
+          if (reply === r0) { res.writeHead(200, head); return res.end(body); }
+          if (tries >= 2) return send(res, 200, reply.json);
+        }
       }
-      const { version: v0, ...rest } = boardCache.body;
-      const now = new Date();
-      const json = JSON.stringify({ version: v0, now: now.toISOString(), ...rest, projects: cfg.projects, hands_off: handsOffOn(ROOT), stuck: stuckReport(board, now, cfg.stuck, replaced) });
-      // Every open tab reads every task on each reload: gzip it for clients that accept it (browsers, fetch).
-      if (/\bgzip\b/.test(String(req.headers['accept-encoding'] || ''))) {
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding', 'Cache-Control': 'no-store', ...SECURITY_HEADERS });
-        return res.end(req.method === 'HEAD' ? undefined : gzipSync(json));
-      }
-      return send(res, 200, json);
+      return send(res, 200, reply.json);
     }
     if (p === '/api/decisions/today') return send(res, 200, decisionsToday(ROOT));
     if (p === '/api/tasks') return getTasks(req, res, url.searchParams);
@@ -1088,8 +1133,12 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
       const out = startText({ board, actor: who, version, app: list('app')?.length ? list('app') : null, repo: q.get('repo') ?? '', rules: rules !== false, ready: readyQ === null ? undefined : Number(readyQ),
         roles: roles ?? undefined, requireSpecReady: !!strict, missingHours: cfg.stuck.missing_hours, messages, cursor: readCursor(ROOT, who), lessons: lessonSummaries(ROOT, board), families: cfg.families,
         spec: (t) => ({ spec_state: specIndex.facts.get(t.id)?.spec_state ?? 'none', spec_by: specIndex.facts.get(t.id)?.spec_by ?? null }) });
-      if (!peek) moveCursor(ROOT, who, out.read);
-      return send(res, 200, out.text + '\n', 'text/plain; charset=utf-8');
+      // The cursor moves only after the reply was sent in full (a failed send leaves the lines unread), never for ?peek=1
+      // or HEAD, and under auth enforce only for a caller whose token proves the name.
+      commitAfterSend(res,
+        () => { send(res, 200, out.text + '\n', 'text/plain; charset=utf-8'); },
+        () => { if (!peek && req.method !== 'HEAD' && startCursorCaller(req, who)) moveCursor(ROOT, who, out.read); });
+      return;
     }
     // Check items: the card's items, ?history=1 adds the append-only events.
     const ig = /^\/api\/tasks\/([^/]+)\/items$/.exec(p);

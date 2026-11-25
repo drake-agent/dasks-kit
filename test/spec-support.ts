@@ -33,7 +33,9 @@ export function freePort(): Promise<number> {
 }
 
 export async function stopServer(proc: ChildProcess): Promise<void> {
-  if (proc.exitCode !== null) return;
+  // A child killed by a signal has exitCode null and signalCode set, and its 'exit' already fired: waiting for it would
+  // hang teardown until the test timeout.
+  if (proc.exitCode !== null || proc.signalCode !== null) return;
   const done = new Promise((resolve) => proc.once('exit', resolve));
   proc.kill(); await done;
 }

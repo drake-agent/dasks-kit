@@ -4,7 +4,8 @@
 // (ledger.key) over the line without hmac. The file is only ever opened with O_APPEND; nothing here rewrites it.
 import fs from 'node:fs';
 import path from 'node:path';
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
+import { sameBytes } from './same-bytes.ts';
 import type { Task } from './schema.ts';
 import { CONTEXT_FIELDS, CONTEXT_LABEL, parseContext } from './collab.ts';
 import { type Head, headProblem, readHead, writeHead } from './ledger-head.ts';
@@ -164,7 +165,7 @@ export function verifyLedger(text: string, key: Buffer, head?: Head | null): { o
     if (e.prev !== prev) return { ok: false, count: i, error: 'prev hash does not match the previous line', line: n };
     if (e.scope_hash !== sha256(String(e.scope))) return { ok: false, count: i, error: 'scope_hash does not match scope', line: n };
     const want = Buffer.from(sign(key, e), 'hex'); const got = Buffer.from(String(e.hmac), 'hex');
-    if (want.length !== got.length || !timingSafeEqual(want, got)) return { ok: false, count: i, error: 'HMAC mismatch', line: n };
+    if (!sameBytes(want, got)) return { ok: false, count: i, error: 'HMAC mismatch', line: n };
     prev = sha256(lines[i]);
   }
   if (head !== undefined) {

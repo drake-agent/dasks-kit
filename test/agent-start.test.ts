@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { startText, budgetProblems, START_BUDGET } from '../src/lib/start.ts';
+import { startText, budgetProblems, cursorFile, START_BUDGET } from '../src/lib/start.ts';
 import { postMessage } from '../src/lib/messages.ts';
 import { task, tempRepo } from './helpers.ts';
 import { stopServer } from './spec-support.ts';
@@ -149,6 +149,14 @@ function mcpCall(url: string, actor: string, name: string, args: any): Promise<{
   });
 }
 
+test('read cursor files: names that differ only in case keep their own file; a lower-case name keeps its old file', () => {
+  const root = '/r';
+  assert.equal(cursorFile(root, 'spec@host1'), path.join(root, 'run', 'start-cursors', 'spec@host1.json'));
+  assert.equal(cursorFile(root, 'Spec@host1'), path.join(root, 'run', 'start-cursors', '+spec@host1.json'));
+  assert.notEqual(cursorFile(root, 'Spec@host1').toLowerCase(), cursorFile(root, 'spec@host1').toLowerCase(), 'distinct on a case-insensitive disk');
+  assert.equal(cursorFile(root, 'human-claude@laptop'), cursorFile(root, 'claude-code@laptop'), 'a session pair still shares one');
+});
+
 test('http + mcp: /api/start needs the actor, moves the read cursor unless peek, and dask_start returns the text', async () => {
   const { root, cleanup } = tempRepo(TASKS);
   let srv: { url: string; proc: ChildProcess } | undefined;
@@ -168,6 +176,10 @@ test('http + mcp: /api/start needs the actor, moves the read cursor unless peek,
     // peek left the message unread; a normal call shows it and marks it read for the next call (either of my names)
     assert.deepEqual(groups(await (await get('')).text()).messages, ['shared.t-revcx #1']);
     assert.deepEqual(groups(await (await get('', 'human-claude@laptop')).text()).messages, []);
+    // HEAD never moves a cursor: a message to another name stays unread after one.
+    postMessage(root, 'shared.t-revcx', { text: 'and this one', to: 'codex@desktop', kind: 'question' }, ME);
+    assert.equal((await fetch(`${srv.url}/api/start`, { method: 'HEAD', headers: { 'X-Dasks-Actor': 'codex@desktop' } })).status, 200);
+    assert.deepEqual(groups(await (await get('', 'codex@desktop')).text()).messages, ['shared.t-revcx #2']);
     const lean = await (await get('?rules=0')).text();
     assert.doesNotMatch(lean, /^rules\b/m);
     const viaMcp = await mcpCall(srv.url, ME, 'dask_start', { repo: 'example-org/dasks', rules: false, peek: true });

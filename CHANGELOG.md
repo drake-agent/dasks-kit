@@ -44,6 +44,20 @@
   only while merging is caught; plain `git log -p` shows no patch for a merge.
 - `dasks ci`: every ssh call to another Mac sends keepalives and ends after `DASKS_CI_REMOTE_SEC` seconds (default 900),
   so a host that hangs fails that step instead of holding the command for hours. See docs/ci-runners.md.
+- `GET /api/start` marks messages read only after the reply was sent in full, so a reply that fails on the way (a reset,
+  a closed connection) leaves them unread. `HEAD` never marks them read, and under auth `enforce` only a caller whose
+  token proves the actor name moves its read cursor; anyone else still gets the text, as a peek.
+- Read cursors of names that differ only in case (`Spec@host1`, `spec@host1`) keep separate files on a case-insensitive
+  disk. An all-lower-case name keeps the file it had.
+- Every secret compare goes through one helper that checks the length first, so a client-sent value of another byte
+  length is a refusal, never a 500.
+- `GET /api/board`: one reply (and one gzip, made off the main thread) per data version is reused for 3 seconds, so a
+  burst of reloads from open pages no longer stringifies and compresses the whole board again for each tab and stalls
+  the board. A write moves the version, so it shows at once, also
+  in a gzip reply whose compression was still running when the write finished (it is rebuilt, never sent older); `now` and `stuck` may be up to 3 seconds old.
+- Tests: tearing down a test server that was already killed by a signal returns at once instead of hanging until the
+  test timeout. The fleet test checks that `dasks machine list` never prints the whole token secret (it took the
+  part after the second `_`, which can be a short fragment because the secret may hold `_`, and failed by chance).
 
 ## 1.1.1 — 2026-11-16
 
