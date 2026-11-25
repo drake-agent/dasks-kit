@@ -188,7 +188,8 @@ warns about that. It never holds a claim or a start, and it never changes depend
   at `origin/main` (else `origin/HEAD`), never the working tree, with no model and no network. It knows relative TS/JS
   imports (`import`, `export … from`, `require`, `import()`), Python `import` and `from … import` (absolute and
   relative), Rust `mod x;` and `use crate::`/`self::`/`super::` paths, and Swift `import <Target>` (also `public import`,
-  `package import` and the other access levels) of a SwiftPM target declared in the repo. An import that does not name a file in the tree is dropped; package names are never followed.
+  `package import` and the other access levels) of a SwiftPM target declared in the repo. An import that does not name
+  a file in the tree is dropped; package names are never followed.
 - **When it is built.** Every look checks each clone's head in the background and rebuilds a map that is behind, one
   repo at a time, once per new head. A build reads at most 20,000 source files and 64 MB, skips files over 512 KB and
   stops after 60 s; past a file or byte limit the map is marked truncated. A failed build logs one line and the last map
@@ -215,17 +216,18 @@ arrives after a newer one, so a slow update of an earlier phase never replaces a
 
 <img alt="A card panel's live window: the newest steps, then the changed files and their diff" src="assets/live-window.jpg" width="480">
 
-- **Nothing secret leaves the machine.** The runner redacts every step and the diff before it sends them, and the board
-  does it again before it keeps them, secret command-line flags included (`-a`, `-p<pw>`, `--password`, `--token`,
+- **Secrets are redacted on both sides.** The runner redacts every step and the diff before it sends them, and the
+  board does it again before it keeps them, secret command-line flags included (`-a`, `-p<pw>`, `--password`, `--token`,
   `-u user:pass`, …). A file whose name says env, key, secret, token, password or credential, a credential file
   (`.pgpass`, `.netrc`, `.git-credentials`, kubeconfig, `.docker/config.json`, keys and certificates, …), a config
   format (`.yaml`, `.toml`, `.ini`, `.plist`, …), and a new or renamed file of `KEY=value` lines show only their header
-  line, never their content. A rename is judged by both names.
+  line, never their content. A rename is judged by both names. Redaction works by known patterns, so a secret in an
+  unusual shape can still show: treat the live window like any build log.
 - **Bounded.** The board keeps the newest 40 steps of 240 characters, 30 files and 16 KB of diff per card, for at most
   64 cards, in memory only: nothing goes to `data/`, nothing is committed, and a board restart empties it.
 - **Never in the way.** One post at a time, each waited for at most 5 s, and the end of a phase waits at most 5 s for
-  the last one. A board error is skipped, a board without the route turns it off for that phase, and nothing
-  decides anything from it. `DASKS_RUNNER_LIVE_MS` sets the interval; `0` turns it off.
+  the last one. A board error is skipped, a board without the route turns it off for that phase, and no decision
+  depends on it. `DASKS_RUNNER_LIVE_MS` sets the interval; `0` turns it off.
 
 ## Turn it on
 

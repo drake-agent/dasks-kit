@@ -44,8 +44,8 @@ the exact version. You are the drafter. Write the spec so that review finds noth
    `## Files likely touched`, `## Context pack`, `## Acceptance tests` (name, setup, action, expected result; each one
    fails on today's code), `## Tests`, `## Done criteria` (a list), `## Open questions`.
    Write what to build, why, and how anyone can tell it is done; never how to build it: no file-by-file plan, no step
-   list, no code to paste. The builder reads the code and decides. Keep the whole spec under 1,500 words (a later version:
-   1,600 words in total): the board refuses a longer one (422).
+   list, no code to paste. The builder reads the code and decides. Keep the whole spec under 1,500 words (a later
+   version: 1,600 words in total): the board refuses a longer one (422).
 5. **Score open questions** as `- [Q] often=<1-10> bad=<1-10> kind=<security|data-loss|approval|what|where|done|other>
    <question>`. Often = how often a builder would hit it; bad = how bad a wrong guess is.
    - Security, data-loss and approval questions **always block**, whatever the score: ask the user.

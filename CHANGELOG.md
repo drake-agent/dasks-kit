@@ -9,8 +9,9 @@
   stays the default and behaves as before. See docs/storage.md.
 - SQLite store export: `node bin/board-store.ts export` replays the store's writes as git commits (one per write, same
   message) into the store's own bare export repo, and `compare --export` checks it. In sqlite mode the backup exports
-  first and pushes that branch, the digest and the decisions witness read its history, a schema migration keeps a copy
-  of the db, and `dasks check`, `dasks-digest` and `bin/verify-decisions.ts` read the store. `restore --from <copy>` puts such a copy back and resumes the export. See docs/storage.md.
+  first and pushes that branch, the digest and the decisions check read their history from it, a schema migration
+  keeps a copy of the db, and `dasks check`, `dasks-digest` and `bin/verify-decisions.ts` read the store.
+  `restore --from <copy>` puts such a copy back and resumes the export. See docs/storage.md.
 - Live window: while the runner builds, reviews or fixes a card, it posts the agent's newest steps and the worktree's
   diff since the run started to `POST /api/tasks/<card>/live` (agent token), and `GET /api/tasks/<card>/live` reads
   them back. Both sides redact secrets; sensitive and config files show no content; steps, files and diff bytes are
@@ -23,8 +24,8 @@
   each request (no restart). While it is on, `GET /api/merge-ok` answers 410 and `dask captain-merge` lands a card on
   green CI and a clean review without a merge OK; review cards show no approve/reject; a build-stage park, question,
   ask, needs-user outcome or retry cap becomes a card note (a doing card goes back to its spec stage) unless it is a
-  taste pick or about money, deleting data, a secret or credential, a physical device or a UI choice. `/api/status`, `/api/health`,
-  `/api/board` and `/api/captain` report `hands_off`. See docs/captain.md.
+  taste pick or about money, deleting data, a secret or credential, a physical device or a UI choice. `/api/status`,
+  `/api/health`, `/api/board` and `/api/captain` report `hands_off`. See docs/captain.md.
 - Specs: a later spec version may reach 1,600 words in total (room for a fix line, a decision or an answer, on a full
   spec); the first version stays at 1,500. The spec writer prompt and the `spec-writer` skill say so. See docs/specs.md.
 - Specs: a spec versions folder that cannot be read (a permission error, a file in its place) answers 503 with
@@ -52,12 +53,11 @@
 - Every secret compare goes through one helper that checks the length first, so a client-sent value of another byte
   length is a refusal, never a 500.
 - `GET /api/board`: one reply (and one gzip, made off the main thread) per data version is reused for 3 seconds, so a
-  burst of reloads from open pages no longer stringifies and compresses the whole board again for each tab and stalls
-  the board. A write moves the version, so it shows at once, also
-  in a gzip reply whose compression was still running when the write finished (it is rebuilt, never sent older); `now` and `stuck` may be up to 3 seconds old.
-- Tests: tearing down a test server that was already killed by a signal returns at once instead of hanging until the
-  test timeout. The fleet test checks that `dasks machine list` never prints the whole token secret (it took the
-  part after the second `_`, which can be a short fragment because the secret may hold `_`, and failed by chance).
+  burst of reloads from open pages no longer rebuilds and compresses the whole board for each tab and stalls the board.
+  A write still shows at once, also in a gzip reply that was being built when the write finished; `now` and `stuck`
+  may be up to 3 seconds old.
+- Tests: a test server that was already killed is torn down at once instead of hanging until the test timeout, and a
+  fleet test that could fail by chance no longer does.
 - Card create: the near-duplicate check no longer refuses a title whose slug has no a-z0-9 (they all share the `task`
   fallback id), a title like `Phase` while `Phase 2` (`<goal>.t-phase-2`) is open, or two long titles that share only their
   first 40 slug characters. A real repeat (the same normalized title) is still 409.
