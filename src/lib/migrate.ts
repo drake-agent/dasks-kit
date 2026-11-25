@@ -8,6 +8,7 @@ import { isDeepStrictEqual } from 'node:util';
 import YAML from 'yaml';
 import { commitFiles, git, gitCommonDir, withRepoLock } from './write.ts';
 import * as boardFiles from './board-files.ts';
+import { snapshotDb } from './board-sqlite.ts';
 
 export const SCHEMA_REL = 'data/schema.json';
 
@@ -95,9 +96,11 @@ export function migrateBoard(root: string, now = new Date()): MigrateResult {
   return withRepoLock(root, () => {
     const dir = path.join(gitCommonDir(root), 'dasks-backups');
     fs.mkdirSync(dir, { recursive: true }); // not-board: the backup folder in .git
-    const backup = path.join(dir, `${now.toISOString().replace(/[:.]/g, '-')}-schema-${from}.bundle`);
-    // Every ref and all history: `git clone <bundle>` gives the board back as it was before the first step.
-    git(root, ['bundle', 'create', '-q', backup, '--all']);
+    // sqlite store: a copy of the db (the data repo's files stopped at the import), else a bundle of every ref and all
+    // history (`git clone <bundle>` gives the board back as it was before the first step).
+    const sqlite = boardFiles.storeHead(root) !== null;
+    const backup = path.join(dir, `${now.toISOString().replace(/[:.]/g, '-')}-schema-${from}.${sqlite ? 'db' : 'bundle'}`);
+    if (sqlite) snapshotDb(backup); else git(root, ['bundle', 'create', '-q', backup, '--all']);
     const applied: string[] = [];
     for (const m of MIGRATIONS.filter((x) => x.to > from)) {
       const files = [...m.files(root).filter((f) => f.rel !== SCHEMA_REL), { rel: SCHEMA_REL, content: schemaContent(m.to) }];

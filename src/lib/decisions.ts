@@ -9,6 +9,7 @@ import type { Task } from './schema.ts';
 import { CONTEXT_FIELDS, CONTEXT_LABEL, parseContext } from './collab.ts';
 import { type Head, headProblem, readHead, writeHead } from './ledger-head.ts';
 import { git } from './write.ts';
+import * as boardFiles from './board-files.ts';
 
 export const GENESIS = '0'.repeat(64);
 // retry asks the card's owner to run the job again. An entry is verified against the scope text stored with it.
@@ -194,14 +195,21 @@ const parseWitness = (text: string, root: string): number | null | 'other' => {
  *  removes, breaks or lowers the witness does not lower this. A reset that drops those commits from history does
  *  (reflog only); see the doc's residual risks. */
 export function witnessSeq(root: string): number {
-  let max = 0;
+  // sqlite store: the history is the export repo's, and the newest witness may not be exported yet (the store's counts)
+  const repo = boardFiles.historyRoot(root);
+  const cur = repo === root ? null : storeWitness(root);
+  let max = typeof cur === 'number' ? cur : 0;
   let shas: string[] = [];
-  try { shas = git(root, ['log', '--format=%H', '--', WITNESS_REL]).split('\n').filter(Boolean); } catch { return 0; }
+  try { shas = git(repo, ['log', '--format=%H', '--', WITNESS_REL]).split('\n').filter(Boolean); } catch { return max; }
   for (const sha of shas) {
-    let text = ''; try { text = git(root, ['show', `${sha}:${WITNESS_REL}`]); } catch { continue; } // the removing commit
+    let text = ''; try { text = git(repo, ['show', `${sha}:${WITNESS_REL}`]); } catch { continue; } // the removing commit
     const n = parseWitness(text, root); if (typeof n === 'number' && n > max) max = n;
   }
   return max;
+}
+/** The witness the sqlite store holds now (parseWitness; null when there is none or it is unreadable). */
+function storeWitness(root: string): number | null | 'other' {
+  try { return parseWitness(boardFiles.readFileSync(path.join(root, WITNESS_REL), 'utf8'), root); } catch { return null; }
 }
 /** Error text when the ledger holds fewer decisions than git ever vouched for, or the witness in HEAD was removed,
  *  broken or lowered after decisions existed. */
@@ -209,7 +217,8 @@ export function witnessProblem(root: string, ledgerFile: string): string | null 
   const want = witnessSeq(root);
   if (!want) return null;
   let head: number | null | 'other' = null;
-  try { head = parseWitness(git(root, ['show', `HEAD:${WITNESS_REL}`]), root); } catch { head = null; }
+  if (boardFiles.storeHead(root) !== null) head = storeWitness(root); // sqlite store: its current witness stands for HEAD's
+  else try { head = parseWitness(git(root, ['show', `HEAD:${WITNESS_REL}`]), root); } catch { head = null; }
   if (head === null || head === 'other' || head < want) return `git witness (${WITNESS_REL}) was removed, broken or lowered after it vouched for ${want} decision(s)`;
   const have = readText(ledgerFile).split('\n').filter(Boolean).length;
   return have < want ? `git witness (${WITNESS_REL}) vouches for ${want} decision(s) but the ledger has ${have}: entries or the whole ledger were removed` : null;

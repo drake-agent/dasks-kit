@@ -49,7 +49,10 @@ export const statSync: typeof fs.statSync = ((p: any, o?: any) => {
 }) as any;
 
 /** sqlite mode for this root: the store's head (`sqlite:<seq>`, moves on every write), else null (read git as before).
- *  For the readers that read committed board files from git (spec-state.ts). */
+ *  For the readers that read committed board files from git (spec-state.ts) and the decisions witness. */
 export function storeHead(root: string): string | null { return backend === 'sqlite' && store.storeFor(root) ? `sqlite:${store.headSeq()}` : null; }
+/** Where the board's git history is: in sqlite mode the store's export repo (the checkout's data/ commits stop at the
+ *  import), else `root`. For the git-history readers (digest.ts, the decisions witness). */
+export function historyRoot(root: string): string { return storeHead(root) === null ? root : store.exportRepo() ?? root; }
 /** sqlite mode: files under a folder (`data/tasks`) with the change that last wrote each. */
 export const storeList = (relDir: string) => store.listUnder(relDir);

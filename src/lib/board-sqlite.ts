@@ -27,7 +27,7 @@ const TABLES = ['files', 'changes', 'change_files', 'meta'];
 // meta: db_id (random, set at creation; the export's Board-Change trailer and the export repo's marker name it), root
 // (real path of the checkout the import read: the only one the store serves), branch and head (the checkout's branch and
 // HEAD at the import), export_repo, export_branch, export_head (the commit the store made last there, or the imported
-// HEAD before any), import_pid (the import lock).
+// HEAD before any), import_pid (the import lock), export_pid (the export lock).
 const IMPORT_META = ['root', 'branch', 'head', 'export_repo', 'export_branch', 'export_head'];
 
 interface Stmts { row: StatementSync; gt: StatementSync; ge: StatementSync; dirStat: StatementSync; under: StatementSync; put: StatementSync; keep: StatementSync; change: StatementSync; head: StatementSync }
@@ -257,10 +257,51 @@ export const exportRepo = (): string | null => meta('export_repo');
 /** The ref the export moves in the export repo. */
 export const exportRef = (): string => `refs/heads/${meta('export_branch')}`;
 
+/** Take the export lock for `pid` in one transaction, so two exports taking over the same dead holder cannot both win.
+ *  Returns the live holder's pid when it is held, else null. */
+export function takeExportLock(pid: number, alive: (p: number) => boolean): number | null {
+  const db = open!.db;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const held = Number(meta('export_pid') ?? 0);
+    if (held && held !== pid && alive(held)) { db.exec('ROLLBACK'); return held; }
+    setMeta('export_pid', String(pid));
+    db.exec('COMMIT');
+    return null;
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+}
+export function releaseExportLock(pid: number): void { open?.db.prepare("DELETE FROM meta WHERE k = 'export_pid' AND v = ?").run(String(pid)); }
 export function pendingCount(): number { return Number((open!.db.prepare('SELECT COUNT(*) AS n FROM changes WHERE exported = 0').get() as { n: number }).n); }
+export interface Change { seq: number; at: string; message: string; files: { rel: string; content: Buffer }[] }
+/** Changes not yet exported, oldest first, with the bytes each file had after that change. */
+export function pendingChanges(limit = 500): Change[] {
+  const db = open!.db;
+  const rows = db.prepare('SELECT seq, at, message FROM changes WHERE exported = 0 ORDER BY seq LIMIT ?').all(limit) as { seq: number; at: string; message: string }[];
+  const files = db.prepare('SELECT rel, content FROM change_files WHERE seq = ? ORDER BY rel');
+  return rows.map((r) => ({ seq: Number(r.seq), at: r.at, message: r.message, files: (files.all(r.seq) as { rel: string; content: Uint8Array }[]).map((f) => ({ rel: f.rel, content: Buffer.from(f.content) })) }));
+}
+/** Change `seq` (and any before it) is in the export repo, whose branch is now at `exportHead`: marked exported, its
+ *  kept bytes dropped (files keeps the current bytes) and export_head moved, in one transaction. */
+export function markExported(seq: number, exportHead: string): void {
+  const db = open!.db;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.prepare('DELETE FROM change_files WHERE seq IN (SELECT seq FROM changes WHERE exported = 0 AND seq <= ?)').run(seq);
+    db.prepare('UPDATE changes SET exported = 1 WHERE exported = 0 AND seq <= ?').run(seq);
+    setMeta('export_head', exportHead);
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+}
 /** Every rel and its bytes (compare). */
 export function allFiles(): Map<string, Buffer> {
   const out = new Map<string, Buffer>();
   for (const r of open!.db.prepare('SELECT rel, content FROM files ORDER BY rel').all() as { rel: string; content: Uint8Array }[]) out.set(r.rel, Buffer.from(r.content));
   return out;
+}
+/** A consistent copy of the open db at `dest` (VACUUM INTO a temp file, then rename). */
+export function snapshotDb(dest: string): void {
+  const tmp = `${dest}.${process.pid}.tmp`;
+  fs.rmSync(tmp, { force: true }); // not-board: snapshot file
+  open!.db.prepare('VACUUM INTO ?').run(tmp);
+  fs.renameSync(tmp, dest); // not-board: snapshot file
 }

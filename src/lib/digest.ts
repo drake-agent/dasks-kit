@@ -59,8 +59,10 @@ const hhmm = (iso: string) => {
 };
 const short = (s: string, n = 60) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
 
-/** Collect status changes after `since` (a commit sha, or an ISO time). */
-export function collectChanges(root: string, since: { rev?: string; iso?: string }): { lines: DigestLine[]; head: string } {
+/** Collect status changes after `since` (a commit sha, or an ISO time). In sqlite mode the history is the store's export
+ *  repo (board-files historyRoot): the data repo's data/ commits stop at the import. */
+export function collectChanges(board: string, since: { rev?: string; iso?: string }): { lines: DigestLine[]; head: string } {
+  const root = boardFiles.historyRoot(board);
   let head = '';
   try { head = git(root, ['rev-parse', 'HEAD']).trim(); } catch { return { lines: [], head }; }
   // The walk ends at the HEAD captured above (not "HEAD"), so a commit landing meanwhile is left for the next run.

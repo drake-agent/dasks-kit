@@ -2,8 +2,10 @@
 // board-store (docs/storage.md): the SQLite board store next to its data repo.
 //   node bin/board-store.ts import  --root R [--db F]             fill an empty store from R's committed data/ files and
 //                                                                 clone R bare into the store's export repo
-//   node bin/board-store.ts compare --root R [--db F]             store vs R's data/ files, byte for byte; exit 1 on any
-//                                                                 difference
+//   node bin/board-store.ts compare --root R [--db F] [--export]  store vs R's data/ files (or, --export, the export
+//                                                                 branch's tree), byte for byte; exit 1 on any difference
+//   node bin/board-store.ts export  --root R [--db F]             replay pending writes as commits, oldest first, onto the
+//                                                                 export branch of the store's own repo (never into R)
 //   node bin/board-store.ts status  --root R [--db F]             mode, files, pending writes, export repo
 // The db is --db, else R's config store.sqlite_path. Every command but import refuses a store that cannot stand for R.
 import fs from 'node:fs';
@@ -13,6 +15,9 @@ import { execFileSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { loadConfig, storeDbPath } from '../src/lib/config.ts';
 import * as store from '../src/lib/board-sqlite.ts';
+import * as boardFiles from '../src/lib/board-files.ts';
+import { loadBoard } from '../src/lib/load.ts';
+import { check } from '../src/lib/check.ts';
 
 const git = (dir: string, args: string[], env: Record<string, string> = {}, input?: string | Buffer) =>
   execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'], input, maxBuffer: 512 * 1024 * 1024, env: { ...process.env, ...env } });
@@ -69,11 +74,93 @@ export function compare(root: string): Diff {
   const id = blobIds(root);
   return diff(store.allFiles(), disk, (b, o) => id(b) === o);
 }
+/** rel -> blob id of the data/ files (or just `rels`) in a commit's tree. */
+function treeBlobs(repo: string, rev: string, rels: string[] = ['data/']): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const e of git(repo, ['ls-tree', '-r', '-z', rev, '--', ...rels]).split('\0')) {
+    const tab = e.indexOf('\t'); if (tab < 0) continue;
+    const [, type, sha] = e.slice(0, tab).split(' ');
+    if (type === 'blob' && !e.slice(tab + 1).startsWith('data/decisions/')) out.set(e.slice(tab + 1), sha);
+  }
+  return out;
+}
+/** The store against the export branch's tree (blob ids, nothing checked out). */
+export function compareExport(): Diff {
+  const repo = store.exportRepo()!; const id = blobIds(repo);
+  return diff(store.allFiles(), treeBlobs(repo, store.exportRef()), (b, o) => id(b) === o);
+}
+
+const TRAILER = 'Board-Change';
+/** What `git commit -m <message> -m <trailer>` stores: trailing spaces cut, blank lines collapsed, none at the ends. */
+function commitText(message: string, trailer: string): string {
+  const lines = `${message}\n\n${trailer}`.split('\n').map((l) => l.trimEnd());
+  return lines.filter((l, i) => l || (i > 0 && lines[i - 1])).join('\n').replace(/^\n+|\n+$/g, '') + '\n';
+}
+interface Run { repo: string; ref: string; tip: string; index: string; id: (b: Buffer) => string }
+/** Commit exactly `files` on the tip through a private index, then move the branch with a compare-and-swap
+ *  (`update-ref <ref> <new> <tip>`), so a branch moved by anything else refuses. */
+function commitTo(x: Run, files: { rel: string; content: Buffer }[], text: string, env: Record<string, string>): void {
+  const idx = { GIT_INDEX_FILE: x.index };
+  const entries = files.map((f) => `100644 blob ${git(x.repo, ['hash-object', '-w', '--stdin'], {}, f.content).trim()}\t${f.rel}\0`).join('');
+  if (entries) git(x.repo, ['update-index', '-z', '--index-info'], idx, entries);
+  const tree = git(x.repo, ['write-tree'], idx).trim();
+  const sha = git(x.repo, ['commit-tree', tree, '-p', x.tip], env, text).trim();
+  git(x.repo, ['update-ref', '-m', 'board-store export', x.ref, sha, x.tip]);
+  x.tip = sha;
+}
+/** The branch must be where the store left it (meta export_head). One commit past it is accepted only when it is exactly
+ *  what this store writes for its next pending change (an export that stopped after moving the branch and before the
+ *  store recorded it): same parent, message and trailer, paths and bytes. Anything else refuses, nothing marked. */
+function settleTip(x: Run, dbId: string, log: (s: string) => void): void {
+  const want = store.meta('export_head')!;
+  if (x.tip === want) return;
+  const moved = `the export branch ${x.ref} is at ${x.tip}, but this store last exported ${want}`;
+  const next = store.pendingChanges(1)[0];
+  let parent = ''; try { parent = git(x.repo, ['rev-parse', `${x.tip}^`]).trim(); } catch { /* a root commit */ }
+  const raw = git(x.repo, ['cat-file', 'commit', x.tip]);
+  const ok = next && parent === want && raw.slice(raw.indexOf('\n\n') + 2) === commitText(next.message, `${TRAILER}: ${dbId}:${next.seq}`)
+    && git(x.repo, ['diff-tree', '-r', '-z', '--no-commit-id', '--name-only', want, x.tip]).split('\0').filter(Boolean).every((r) => next.files.some((f) => f.rel === r))
+    && (() => { const t = treeBlobs(x.repo, x.tip, next.files.map((f) => f.rel)); return next.files.every((f) => t.get(f.rel) === x.id(f.content)); })();
+  if (!ok) throw new Error(`${moved}, and that commit is not this store's next change: something else moved it; nothing exported, every change stays pending`);
+  store.markExported(next.seq, x.tip);
+  log(`the export branch held change ${next.seq} already (an export stopped after its commit): marked exported`);
+}
+/** Replay pending changes as commits on the export branch (subject = the change's message, its time as author and
+ *  committer date, a `Board-Change: <db-id>:<seq>` trailer), oldest first, until none is pending. First the board check
+ *  on the store itself (any error exports nothing). One export at a time (the store's export lock). */
+export function exportCmd(root: string, log: (s: string) => void = console.log): number {
+  const alive = (pid: number) => { try { process.kill(pid, 0); return pid > 0; } catch (k: any) { return k?.code === 'EPERM'; } };
+  const held = store.takeExportLock(process.pid, alive);
+  if (held) throw new Error(`another export (pid ${held}) is running on this store; nothing written`);
+  const repo = store.exportRepo()!;
+  const x: Run = { repo, ref: store.exportRef(), tip: '', index: path.join(repo, `board-export.${process.pid}.index`), id: blobIds(repo) };
+  const was = boardFiles.boardBackend();
+  try {
+    boardFiles.setBoardBackend('sqlite');
+    const errors = check(loadBoard(root)).errors.map((e) => `${e.file}: ${e.message}`);
+    if (errors.length) throw new Error(`the store fails the board check (${errors.length} error(s)); nothing exported, every change stays pending:\n${errors.slice(0, 10).join('\n')}`);
+    const dbId = store.meta('db_id')!;
+    x.tip = git(repo, ['rev-parse', '--verify', x.ref]).trim();
+    settleTip(x, dbId, log);
+    git(repo, ['read-tree', x.tip], { GIT_INDEX_FILE: x.index });
+    let done = 0;
+    for (let batch = store.pendingChanges(); batch.length; batch = store.pendingChanges()) for (const c of batch) {
+      try { commitTo(x, c.files, commitText(c.message, `${TRAILER}: ${dbId}:${c.seq}`), { GIT_AUTHOR_DATE: c.at, GIT_COMMITTER_DATE: c.at }); }
+      catch (e: any) { throw new Error(`change ${c.seq} (${c.message}) could not be committed; it and the later changes stay pending: ${String(e?.stderr || e?.message || e).trim().split('\n').slice(-3).join(' ')}`); }
+      store.markExported(c.seq, x.tip);
+      done++;
+    }
+    if (done) try { git(repo, ['-c', 'gc.autoDetach=false', 'gc', '--auto', '--quiet']); } catch { /* the next export tries again */ }
+    log(done ? `exported ${done} change(s) to ${repo} ${x.ref}` : 'nothing to export');
+    return done;
+  } finally { boardFiles.setBoardBackend(was); fs.rmSync(x.index, { force: true }); store.releaseExportLock(process.pid); } // not-board: the export's private index
+}
+
 function main(argv: string[]): number {
-  const { values, positionals } = parseArgs({ args: argv, options: { root: { type: 'string' }, db: { type: 'string' } }, allowPositionals: true });
+  const { values, positionals } = parseArgs({ args: argv, options: { root: { type: 'string' }, db: { type: 'string' }, export: { type: 'boolean' } }, allowPositionals: true });
   const cmd = positionals[0];
-  if (!['import', 'compare', 'status'].includes(cmd ?? '') || !values.root) {
-    console.error('usage: board-store.ts import|compare|status --root DIR [--db FILE]'); return 2;
+  if (!['import', 'compare', 'export', 'status'].includes(cmd ?? '') || !values.root) {
+    console.error('usage: board-store.ts import|compare|export|status --root DIR [--db FILE] [--export]'); return 2;
   }
   const root = path.resolve(values.root);
   const cfg = loadConfig(root);
@@ -83,8 +170,9 @@ function main(argv: string[]): number {
   try {
     if (cmd === 'import') { console.log(importCmd(root)); return 0; }
     if (cmd === 'status') { console.log(`mode: ${cfg.store.mode}\ndb: ${db}\nfiles: ${store.fileCount()}\nhead: sqlite:${store.headSeq()}\npending changes: ${store.pendingCount()}\nexport repo: ${store.exportRepo()} ${store.exportRef()} at ${store.meta('export_head')}`); return 0; }
-    const where = 'data repo';
-    const c = compare(root);
+    if (cmd === 'export') { exportCmd(root); return 0; }
+    const where = values.export ? 'export branch' : 'data repo';
+    const c = values.export ? compareExport() : compare(root);
     console.log(`store: ${c.store} files\n${where}: ${c.other} data/ files`);
     for (const [label, list] of [['only in store', c.onlyStore], [`only in ${where}`, c.onlyOther], ['bytes differ', c.differ]] as const) {
       console.log(`${label}: ${list.length}`);

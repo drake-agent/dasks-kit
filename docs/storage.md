@@ -48,7 +48,15 @@ In sqlite mode the server:
   process, synchronous writes);
 - builds the spec index from the store (its head is `sqlite:<seq>`, so the index rebuilds after every write);
 - skips the `data/` file watcher, the start-up git recovery and the write journal (nothing edits the store by hand;
-  the 10-minute full reload stays).
+  the 10-minute full reload stays);
+- reads git history (the digest, the decisions witness history) from the store's export repo; the witness check also
+  counts the store's current witness, which may not be exported yet;
+- before a schema migration, keeps a copy of the db (`.git/dasks-backups/<time>-schema-<n>.db`) instead of a git
+  bundle;
+- backs up by exporting first and pushing the export branch (below).
+
+`dasks check`, `dasks-digest` and `bin/verify-decisions.ts` open the configured store the same way (a store that
+cannot be used is exit 2, never a pass).
 
 The data repo itself is never written in sqlite mode: its `data/` stays as it was at the import.
 
@@ -60,11 +68,54 @@ the db file; every other command refuses a store that cannot stand for R (as the
 | Command | What it does |
 |---|---|
 | `node bin/board-store.ts import --root R` | Clone R bare into `<folder of the db>/export.git` (its branch at R's HEAD, marked with the store's id), then fill the empty store with the bytes HEAD holds for R's tracked `data/` files (not `data/decisions/`; git's bytes, so working-tree line-ending filters change nothing) in one transaction with the import's record (R's real path, branch and HEAD). Runs under an import lock. Refuses a store that has files, another import of the same db, an `export.git` already in the folder (never removed), a link or submodule on a board path, and uncommitted or untracked files under `data/`. |
-| `node bin/board-store.ts compare --root R` | The store against R's `data/` files on disk, hashed through the repo's filters as git would store them: counts, files only in one side, files whose bytes differ. Exit 1 on any difference. |
+| `node bin/board-store.ts compare --root R [--export]` | The store against R's `data/` files on disk, hashed through the repo's filters as git would store them, or with `--export` the export branch's tree (blob ids, nothing checked out): counts, files only in one side, files whose bytes differ. Exit 1 on any difference. |
+| `node bin/board-store.ts export --root R` | Replay pending changes, oldest first, as commits on the export branch (below). Stops at the first failure; that change and the rest stay pending. |
 | `node bin/board-store.ts status --root R` | Mode, db, files, head, pending changes and the export repo. |
+
+### The export
+
+Git sees a sqlite-mode write only after an export. The export writes only the store's export repo
+(`<folder of the db>/export.git`, a bare clone the import made: no working tree, no shared index), on its export
+branch (the data repo's branch at the import). Under the export lock (one export per store, a dead holder's lock is
+taken over):
+
+1. The board check runs on the store itself; any error exports nothing and every change stays pending.
+2. The branch must be at the commit the store made last. One commit past it is accepted only when it is exactly the
+   commit this store writes for its next pending change (same parent, message, trailer, paths and bytes): an export
+   that stopped after moving the branch and before it recorded that. Anything else (a hand commit, another copy of the
+   store) refuses, nothing marked.
+3. One commit per change, through a private index (`GIT_INDEX_FILE`): `hash-object`, `update-index`, `write-tree`,
+   `commit-tree -p <tip>` with the change's message plus `Board-Change: <store id>:<seq>` and the change's time as
+   author and committer date, then `update-ref <branch> <new> <tip>` (a compare-and-swap: a branch moved meanwhile
+   refuses). The change is marked exported and its kept bytes dropped in one transaction.
+
+With `backup.remote` set, each backup tick runs the export in a child process and then pushes the export branch to the
+backup branch, fast-forward only, with the same path checks as in git mode. A failed export is a failed push. The
+first push after switching on is a fast-forward of what git mode pushed, since the export branch starts at the data
+repo's HEAD.
+
+What lags until the next export: the digest and the witness history (the export repo's), and the backup. Commits made
+to the data repo after the import (for example `config.json` changes) are not on the export branch.
 
 ### Switching on
 
 1. Stop the board.
 2. `node bin/board-store.ts import --root ~/.dasks/data`, then `compare` (`differing files: 0`).
 3. Set `store.mode` to `sqlite` in `config.json` and start the board.
+
+### Rollback to git
+
+1. Stop the board, then `node bin/board-store.ts export --root ~/.dasks/data` and `compare --export` (0).
+2. Set `store.mode` to `git` (or remove `store`).
+3. In the data repo: `git fetch <folder of the db>/export.git <branch>` and `git merge --no-edit FETCH_HEAD`. The export
+   commits touch only `data/`, so the merge is clean.
+4. `node bin/board-store.ts compare --root ~/.dasks/data`: 0 differing files. Start the board.
+
+### Limits
+
+- One server process writes the store. `dasks-digest` writes through it from its own process (SQLite serializes the
+  transactions); nothing else should.
+- The decisions witness in sqlite mode catches a deleted or cut ledger through the store's witness and the exported
+  history. A ledger restored together with an older copy of the db is caught only once the newer witness was exported.
+- Losing the db loses the writes since the last export. The export repo (and the backup branch) hold everything up to
+  it: merge it into the data repo as in the rollback and import into a new db folder.

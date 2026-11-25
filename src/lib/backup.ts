@@ -8,6 +8,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { runBounded, why } from './proc.ts';
+import * as boardFiles from './board-files.ts';
+import * as sqliteStore from './board-sqlite.ts';
 
 export interface BackupConfig { remote: string; every_min: number; branch?: string }
 export const DEFAULT_BACKUP: BackupConfig = { remote: '', every_min: 10 };
@@ -15,6 +17,8 @@ export const DEFAULT_BACKUP: BackupConfig = { remote: '', every_min: 10 };
 export const BACKUP_WARN_AFTER = 3;
 const PUSH_TIMEOUT_MS = 120_000;
 const LOCAL_TIMEOUT_MS = 30_000;
+const EXPORT_TIMEOUT_MS = 600_000;
+const BOARD_STORE = path.resolve(import.meta.dirname, '../../bin/board-store.ts');
 /** The most path listing (git log --name-only) a push is checked against; past it the push is refused. */
 const LIST_MAX_OUT = 64 * 1024 * 1024;
 
@@ -175,13 +179,21 @@ export class Backup {
     const s = this.status();
     const now = () => new Date().toISOString();
     const fail = (msg: string) => this.keep({ ...s, last_try_at: now(), last_error: msg, failures: s.failures + 1 });
-    const head = await runBounded('git', ['-C', this.root, 'rev-parse', 'HEAD'], { timeoutMs: LOCAL_TIMEOUT_MS });
+    // sqlite store (docs/storage.md): export pending writes first (a child process, so the server keeps serving), then
+    // push the export branch of the store's export repo instead of the data repo's HEAD.
+    let repo = this.root; let rev = 'HEAD';
+    if (boardFiles.storeHead(this.root) !== null) {
+      const ex = await runBounded(process.execPath, ['--disable-warning=ExperimentalWarning', BOARD_STORE, 'export', '--root', this.root, '--db', sqliteStore.sqliteBoard()!.dbPath], { timeoutMs: EXPORT_TIMEOUT_MS });
+      if (ex.code !== 0) return fail(`the sqlite export failed, nothing pushed (${why(ex, 300)})`);
+      repo = sqliteStore.exportRepo()!; rev = sqliteStore.exportRef();
+    }
+    const head = await runBounded('git', ['-C', repo, 'rev-parse', rev], { timeoutMs: LOCAL_TIMEOUT_MS });
     const sha = head.out.trim();
     if (head.code !== 0 || !/^[0-9a-f]{40}$/.test(sha)) return fail(`no HEAD commit (${why(head)})`);
     if (!force && sha === s.last_ok_sha && !s.failures && !s.last_error) return s;
     // Every path any commit about to leave touches (all history on the first push). -z: raw paths, NUL-separated, never
     // quoted (git quotes a path with non-ASCII bytes, which no pattern would match).
-    const log = (r: string[]) => runBounded('git', ['-C', this.root, 'log', '-z', '--name-only', '--format=', ...r], { timeoutMs: LOCAL_TIMEOUT_MS, maxOut: this.listMaxOut });
+    const log = (r: string[]) => runBounded('git', ['-C', repo, 'log', '-z', '--name-only', '--format=', ...r], { timeoutMs: LOCAL_TIMEOUT_MS, maxOut: this.listMaxOut });
     const names = await log(s.last_ok_sha ? [`${s.last_ok_sha}..${sha}`] : [sha]);
     // A last good commit that history no longer has (the repo was replaced): check everything.
     const all = names.code !== 0 && s.last_ok_sha ? await log([sha]) : names;
@@ -190,7 +202,7 @@ export class Backup {
     if (all.truncated) return fail('refused: the list of commits to push is too large to check (paths past the size cap were not seen); nothing was pushed');
     const bad = [...new Set(forbiddenPaths(all.out.split('\0').map((p) => p.replace(/^\n+/, '')).filter(Boolean)))];
     if (bad.length) return fail(`refused: the commits to push carry ${bad.slice(0, 5).join(', ')}, which must never leave this Mac; take them out of the board's history first`);
-    const r = await runBounded('git', ['-C', this.root, ...pushArgs(this.cfg.remote, sha, s.branch)], { env: gitEnv(), timeoutMs: PUSH_TIMEOUT_MS });
+    const r = await runBounded('git', ['-C', repo, ...pushArgs(this.cfg.remote, sha, s.branch)], { env: gitEnv(), timeoutMs: PUSH_TIMEOUT_MS });
     if (r.code !== 0) return fail(/\[rejected\]|non-fast-forward|fetch first/.test(r.out + r.err)
       ? `the remote branch ${s.branch} has commits this board does not (rejected; never forced): ${why(r, 200)}` : `git push failed: ${why(r, 300)}`);
     const t = now();

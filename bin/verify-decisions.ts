@@ -12,6 +12,7 @@ import { verifyLedger, witnessProblem } from '../src/lib/decisions.ts';
 import { type Head, readHead } from '../src/lib/ledger-head.ts';
 import { secretsDir } from '../src/lib/auth.ts';
 import { boardRoot } from '../src/lib/config.ts';
+import { useBoardStore } from '../src/lib/board-store-open.ts';
 
 const args = process.argv.slice(2);
 let keyFile = path.join(secretsDir(), 'ledger.key');
@@ -26,6 +27,8 @@ const rt = args.indexOf('--root');
 let root = boardRoot();
 if (rt >= 0) { root = path.resolve(args[rt + 1]); args.splice(rt, 2); }
 const ledger = args[0] || path.join(root, 'data/decisions/ledger.jsonl');
+// sqlite mode: the newest witness may be in the store only; a store that cannot be opened would hide it: FAIL, never OK
+try { useBoardStore(root); } catch (e: any) { console.log(`FAIL ${ledger}: store.mode is sqlite and the store cannot be used: ${e?.message ?? e}`); process.exit(2); }
 const gone = witnessProblem(root, ledger);
 if (gone) { console.log(`FAIL ${ledger}: ${gone}`); process.exit(1); }
 
