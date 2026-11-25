@@ -5,7 +5,8 @@ import { normPath, touchesOverlap } from '../touches.ts';
 import type { CodeMap, MapView } from './map.ts';
 
 /** File entries only: a directory (`src/lib/`) or glob (`**`, `*.ts`) entry never makes an import warning. */
-const fileEntries = (t: string[]) => [...new Set(t.filter((raw) => !raw.trim().endsWith('/') && !/[*?[{]/.test(raw)).map(normPath).filter(Boolean))];
+// A literal entry (holds `\`, a real file name from a PR) is a file even with `[` in its name.
+const fileEntries = (t: string[]) => [...new Set(t.filter((raw) => !raw.trim().endsWith('/') && (raw.includes('\\') || !/[*?[{]/.test(raw))).map(normPath).filter(Boolean))];
 
 const index = new WeakMap<CodeMap, { edges: Set<string>; dirs: Map<string, string[]>; files: Set<string> }>();
 function indexOf(m: CodeMap) {

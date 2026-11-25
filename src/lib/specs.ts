@@ -19,6 +19,8 @@ export const SPEC_MAX_BODY = 2_097_152;     // raw JSON body of PUT /spec (a spe
 export const SPEC_NOTE_MAX_BYTES = 4_096;
 /** A spec says what to build, why, and how to tell it is done; how to build it is the builder's call. */
 export const SPEC_MAX_WORDS = 1_500;
+/** The cap for every later version (a spec is already stored): room for a fix line (a decision, an answer) on a full spec. */
+export const SPEC_MAX_LATER_WORDS = 1_600;
 export const SECTIONS = { acceptance_tests: 'Acceptance tests', oracle: 'Oracle' } as const;
 
 export type SectionAuthor = { by: string; sha256: string } | null;
@@ -42,10 +44,17 @@ export function specPaths(id: string) {
   return { current: `${dir}.md`, text: (n: number) => path.join(dir, 'versions', `${n}.md`), meta: (n: number) => path.join(dir, 'versions', `${n}.json`), versions: path.join(dir, 'versions') };
 }
 
-/** The highest stored version (0 = no spec yet). */
+/** The highest stored version: 0 = no spec yet (no versions folder, or a readable one with no `<n>.json`). A folder that
+ *  cannot be read (a permission error, a file in its place) is a 503, never 0: a spec may be stored there, and a write
+ *  that took it as 0 would store a second version 1 over it. */
 export function currentSpecVersion(root: string, id: string): number {
   let names: string[] = [];
-  try { names = fs.readdirSync(path.join(root, specPaths(id).versions)); } catch { return 0; }
+  let dir: string;
+  try { dir = path.join(root, specPaths(id).versions); } catch { return 0; }   // a bad id has no spec
+  try { names = fs.readdirSync(dir); } catch (e: any) {
+    if (e?.code === 'ENOENT') return 0;
+    throw new HttpError(503, `the spec versions folder of ${id} cannot be read (${e?.code ?? 'error'}): whether it has a spec is unknown`, { retry_after: 5 });
+  }
   return names.reduce((n, f) => { const m = /^([1-9]\d{0,8})\.json$/.exec(f); return m ? Math.max(n, Number(m[1])) : n; }, 0);
 }
 
@@ -109,17 +118,19 @@ export function specWords(text: string): number {
   return text.split(/\s+/u).filter(Boolean).length;
 }
 
-/** The word cap as card contract reasons ([] when the write is fine). Checked on write only: a write that changes only
- *  the auto-ok header lines (the user's answer to an ask) always goes through, and a spec stored over the cap before it
- *  existed stays readable and still takes a write that does not make it longer. */
+/** The word cap as card contract reasons ([] when the write is fine): SPEC_MAX_WORDS for a first version,
+ *  SPEC_MAX_LATER_WORDS once a spec is stored. Checked on write only: a write that changes only the auto-ok header lines
+ *  (the user's answer to an ask) always goes through, and a spec stored over the cap before it existed stays readable and
+ *  still takes a write that does not make it longer. */
 export function specWordErrors(text: string, prevText: string | undefined): string[] {
   const n = specWords(text);
-  if (n <= SPEC_MAX_WORDS) return [];
+  const cap = prevText === undefined ? SPEC_MAX_WORDS : SPEC_MAX_LATER_WORDS;
+  if (n <= cap) return [];
   if (prevText !== undefined) {
     const before = specWords(prevText);
-    if (autoOkOnlyChange(prevText, text) || (before > SPEC_MAX_WORDS && n <= before)) return [];
+    if (autoOkOnlyChange(prevText, text) || (before > cap && n <= before)) return [];
   }
-  return [`spec is ${n} words; the cap is ${SPEC_MAX_WORDS}. Keep what to build, why, the done check and the tests that prove it; leave out how to build it (file-by-file plans, step lists, code to paste): the builder reads the code and decides`];
+  return [`spec is ${n} words; the cap is ${cap}. Keep what to build, why, the done check and the tests that prove it; leave out how to build it (file-by-file plans, step lists, code to paste): the builder reads the code and decides`];
 }
 
 /** A `## <name>` section: from its heading line (the first line starting with `## <name>` and no more letters) through

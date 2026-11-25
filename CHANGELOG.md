@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Specs: a later spec version may reach 1,600 words in total (room for a fix line, a decision or an answer, on a full
+  spec); the first version stays at 1,500. The spec writer prompt and the `spec-writer` skill say so. See docs/specs.md.
+- Specs: a spec versions folder that cannot be read (a permission error, a file in its place) answers 503 with
+  `Retry-After`, never "no spec yet" (404, version 0), and a `PUT /spec` on it stores nothing, so a second version 1 is
+  never written over a stored spec.
+- Touches from the real PR: a PR file whose name holds glob characters (`app/[id]/page.tsx`, `[slug].ts`) now holds
+  that one file. It used to be read as a pattern cut at `[`, so it held its whole folder (or, at the repo root, was
+  dropped). See docs/cards.md.
+- Code map: Swift access-level imports (`public import X`, `package import X`, `internal`, `fileprivate`, `private`) are
+  read as the same edge as `import X`.
+
 ## 1.1.1 — 2026-11-16
 
 - Rethink cards: while a rethink card is open (not done, not cancelled), the card it replaces no longer asks you for a

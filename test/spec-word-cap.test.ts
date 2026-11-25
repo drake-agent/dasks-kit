@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createTask, HttpError } from '../src/lib/write.ts';
-import { readSpec, specPaths, specWordErrors, specWords, SPEC_MAX_WORDS, writeSpec } from '../src/lib/specs.ts';
+import { readSpec, specPaths, specWordErrors, specWords, SPEC_MAX_LATER_WORDS, SPEC_MAX_WORDS, writeSpec } from '../src/lib/specs.ts';
 import { SPEC_METHOD } from '../src/lib/spec-flow.ts';
 import { BUILD_METHOD_RULE, runnerRules } from '../src/lib/runner.ts';
 import { setAutoOk } from '../public/user-ask.js';
@@ -43,11 +43,12 @@ test('word cap: exactly 1,500 words is stored, 1,501 is 422 with a fix message; 
     assert.match(over.reasons[0], /^spec is 1501 words; the cap is 1500\. /);
     assert.match(over.reasons[0], /leave out how to build it/);
     assert.equal(writeSpec(root, t.id, { text: cardOfWords(SPEC_MAX_WORDS), expected: 0, note: '' }, 'helper').metadata.version, 1);
-    assert.equal(refusal(() => writeSpec(root, t.id, { text: cardOfWords(SPEC_MAX_WORDS + 5), expected: 1, note: '' }, 'helper')).status, 422);
+    assert.equal(refusal(() => writeSpec(root, t.id, { text: cardOfWords(SPEC_MAX_LATER_WORDS + 5), expected: 1, note: '' }, 'helper')).status, 422);
     assert.equal(readSpec(root, t.id).metadata.version, 1, 'the refusal stored nothing');
-    const answer = setAutoOk(cardOfWords(SPEC_MAX_WORDS), 'the user chose A in a long answer note');
-    assert.ok(specWords(answer) > SPEC_MAX_WORDS);
-    assert.equal(writeSpec(root, t.id, { text: answer, expected: 1, note: '' }, 'user').metadata.version, 2, "the user's auto-ok answer on a spec at the cap goes through");
+    const answer = setAutoOk(cardOfWords(SPEC_MAX_LATER_WORDS), 'the user chose A in a long answer note');
+    assert.equal(writeSpec(root, t.id, { text: cardOfWords(SPEC_MAX_LATER_WORDS), expected: 1, note: '' }, 'helper').metadata.version, 2);
+    assert.ok(specWords(answer) > SPEC_MAX_LATER_WORDS);
+    assert.equal(writeSpec(root, t.id, { text: answer, expected: 2, note: '' }, 'user').metadata.version, 3, "the user's auto-ok answer on a spec at the cap goes through");
   } finally { cleanup(); }
 });
 
@@ -57,7 +58,7 @@ test('word cap: a spec stored over the cap before it stays readable, takes a sho
     const t = createTask(root, { goal: 'alpha', title: 'Old long spec' }, 'helper');
     writeSpec(root, t.id, { text: cardOfWords(100), expected: 0, note: '' }, 'helper');
     // A spec written by an older kit, before the cap: put its text in place as committed.
-    const long = cardOfWords(SPEC_MAX_WORDS + 100);
+    const long = cardOfWords(SPEC_MAX_LATER_WORDS + 100);
     const p = specPaths(t.id);
     for (const rel of [p.current, p.text(1)]) fs.writeFileSync(path.join(root, rel), long);
     execFileSync('git', ['-C', root, 'commit', '-qam', 'older spec']);
@@ -73,9 +74,27 @@ test('word cap: a spec stored over the cap before it stays readable, takes a sho
   } finally { cleanup(); }
 });
 
+test('word cap: a later version may reach 1,600 words in total; the first version stays at 1,500', () => {
+  const { root, cleanup } = tempRepo();
+  try {
+    assert.equal(SPEC_MAX_LATER_WORDS, 1600);
+    const t = createTask(root, { goal: 'alpha', title: 'Later version cap' }, 'helper');
+    const first = refusal(() => writeSpec(root, t.id, { text: cardOfWords(SPEC_MAX_WORDS + 50), expected: 0, note: '' }, 'helper'));
+    assert.equal(first.status, 422);
+    assert.match(first.reasons[0], /^spec is 1550 words; the cap is 1500\. /);
+    assert.equal(writeSpec(root, t.id, { text: cardOfWords(SPEC_MAX_WORDS), expected: 0, note: '' }, 'helper').metadata.version, 1);
+    // A fix line on a full spec (a decision, an answer to a question) fits in the later cap.
+    assert.equal(writeSpec(root, t.id, { text: cardOfWords(SPEC_MAX_LATER_WORDS), expected: 1, note: '' }, 'helper').metadata.version, 2);
+    const over = refusal(() => writeSpec(root, t.id, { text: cardOfWords(SPEC_MAX_LATER_WORDS + 1), expected: 2, note: '' }, 'helper'));
+    assert.equal(over.status, 422);
+    assert.match(over.reasons[0], /^spec is 1601 words; the cap is 1600\. /);
+    assert.equal(readSpec(root, t.id).metadata.version, 2, 'the refusal stored nothing');
+  } finally { cleanup(); }
+});
+
 test('prompts: the spec method says never how to build and names the cap; every build prompt carries the build method', () => {
   assert.match(SPEC_METHOD, /never how to build it: no file-by-file plan, no step list, no code to paste/);
-  assert.match(SPEC_METHOD, /under 1,500 words: the board refuses a longer one/);
+  assert.match(SPEC_METHOD, /under 1,500 words \(a later version: 1,600 words in total\): the board refuses a longer one/);
   assert.match(BUILD_METHOD_RULE, /for a feature, first read the code around the change/);
   assert.match(BUILD_METHOD_RULE, /For a bug, reproduce it first/);
   assert.match(BUILD_METHOD_RULE, /quick throwaway prototype \(never committed\)/);
