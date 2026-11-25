@@ -93,7 +93,11 @@ test('machine tokens: any name on that machine, never another machine; one live 
     const list = spawnSync(path.join(ROOT, 'bin/dasks'), ['machine', 'list'], { env: b.env, encoding: 'utf8' });
     assert.equal(list.status, 0, list.stderr);
     assert.match(list.stdout, /^mini\t[0-9a-f]{8}\t/m);
-    assert.ok(!list.stdout.includes(tok.split('_')[2]), 'list never prints a secret');
+    // The whole secret after `dsk_<id>_`: base64url may itself hold '_', so split('_') could leave a short fragment that
+    // shows up in the list by chance.
+    const secret = tok.slice(tok.indexOf('_', 4) + 1);
+    assert.ok(secret.length >= 40, `the whole secret (${secret.length} chars)`);
+    assert.ok(!list.stdout.includes(secret), 'list never prints a secret');
     assert.equal((await call(b.net, 'POST', '/api/tasks/beta.t-one/messages', { actor: 'runner@mini', token: tok, body: { text: 'hi' } })).status, 201);
     const other = await call(b.net, 'POST', '/api/tasks/beta.t-one/messages', { actor: 'runner@other2', token: tok, body: { text: 'hi' } });
     assert.equal(other.status, 403);

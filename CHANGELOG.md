@@ -14,7 +14,8 @@
   the board. A write moves the version, so it shows at once, also
   in a gzip reply whose compression was still running when the write finished (it is rebuilt, never sent older); `now` and `stuck` may be up to 3 seconds old.
 - Tests: tearing down a test server that was already killed by a signal returns at once instead of hanging until the
-  test timeout.
+  test timeout. The fleet test checks that `dasks machine list` never prints the whole token secret (it took the
+  part after the second `_`, which can be a short fragment because the secret may hold `_`, and failed by chance).
 
 ## 1.1.1 — 2026-11-16
 
