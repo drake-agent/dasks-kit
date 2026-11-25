@@ -184,11 +184,14 @@ export function budgetProblems(text: string): string[] {
 }
 
 // ---------- read cursor (run/start-cursors/<name>.json; not git data) ----------
-/** One file for both names of a session, so a read under either name counts for the other. */
+/** One file for both names of a session, so a read under either name counts for the other. Each capital is written as
+ *  `+` and its lower case, so names that differ only in case keep their own cursor on a case-insensitive disk; an
+ *  all-lower-case name keeps the file it always had. */
 export function cursorFile(root: string, actor: string): string {
   const key = [...myNames(actor)].sort()[0];
-  if (!ACTOR_RE.test(key)) throw new Error('bad actor');
-  return path.join(root, 'run', 'start-cursors', `${key}.json`);
+  if (!key || !ACTOR_RE.test(key)) throw new Error('bad actor');
+  const file = key.replace(/[A-Z]/g, (c) => `+${c.toLowerCase()}`);
+  return path.join(root, 'run', 'start-cursors', `${file}.json`);
 }
 export function readCursor(root: string, actor: string): Record<string, number> {
   try {

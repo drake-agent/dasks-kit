@@ -170,3 +170,20 @@ test('ETag: W/"<boot>-<version>", 304 on If-None-Match, a write gives a new tag'
   assert.match(String(after.headers.etag), /^W\/"[0-9a-f]{8}-\d+"$/);
   assert.equal(String(after.headers.etag).split('-')[0], tag.split('-')[0], 'same boot');
 });
+
+test('/api/board: one reply per data version for a short window, gzip and plain alike; a write builds a new one', async () => {
+  // Every open page refetches the board on each change: a burst of reads is served one built reply (same `now`).
+  const reads = await Promise.all([{ 'Accept-Encoding': 'gzip' }, {}, { 'Accept-Encoding': 'GZIP;q=1' }, { 'Accept-Encoding': 'gzip' }].map((h) => raw('/api/board', h)));
+  for (const r of reads) assert.equal(r.status, 200);
+  assert.deepEqual(reads.map((r) => r.headers['content-encoding'] ?? ''), ['gzip', '', 'gzip', 'gzip']);
+  const bodies = reads.map((r) => JSON.stringify(json(r)));
+  assert.equal(new Set(bodies).size, 1, 'one reply, the same bytes once unzipped');
+  const head = await raw('/api/board', { 'Accept-Encoding': 'gzip' }, 'HEAD');
+  assert.equal(head.status, 200); assert.equal(head.body.length, 0);
+  const before = json(reads[0]).version;
+  const w = await raw('/api/tasks/shared.t-beta', { 'Content-Type': 'application/json', 'X-Dasks-Actor': 'claude-code@test' }, 'POST', JSON.stringify({ note: 'a note moves the board version' }));
+  assert.equal(w.status, 200, w.body.toString());
+  let next = before;
+  for (let i = 0; i < 50 && next === before; i++) { next = json(await raw('/api/board', { 'Accept-Encoding': 'gzip' })).version; if (next === before) await new Promise((r) => setTimeout(r, 50)); }
+  assert.ok(next > before, 'a write is seen at once, not after the window');
+});

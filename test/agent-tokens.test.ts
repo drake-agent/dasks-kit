@@ -7,6 +7,7 @@ import path from 'node:path';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { SYSTEM_CFG, task, tempRepo } from './helpers.ts';
 import { freePort, stopServer } from './spec-support.ts';
+import { postMessage } from '../src/lib/messages.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const SERVER = path.join(ROOT, 'src/server.ts');
@@ -66,6 +67,26 @@ const warnFile = (e: Env) => path.join(e.root, 'run', 'auth-warnings.jsonl');
 const warnings = (e: Env): any[] => fs.existsSync(warnFile(e)) ? fs.readFileSync(warnFile(e), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
 /** A token whose id is real but whose secret is wrong (same length, last char changed). */
 const wrong = (tok: string) => tok.slice(0, -1) + (tok.endsWith('A') ? 'B' : 'A');
+
+test('enforce: /api/start moves a read cursor only for a token that proves the name; others get the text as a peek', async () => {
+  const e = setup();
+  const tokA = issue(e, A, '--note', 'test A');
+  const tokB = issue(e, B, '--note', 'test B');
+  postMessage(e.root, CARD, { text: 'please look', to: A, kind: 'question' }, B);
+  const s = await start(e, 'enforce');
+  const unread = async () => (await call(s, 'GET', '/api/start?peek=1', hdr(A, tokA))).body.includes(`${CARD} #1`);
+  try {
+    // No token, another name's token, and HEAD with the right token: the text is served, the message stays unread.
+    for (const [method, h] of [['GET', hdr(A, null)], ['GET', hdr(A, tokB)], ['HEAD', hdr(A, tokA)]] as const) {
+      const r = await call(s, method, '/api/start', h);
+      assert.equal(r.status, 200, `${method} ${JSON.stringify(r.body)}`);
+      assert.equal(await unread(), true, `${method} with ${JSON.stringify(Object.keys(h))} moved nothing`);
+    }
+    const shown = await call(s, 'GET', '/api/start', hdr(A, tokA));
+    assert.ok(shown.body.includes(`${CARD} #1`), shown.body);
+    assert.equal(await unread(), false, 'the proved caller read it');
+  } finally { await stopServer(s.proc); e.cleanup(); }
+});
 
 test('enforce: 401 no token, 401 wrong token, 403 mismatch, 401 revoked on the next request; reads open', async () => {
   const e = setup();

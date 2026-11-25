@@ -14,7 +14,7 @@ carry `Authorization: Bearer <token>` (see [auth.md](auth.md)). The MCP server a
 | `GET /api/tasks/<id>` | one card with its activity, outcomes, handoff and lessons (`?log=0` leaves out the activity) |
 | `GET /api/tasks/<id>/spec` | the current spec (`?version=N` an older one) |
 | `GET /api/ready` | cards ready to build: open, unclaimed, deps done, spec ready (`?all=1`, `?goal=a,b`); your pushes first, then bug fixes (kind `bug`); a card whose goal has a version target also carries `version_target` |
-| `GET /api/start` | one-call agent start: rules, unread messages, your cards, ready cards, cards in review, as text lines |
+| `GET /api/start` | one-call agent start: rules, unread messages, your cards, ready cards, cards in review, as text lines. It marks the messages read once the reply is sent in full; never for `?peek=1` or `HEAD`, and under auth `enforce` only when the caller's token proves its name |
 | `GET /api/stuck` | stuck cards and why |
 | `GET /api/status`, `/api/status/<app>` | where each project stands, or one project; `?format=text` for plain text ([below](#project-status)) |
 | `GET /api/versions` | each goal with a `version_target`: `milestone`, `total`, `done`, `open`, `ready`, `gate_card` ([versions.md](versions.md)) |
