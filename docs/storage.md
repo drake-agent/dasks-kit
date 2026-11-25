@@ -4,20 +4,6 @@ The board keeps its cards, specs, goals, activity and the rest as files under `d
 (`~/.dasks/data` by default). `data/decisions/` (the signed decision ledger) is not part of this: it stays a plain file
 on disk.
 
-## The one door: src/lib/board-files.ts
-
-Every read, list and stat of a board file in `src/` and `bin/` goes through `src/lib/board-files.ts`. Its calls mirror
-node:fs (`readFileSync`, `readdirSync`, `existsSync`, `statSync`): same arguments, same return values, same errors
-(`ENOENT`, `ENOTDIR`), so callers catch what they caught before. Writes go through `commitFiles` inside
-`withRepoLock` (`src/lib/write.ts`), as before.
-
-`test/board-files-seam.test.ts` keeps it that way. It reads every `src/` and `bin/` file that names a data path
-(`'data'`, `"data/…"`, `` `data/…` ``; `data/decisions/` does not count). Each line there that calls a node:fs file
-function must either use board-files or end with `// not-board: <why>`: it touches something else, such as `run/`,
-`config.json`, a log, `.git`, the ledger, or the git store's own write and recovery steps in `write.ts`.
-
-With the default store (git) board-files is plain node:fs: the board behaves exactly as it did before the door existed.
-
 ## The SQLite store (optional)
 
 Every write in git mode takes a lock folder, writes a journal, runs `git add` and `git commit`. On a large board that
@@ -36,7 +22,23 @@ npm dependency.
 - `store.sqlite_path`: the SQLite file, `~` expanded; `""` (the default) = `<Dasks home>/store/board.db`. Its folder
   also holds the store's export repo (`export.git/`), so give each store its own folder.
 
-In sqlite mode the server:
+### Switching on
+
+1. Stop the board.
+2. `node bin/board-store.ts import --root ~/.dasks/data`, then `compare` (`differing files: 0`).
+3. Set `store.mode` to `sqlite` in `config.json` and start the board.
+
+### Rollback to git
+
+1. Stop the board, then `node bin/board-store.ts export --root ~/.dasks/data` and `compare --export` (0).
+2. Set `store.mode` to `git` (or remove `store`).
+3. In the data repo: `git fetch <folder of the db>/export.git <branch>` and `git merge --no-edit FETCH_HEAD`. The export
+   commits touch only `data/`, so the merge is clean.
+4. `node bin/board-store.ts compare --root ~/.dasks/data`: 0 differing files. Start the board.
+
+### What changes in sqlite mode
+
+The server:
 
 - opens the store at start without creating it, and exits 2 (printing why and the import command) when the file is
   missing, is not a board store, holds no files, has no recorded import, was imported from another data repo, the data
@@ -98,20 +100,6 @@ repo's HEAD.
 What lags until the next export: the digest and the witness history (the export repo's), and the backup. Commits made
 to the data repo after the import (for example `config.json` changes) are not on the export branch.
 
-### Switching on
-
-1. Stop the board.
-2. `node bin/board-store.ts import --root ~/.dasks/data`, then `compare` (`differing files: 0`).
-3. Set `store.mode` to `sqlite` in `config.json` and start the board.
-
-### Rollback to git
-
-1. Stop the board, then `node bin/board-store.ts export --root ~/.dasks/data` and `compare --export` (0).
-2. Set `store.mode` to `git` (or remove `store`).
-3. In the data repo: `git fetch <folder of the db>/export.git <branch>` and `git merge --no-edit FETCH_HEAD`. The export
-   commits touch only `data/`, so the merge is clean.
-4. `node bin/board-store.ts compare --root ~/.dasks/data`: 0 differing files. Start the board.
-
 ### Limits
 
 - One server process writes the store. `dasks-digest` writes through it from its own process (SQLite serializes the
@@ -121,3 +109,17 @@ to the data repo after the import (for example `config.json` changes) are not on
   history. A ledger restored together with an older copy of the db is caught only once the newer witness was exported.
 - Losing the db loses the writes since the last export. The export repo (and the backup branch) hold everything up to
   it: merge it into the data repo as in the rollback and import into a new db folder.
+
+## For contributors: one door for board reads
+
+Every read, list and stat of a board file in `src/` and `bin/` goes through `src/lib/board-files.ts`. Its calls mirror
+node:fs (`readFileSync`, `readdirSync`, `existsSync`, `statSync`): same arguments, same return values, same errors
+(`ENOENT`, `ENOTDIR`), so callers catch what they caught before. Writes go through `commitFiles` inside
+`withRepoLock` (`src/lib/write.ts`), as before.
+
+`test/board-files-seam.test.ts` keeps it that way. It reads every `src/` and `bin/` file that names a data path
+(`'data'`, `"data/…"`, `` `data/…` ``; `data/decisions/` does not count). Each line there that calls a node:fs file
+function must either use board-files or end with `// not-board: <why>`: it touches something else, such as `run/`,
+`config.json`, a log, `.git`, the ledger, or the git store's own write and recovery steps in `write.ts`.
+
+With the default store (git) board-files is plain node:fs.
