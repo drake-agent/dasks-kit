@@ -7,6 +7,8 @@
 //   node bin/board-store.ts export  --root R [--db F]             replay pending writes as commits, oldest first, onto the
 //                                                                 export branch of the store's own repo (never into R)
 //   node bin/board-store.ts status  --root R [--db F]             mode, files, pending writes, export repo
+//   node bin/board-store.ts restore --root R [--db F] --from S    put a db copy (a migration's snapshot) back as the store
+//                                                                 and the export branch back where that copy left it
 // The db is --db, else R's config store.sqlite_path. Every command but import refuses a store that cannot stand for R.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -128,6 +130,15 @@ function settleTip(x: Run, dbId: string, log: (s: string) => void): void {
 /** Replay pending changes as commits on the export branch (subject = the change's message, its time as author and
  *  committer date, a `Board-Change: <db-id>:<seq>` trailer), oldest first, until none is pending. First the board check
  *  on the store itself (any error exports nothing). One export at a time (the store's export lock). */
+/** A ref lock a git killed mid-update left in the export repo would fail every export (and backup) from then on. Only
+ *  this store writes that repo, and the caller holds the export lock, so a lock older than a few seconds is no live
+ *  git's: removed. */
+function clearStaleRefLocks(x: Run, log: (s: string) => void): void {
+  for (const f of [path.join(x.repo, `${x.ref}.lock`), path.join(x.repo, 'packed-refs.lock')]) {
+    let age = -1; try { age = Date.now() - fs.statSync(f).mtimeMs; } catch { continue; } // not-board: export repo ref lock
+    if (age > 10_000) { fs.rmSync(f, { force: true }); log(`removed a stale ${f} (${Math.round(age / 1000)} s old)`); } // not-board: export repo ref lock
+  }
+}
 export function exportCmd(root: string, log: (s: string) => void = console.log): number {
   const alive = (pid: number) => { try { process.kill(pid, 0); return pid > 0; } catch (k: any) { return k?.code === 'EPERM'; } };
   const held = store.takeExportLock(process.pid, alive);
@@ -140,6 +151,7 @@ export function exportCmd(root: string, log: (s: string) => void = console.log):
     const errors = check(loadBoard(root)).errors.map((e) => `${e.file}: ${e.message}`);
     if (errors.length) throw new Error(`the store fails the board check (${errors.length} error(s)); nothing exported, every change stays pending:\n${errors.slice(0, 10).join('\n')}`);
     const dbId = store.meta('db_id')!;
+    clearStaleRefLocks(x, log);
     x.tip = git(repo, ['rev-parse', '--verify', x.ref]).trim();
     settleTip(x, dbId, log);
     git(repo, ['read-tree', x.tip], { GIT_INDEX_FILE: x.index });
@@ -156,15 +168,43 @@ export function exportCmd(root: string, log: (s: string) => void = console.log):
   } finally { boardFiles.setBoardBackend(was); fs.rmSync(x.index, { force: true }); store.releaseExportLock(process.pid); } // not-board: the export's private index
 }
 
+/** Put a db copy back as the store (the board stopped): the copy must be this data repo's store with this export repo,
+ *  and the commit it last exported must be on the export branch. The branch goes back to that commit (the old tip is
+ *  kept as refs/board-store/before-restore-<time>), so the export resumes from the copy; what was exported after the
+ *  copy was made leaves the branch, as it left the db. */
+export function restoreCmd(root: string, db: string, from: string): string {
+  const tmp = `${db}.restore-${process.pid}`;
+  fs.copyFileSync(from, tmp); // not-board: the db copy
+  let repo = ''; let ref = ''; let want = '';
+  try {
+    store.openSqliteBoard(root, tmp);
+    repo = store.exportRepo()!; ref = store.exportRef(); want = store.meta('export_head')!;
+  } catch (e) { fs.rmSync(tmp, { force: true }); throw e; } // not-board: the db copy
+  finally { store.closeSqliteBoard(); }
+  const tip = git(repo, ['rev-parse', '--verify', ref]).trim();
+  try { git(repo, ['merge-base', '--is-ancestor', want, tip]); }
+  catch { fs.rmSync(tmp, { force: true }); throw new Error(`the copy last exported ${want}, which is not on ${ref} (${tip}); nothing restored`); } // not-board: the db copy
+  const kept = `refs/board-store/before-restore-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  git(repo, ['update-ref', kept, tip]);
+  for (const f of [`${db}-wal`, `${db}-shm`]) fs.rmSync(f, { force: true }); // not-board: the replaced db's journal
+  fs.renameSync(tmp, db); // not-board: the db
+  if (tip !== want) git(repo, ['update-ref', '-m', 'board-store restore', ref, want, tip]);
+  return `restored ${from} as ${db}; ${ref} back at ${want.slice(0, 12)} (was ${tip.slice(0, 12)}, kept as ${kept})`;
+}
+
 function main(argv: string[]): number {
-  const { values, positionals } = parseArgs({ args: argv, options: { root: { type: 'string' }, db: { type: 'string' }, export: { type: 'boolean' } }, allowPositionals: true });
+  const { values, positionals } = parseArgs({ args: argv, options: { root: { type: 'string' }, db: { type: 'string' }, export: { type: 'boolean' }, from: { type: 'string' } }, allowPositionals: true });
   const cmd = positionals[0];
-  if (!['import', 'compare', 'export', 'status'].includes(cmd ?? '') || !values.root) {
-    console.error('usage: board-store.ts import|compare|export|status --root DIR [--db FILE] [--export]'); return 2;
+  if (!['import', 'compare', 'export', 'status', 'restore'].includes(cmd ?? '') || !values.root || (cmd === 'restore' && !values.from)) {
+    console.error('usage: board-store.ts import|compare|export|status --root DIR [--db FILE] [--export] | restore --root DIR [--db FILE] --from COPY'); return 2;
   }
   const root = path.resolve(values.root);
   const cfg = loadConfig(root);
   const db = values.db ? path.resolve(values.db) : storeDbPath(cfg);
+  if (cmd === 'restore') {
+    try { console.log(restoreCmd(root, db, path.resolve(values.from!))); return 0; }
+    catch (e: any) { console.error(`board-store restore: ${String(e?.stderr || e?.message || e).trim()}`); return 1; }
+  }
   try { store.openSqliteBoard(root, db, { create: cmd === 'import' }); }
   catch (e: any) { console.error(`board-store ${cmd}: ${e?.message ?? e}; nothing written`); return 2; }
   try {

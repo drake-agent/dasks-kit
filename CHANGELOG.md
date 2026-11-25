@@ -10,7 +10,7 @@
 - SQLite store export: `node bin/board-store.ts export` replays the store's writes as git commits (one per write, same
   message) into the store's own bare export repo, and `compare --export` checks it. In sqlite mode the backup exports
   first and pushes that branch, the digest and the decisions witness read its history, a schema migration keeps a copy
-  of the db, and `dasks check`, `dasks-digest` and `bin/verify-decisions.ts` read the store. See docs/storage.md.
+  of the db, and `dasks check`, `dasks-digest` and `bin/verify-decisions.ts` read the store. `restore --from <copy>` puts such a copy back and resumes the export. See docs/storage.md.
 
 ## 1.1.1 — 2026-11-16
 

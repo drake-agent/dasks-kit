@@ -370,14 +370,14 @@ function crashPoint(point: 'before-commit' | 'after-commit'): void {
 /** `expect`: repo-relative path -> the bytes the caller read and based its change on. If the file differs now (e.g. a
  *  hand commit landed meanwhile), nothing is written: 409. */
 /** Atomically write files and commit exactly those paths. Rolls back on any failure before the commit lands. */
-export function commitFiles(root: string, files: { rel: string; content: string }[], message: string, expect: Record<string, Buffer | string> = {}): string {
+export function commitFiles(root: string, files: { rel: string; content: string }[], message: string, expect: Record<string, Buffer | string | null> = {}): string {
   if (boardFiles.storeHead(root) !== null) return commitToStore(root, files, message, expect);
   const backups = files.map((f) => {
     const abs = safeAbs(root, f.rel);
     return { ...f, abs, old: fs.existsSync(abs) ? fs.readFileSync(abs) : null }; // not-board: git store write
   });
   const rels = backups.map((f) => f.rel);
-  for (const f of backups) if (Object.hasOwn(expect, f.rel) && !(f.old && f.old.equals(Buffer.from(expect[f.rel]))))
+  for (const f of backups) if (Object.hasOwn(expect, f.rel) && (expect[f.rel] === null ? f.old !== null : !(f.old && f.old.equals(Buffer.from(expect[f.rel]!)))))
     throw new HttpError(409, `${f.rel} changed on disk while this write was prepared; re-read it and retry`);
   // Refuse rather than clobber someone else's staged-but-uncommitted edits to the same paths.
   try { git(root, ['diff', '--cached', '--quiet', '--', ...rels]); }
@@ -445,7 +445,7 @@ export function commitFiles(root: string, files: { rel: string; content: string 
 
 /** commitFiles in sqlite mode: the same path rule (under data/, not the ledger), one store transaction and the same
  *  reload bookkeeping; no git, journal or lock files. Returns `sqlite:<seq>`. */
-function commitToStore(root: string, files: { rel: string; content: string }[], message: string, expect: Record<string, Buffer | string>): string {
+function commitToStore(root: string, files: { rel: string; content: string }[], message: string, expect: Record<string, Buffer | string | null>): string {
   for (const f of files) if (f.rel.split('/').some((s) => s === '..' || s === '.' || s === '') || sqliteStore.relOf(path.join(root, f.rel)) !== f.rel || f.rel === 'data')
     throw new HttpError(400, 'path outside data/');
   let seq: number;

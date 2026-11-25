@@ -176,14 +176,14 @@ export function listUnder(rel: string): { rel: string; seq: number }[] {
 /** A write whose `expect` bytes no longer match (write.ts answers 409). */
 export class StoreConflict extends Error {}
 /** Write board files in one transaction and keep the change for the export. `expect`: rel -> bytes the caller based its
- *  change on; a mismatch throws StoreConflict and writes nothing. Returns the new change number. */
-export function commit(files: { rel: string; content: string | Buffer }[], message: string, expect: Record<string, Buffer | string> = {}): number {
+ *  change on (null: the file must not exist); a mismatch throws StoreConflict and writes nothing. Returns the new change number. */
+export function commit(files: { rel: string; content: string | Buffer }[], message: string, expect: Record<string, Buffer | string | null> = {}): number {
   const { db, q } = open!;
   db.exec('BEGIN IMMEDIATE');
   try {
     for (const f of files) if (Object.hasOwn(expect, f.rel)) {
-      const r = row(f.rel);
-      if (!r || !Buffer.from(r.content).equals(Buffer.from(expect[f.rel]))) throw new StoreConflict(`${f.rel} changed while this write was prepared; re-read it and retry`);
+      const r = row(f.rel); const want = expect[f.rel];
+      if (want === null ? !!r : !r || !Buffer.from(r.content).equals(Buffer.from(want))) throw new StoreConflict(`${f.rel} changed while this write was prepared; re-read it and retry`);
     }
     const now = Date.now();
     const seq = Number(q.change.run(new Date(now).toISOString(), message).lastInsertRowid);

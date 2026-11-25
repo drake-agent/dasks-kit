@@ -69,7 +69,8 @@ the db file; every other command refuses a store that cannot stand for R (as the
 |---|---|
 | `node bin/board-store.ts import --root R` | Clone R bare into `<folder of the db>/export.git` (its branch at R's HEAD, marked with the store's id), then fill the empty store with the bytes HEAD holds for R's tracked `data/` files (not `data/decisions/`; git's bytes, so working-tree line-ending filters change nothing) in one transaction with the import's record (R's real path, branch and HEAD). Runs under an import lock. Refuses a store that has files, another import of the same db, an `export.git` already in the folder (never removed), a link or submodule on a board path, and uncommitted or untracked files under `data/`. |
 | `node bin/board-store.ts compare --root R [--export]` | The store against R's `data/` files on disk, hashed through the repo's filters as git would store them, or with `--export` the export branch's tree (blob ids, nothing checked out): counts, files only in one side, files whose bytes differ. Exit 1 on any difference. |
-| `node bin/board-store.ts export --root R` | Replay pending changes, oldest first, as commits on the export branch (below). Stops at the first failure; that change and the rest stay pending. |
+| `node bin/board-store.ts export --root R` | Replay pending changes, oldest first, as commits on the export branch (below). Stops at the first failure; that change and the rest stay pending. A ref lock older than 10 s left in the export repo by a killed git is removed first (only this store writes that repo, under its export lock). |
+| `node bin/board-store.ts restore --root R --from COPY` | With the board stopped: put a db copy (such as the one a schema migration keeps) back as the store, and the export branch back at the commit that copy last exported, so the export resumes. The old branch tip is kept as `refs/board-store/before-restore-<time>`; what was exported after the copy was made leaves the branch, as it left the db (the backup push then refuses until a person decides: it is never forced). Refuses a copy of another store, or one whose last export is not on the branch. |
 | `node bin/board-store.ts status --root R` | Mode, db, files, head, pending changes and the export repo. |
 
 ### The export
@@ -114,7 +115,8 @@ to the data repo after the import (for example `config.json` changes) are not on
 ### Limits
 
 - One server process writes the store. `dasks-digest` writes through it from its own process (SQLite serializes the
-  transactions); nothing else should.
+  transactions, and a digest run whose `.last-run` or digest file moved since it read them gives up); nothing else
+  should.
 - The decisions witness in sqlite mode catches a deleted or cut ledger through the store's witness and the exported
   history. A ledger restored together with an older copy of the db is caught only once the newer witness was exported.
 - Losing the db loses the writes since the last export. The export repo (and the backup branch) hold everything up to

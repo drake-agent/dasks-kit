@@ -12,7 +12,9 @@ import { task, tempRepo } from './helpers.ts';
 import { useBoardStore } from '../src/lib/board-store-open.ts';
 import { setBoardBackend } from '../src/lib/board-files.ts';
 import { closeSqliteBoard } from '../src/lib/board-sqlite.ts';
-import { commitFiles } from '../src/lib/write.ts';
+import { commitFiles, serializeTask } from '../src/lib/write.ts';
+import { runDigest } from '../src/lib/digest.ts';
+import { snapshotDb } from '../src/lib/board-sqlite.ts';
 import { Backup } from '../src/lib/backup.ts';
 
 const SERVER = path.resolve(import.meta.dirname, '../src/server.ts');
@@ -178,7 +180,9 @@ test('with core.autocrlf the store holds the committed (LF) bytes, and compare s
     const db = path.join(tmpDir(), 'board.db');
     const cfg = config({ mode: 'sqlite', sqlite_path: db });
     assert.equal(cli(root, cfg, 'import').status, 0);
-    const r = cli(root, cfg, 'compare');
+    let r = cli(root, cfg, 'compare');
+    assert.equal(r.status, 0, r.stdout); assert.match(r.stdout, /differing files: 0/);
+    r = cli(root, cfg, 'compare', '--export');
     assert.equal(r.status, 0, r.stdout); assert.match(r.stdout, /differing files: 0/);
     const raw = new DatabaseSync(db, { readOnly: true });
     const row = raw.prepare("SELECT content FROM files WHERE rel = 'data/goals/beta.yaml'").get() as { content: Uint8Array };
@@ -264,4 +268,87 @@ test('backup in sqlite mode exports first and pushes the export branch, never th
     if (env === undefined) delete process.env.DASKS_CONFIG; else process.env.DASKS_CONFIG = env;
     cleanup();
   }
+});
+
+/** Open the store in this process (sqlite mode for `root`), run `fn`, close it again. */
+function inStore<T>(root: string, cfg: string, fn: () => T): T {
+  const env = process.env.DASKS_CONFIG;
+  process.env.DASKS_CONFIG = cfg;
+  try { assert.equal(useBoardStore(root), 'sqlite'); return fn(); }
+  finally { closeSqliteBoard(); setBoardBackend('git'); if (env === undefined) delete process.env.DASKS_CONFIG; else process.env.DASKS_CONFIG = env; }
+}
+
+test('a ref lock left in the export repo by a killed git is cleared by the next export', () => {
+  const { root, cleanup } = tempRepo([task()]);
+  try {
+    const db = path.join(tmpDir(), 'board.db');
+    const cfg = config({ mode: 'sqlite', sqlite_path: db });
+    assert.equal(cli(root, cfg, 'import').status, 0);
+    inStore(root, cfg, () => commitFiles(root, [{ rel: 'data/links.yaml', content: '[]\n' }], 'test: links emptied'));
+    const lock = path.join(path.dirname(db), 'export.git', 'refs/heads/main.lock');
+    fs.mkdirSync(path.dirname(lock), { recursive: true }); fs.writeFileSync(lock, '');
+    const old = new Date(Date.now() - 60_000); fs.utimesSync(lock, old, old);
+    const r = cli(root, cfg, 'export');
+    assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /removed a stale .*main\.lock/);
+    assert.ok(!fs.existsSync(lock));
+    assert.match(cli(root, cfg, 'status').stdout, /pending changes: 0/);
+  } finally { cleanup(); }
+});
+
+test('restore puts a db copy back and the export branch back where the copy left it; the export resumes', () => {
+  const { root, cleanup } = tempRepo([task()]);
+  try {
+    const db = path.join(tmpDir(), 'board.db');
+    const cfg = config({ mode: 'sqlite', sqlite_path: db });
+    const snap = path.join(tmpDir(), 'before.db');
+    assert.equal(cli(root, cfg, 'import').status, 0);
+    inStore(root, cfg, () => commitFiles(root, [{ rel: 'data/links.yaml', content: '[]\n' }], 'test: first write'));
+    assert.equal(cli(root, cfg, 'export').status, 0);
+    inStore(root, cfg, () => snapshotDb(snap)); // what a schema migration keeps
+    inStore(root, cfg, () => commitFiles(root, [{ rel: 'data/links.yaml', content: '[ ]\n' }], 'test: after the copy'));
+    assert.equal(cli(root, cfg, 'export').status, 0);
+    const repo = path.join(path.dirname(db), 'export.git');
+    const tip = git(repo, 'rev-parse', 'main');
+    fs.copyFileSync(snap, db + '.plain'); // copying the db by hand cannot resume
+    let r = cli(root, cfg, 'restore', '--from', snap);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(git(repo, 'rev-parse', 'main'), git(repo, 'rev-parse', `${tip}^`), 'the branch is back at the copy');
+    assert.equal(git(repo, 'for-each-ref', '--format=%(objectname)', 'refs/board-store/'), tip, 'the old tip is kept');
+    r = cli(root, cfg, 'export'); assert.equal(r.status, 0, r.stderr);
+    r = cli(root, cfg, 'compare', '--export'); assert.equal(r.status, 0, r.stdout);
+    inStore(root, cfg, () => commitFiles(root, [{ rel: 'data/links.yaml', content: '[]\n\n' }], 'test: after the restore'));
+    r = cli(root, cfg, 'export'); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /exported 1 change/);
+  } finally { cleanup(); }
+});
+
+test('two overlapping digest runs on the store: the one that loses gives up instead of moving .last-run back', () => {
+  const { root, cleanup } = tempRepo([task({ id: 'beta.t-one' })]);
+  try {
+    const db = path.join(tmpDir(), 'board.db');
+    const cfg = config({ mode: 'sqlite', sqlite_path: db });
+    assert.equal(cli(root, cfg, 'import').status, 0);
+    inStore(root, cfg, () => commitFiles(root, [{ rel: 'data/tasks/beta/t-one.md', content: serializeTask(task({ id: 'beta.t-one', status: 'doing' })) }], 'test: beta.t-one doing'));
+    assert.equal(cli(root, cfg, 'export').status, 0);
+    let inner: ReturnType<typeof runDigest> | null = null;
+    const outer = inStore(root, cfg, () => runDigest(root, new Date(), () => { inner = runDigest(root, new Date()); }));
+    assert.equal(inner!.skipped, false, 'the run that finished first wrote');
+    assert.equal(outer.skipped, true, 'the slower run gave up');
+    const r = cli(root, cfg, 'export'); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /exported 1 change/);
+    const repo = path.join(path.dirname(db), 'export.git');
+    assert.equal(git(repo, 'show', `main:data/digest/.last-run`), git(repo, 'rev-parse', 'main~1'), '.last-run is the newer run\'s');
+  } finally { cleanup(); }
+});
+
+test('verify-decisions in git mode reads only store.mode: another config error does not stop it', () => {
+  const { root, cleanup } = tempRepo([task()]);
+  try {
+    const FIX = path.resolve(import.meta.dirname, 'fixtures/decisions');
+    const run = (cfg: string) => spawnSync(process.execPath, [path.resolve(import.meta.dirname, '../bin/verify-decisions.ts'), '--root', root, '--key', path.join(FIX, 'fixture.key'), '--head', path.join(FIX, 'ledger.head'), path.join(FIX, 'ledger-ok.jsonl')], { encoding: 'utf8', env: { ...process.env, DASKS_CONFIG: cfg } });
+    const bad = path.join(tmpDir(), 'config.json'); fs.writeFileSync(bad, JSON.stringify({ backup: {} }));
+    const good = run(config()); const withBad = run(bad);
+    assert.equal(good.status, 0, good.stdout + good.stderr);
+    assert.deepEqual([withBad.status, withBad.stdout, withBad.stderr], [good.status, good.stdout, good.stderr]);
+    assert.doesNotMatch(withBad.stdout, /store\.mode/);
+    assert.match(withBad.stdout, /^OK /);
+  } finally { cleanup(); }
 });
