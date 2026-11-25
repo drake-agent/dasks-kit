@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
 import { task, tempRepo } from './helpers.ts';
 
 const SERVER = path.resolve(import.meta.dirname, '../src/server.ts');
@@ -132,5 +133,59 @@ test('git mode (the default) is unchanged: a write is a git commit and no store 
     assert.equal(Number(git(root, 'rev-list', '--count', 'HEAD')), Number(before) + 1);
     assert.match(fs.readFileSync(path.join(root, 'data/tasks/beta/t-smpl.md'), 'utf8'), /hello/);
     assert.ok(!fs.existsSync(path.dirname(db)), 'git mode never touches the sqlite path');
+  } finally { cleanup(); }
+});
+
+test('a second import of the same db while one runs refuses, and an export.git already there is never removed', () => {
+  const { root, cleanup } = tempRepo([task()]);
+  try {
+    const db = path.join(tmpDir(), 'board.db');
+    const cfg = config({ mode: 'sqlite', sqlite_path: db });
+    fs.writeFileSync(path.join(root, 'data/links.yaml'), '[]\n');
+    assert.equal(cli(root, cfg, 'import').status, 1, 'dirty: refused, but the empty db exists now');
+    git(root, 'checkout', '-q', '--', 'data/links.yaml');
+    // another import holds the lock (a live pid: this test process)
+    const raw = new DatabaseSync(db);
+    raw.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES ('import_pid', ?)").run(String(process.pid));
+    let r = cli(root, cfg, 'import');
+    assert.equal(r.status, 1); assert.match(r.stderr, new RegExp(`another import \\(pid ${process.pid}\\)`));
+    assert.ok(!fs.existsSync(path.join(path.dirname(db), 'export.git')), 'nothing made while the other import runs');
+    // the other import made its export repo and stopped: a new import leaves it alone
+    raw.prepare("DELETE FROM meta WHERE k = 'import_pid'").run();
+    const id = (raw.prepare("SELECT v FROM meta WHERE k = 'db_id'").get() as { v: string }).v;
+    raw.close();
+    const repo = path.join(path.dirname(db), 'export.git');
+    fs.mkdirSync(repo); fs.writeFileSync(path.join(repo, 'board-store-db'), id + '\n'); fs.writeFileSync(path.join(repo, 'kept'), 'x');
+    r = cli(root, cfg, 'import');
+    assert.equal(r.status, 1); assert.match(r.stderr, /already exists \(left by an import of this store that stopped\)/);
+    assert.ok(fs.existsSync(path.join(repo, 'kept')), 'the existing export.git is untouched');
+  } finally { cleanup(); }
+});
+
+test('with core.autocrlf the store holds the committed (LF) bytes, and compare sees no difference', () => {
+  const { root, cleanup } = tempRepo([task()]);
+  try {
+    git(root, 'config', 'core.autocrlf', 'true');
+    fs.rmSync(path.join(root, 'data'), { recursive: true });
+    git(root, 'checkout', '-q', '--', 'data');
+    assert.match(fs.readFileSync(path.join(root, 'data/goals/beta.yaml'), 'utf8'), /\r\n/, 'the working tree has CRLF');
+    const db = path.join(tmpDir(), 'board.db');
+    const cfg = config({ mode: 'sqlite', sqlite_path: db });
+    assert.equal(cli(root, cfg, 'import').status, 0);
+    const r = cli(root, cfg, 'compare');
+    assert.equal(r.status, 0, r.stdout); assert.match(r.stdout, /differing files: 0/);
+    const raw = new DatabaseSync(db, { readOnly: true });
+    const row = raw.prepare("SELECT content FROM files WHERE rel = 'data/goals/beta.yaml'").get() as { content: Uint8Array };
+    raw.close();
+    assert.equal(Buffer.from(row.content).toString('utf8'), git(root, 'show', 'HEAD:data/goals/beta.yaml') + '\n');
+  } finally { cleanup(); }
+});
+
+test('git mode does not need node:sqlite: dasks check runs on a Node without it', () => {
+  const { root, cleanup } = tempRepo([task()]);
+  try {
+    const r = spawnSync(process.execPath, ['--no-experimental-sqlite', path.resolve(import.meta.dirname, '../src/cli/check.ts'), 'check'], { encoding: 'utf8', env: { ...process.env, DASKS_ROOT: root, DASKS_CONFIG: config() } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stderr, /ERR_UNKNOWN_BUILTIN_MODULE/);
   } finally { cleanup(); }
 });

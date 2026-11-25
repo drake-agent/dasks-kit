@@ -7,7 +7,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { DatabaseSync, type StatementSync } from 'node:sqlite';
+import { createRequire } from 'node:module';
+import type { DatabaseSync, StatementSync } from 'node:sqlite';
+
+// node:sqlite is loaded only when a store is opened: git mode never needs it (a Node without it still runs the board).
+const sqliteModule = () => createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite');
 
 // files.seq: the change that last wrote the row (0 = imported). stat() reports it as the inode, so a cache keyed on
 // ino:mtime:size sees every rewrite, even two in the same millisecond.
@@ -23,7 +27,7 @@ const TABLES = ['files', 'changes', 'change_files', 'meta'];
 // meta: db_id (random, set at creation; the export's Board-Change trailer and the export repo's marker name it), root
 // (real path of the checkout the import read: the only one the store serves), branch and head (the checkout's branch and
 // HEAD at the import), export_repo, export_branch, export_head (the commit the store made last there, or the imported
-// HEAD before any).
+// HEAD before any), import_pid (the import lock).
 const IMPORT_META = ['root', 'branch', 'head', 'export_repo', 'export_branch', 'export_head'];
 
 interface Stmts { row: StatementSync; gt: StatementSync; ge: StatementSync; dirStat: StatementSync; under: StatementSync; put: StatementSync; keep: StatementSync; change: StatementSync; head: StatementSync }
@@ -39,7 +43,7 @@ export function openSqliteBoard(root: string, dbPath: string, { create = false }
   closeSqliteBoard();
   if (!create && !fs.existsSync(dbPath)) throw new Error(`no board store at ${dbPath} (only board-store import creates one)`); // not-board: the db file
   if (create) fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  const db = new DatabaseSync(dbPath);
+  const db = new (sqliteModule().DatabaseSync)(dbPath);
   try {
     if (create) { db.exec(SCHEMA); db.prepare("INSERT OR IGNORE INTO meta (k, v) VALUES ('db_id', ?)").run(randomUUID()); }
     else {
@@ -194,40 +198,44 @@ export function meta(k: string): string | null { return (open!.db.prepare('SELEC
 const setMeta = (k: string, v: string) => open!.db.prepare('INSERT OR REPLACE INTO meta (k, v) VALUES (?, ?)').run(k, v);
 export function fileCount(): number { return Number((open!.db.prepare('SELECT COUNT(*) AS n FROM files').get() as { n: number }).n); }
 
-/** Fill an empty store from the checkout's committed data/ files (`rels`, all clean: bin/board-store.ts checks), after
- *  making the store's export repo (`<db folder>/export.git`). The files and the import's meta are one transaction: an
- *  import either completed or left an empty store (and maybe its own clone, which the next import of this db redoes).
- *  A symlink anywhere on a board path would pull outside bytes into the store and, on export, into git: refused. */
-export function importFromDisk(rels: string[], at: { branch: string; head: string }): number {
+const alive = (pid: number) => { try { process.kill(pid, 0); return pid > 0; } catch (k: any) { return k?.code === 'EPERM'; } };
+/** Fill an empty store with the data repo's committed data/ files (`files`: HEAD's blob bytes, so the store starts
+ *  from exactly what git holds, whatever the working tree's line-ending filters do), after making the store's export
+ *  repo (`<db folder>/export.git`). Under the import lock (meta import_pid, claimed in the transaction that checks the
+ *  store is empty), so a second import of the same db refuses instead of racing. The files and the import's meta are
+ *  one transaction: an import either completed or left an empty store. */
+export function importFromDisk(files: { rel: string; content: Buffer }[], at: { branch: string; head: string }): number {
   const { db, realRoot } = open!;
-  if (fileCount() > 0) throw new Error('the store already has files; import refused');
-  const linked = rels.filter((rel) => rel.split('/').some((_, i, parts) => {
-    try { return fs.lstatSync(path.join(realRoot, ...parts.slice(0, i + 1))).isSymbolicLink(); } catch { return false; } // not-board: import reads the checkout
-  }));
-  if (linked.length) throw new Error(`board paths through a symlink: ${linked.slice(0, 5).join(', ')}; import refused, nothing made`);
-  const exportDir = makeExportRepo(path.join(path.dirname(path.resolve(open!.dbPath)), 'export.git'), at);
   db.exec('BEGIN IMMEDIATE');
   try {
-    const put = db.prepare('INSERT INTO files (rel, content, mtime_ms, seq) VALUES (?, ?, ?, 0)');
-    for (const rel of rels) {
-      const fd = fs.openSync(path.join(realRoot, rel), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); // not-board: import reads the checkout
-      try { put.run(rel, fs.readFileSync(fd), Math.floor(fs.fstatSync(fd).mtimeMs)); } finally { fs.closeSync(fd); }
-    }
-    setMeta('root', realRoot); setMeta('branch', at.branch); setMeta('head', at.head);
-    setMeta('export_repo', exportDir); setMeta('export_branch', at.branch); setMeta('export_head', at.head);
+    if (fileCount() > 0) throw new Error('the store already has files; import refused');
+    const held = Number(meta('import_pid') ?? 0);
+    if (held && held !== process.pid && alive(held)) throw new Error(`another import (pid ${held}) is filling this store; import refused`);
+    setMeta('import_pid', String(process.pid));
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
+  try {
+    const exportDir = makeExportRepo(path.join(path.dirname(path.resolve(open!.dbPath)), 'export.git'), at);
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const put = db.prepare('INSERT INTO files (rel, content, mtime_ms, seq) VALUES (?, ?, ?, 0)');
+      const now = Date.now();
+      for (const f of files) put.run(f.rel, f.content, now);
+      setMeta('root', realRoot); setMeta('branch', at.branch); setMeta('head', at.head);
+      setMeta('export_repo', exportDir); setMeta('export_branch', at.branch); setMeta('export_head', at.head);
+      db.exec('COMMIT');
+    } catch (e) { db.exec('ROLLBACK'); throw e; }
+  } finally { db.prepare("DELETE FROM meta WHERE k = 'import_pid' AND v = ?").run(String(process.pid)); }
   return fileCount();
 }
 /** Clone the checkout bare into `dir`, its export branch at the checkout's HEAD and HEAD naming it, marked with this
- *  db_id: built in a temp folder and renamed into place, so `dir` is a whole clone or absent. An existing `dir` is
- *  refused unless it is this store's own (an import that stopped before its transaction). Returns the real path. */
+ *  db_id: built in a temp folder and renamed into place, so `dir` is a whole clone or absent. An existing `dir` is never
+ *  removed (it may hold another store's exports, or this one's): the import refuses. Returns the real path. */
 function makeExportRepo(dir: string, at: { branch: string; head: string }): string {
   const dbId = meta('db_id')!;
   if (fs.existsSync(dir)) { // not-board: export repo
     const id = readMarker(dir);
-    if (id !== dbId) throw new Error(`${dir} already exists and is not this store's export repo; give each db its own folder; nothing imported`);
-    fs.rmSync(dir, { recursive: true, force: true }); // not-board: this store's own clone, left by an import that stopped
+    throw new Error(`${dir} already exists (${id === dbId ? "left by an import of this store that stopped" : id ? `store ${id}'s export repo` : 'no store marker'}); move it away or give the db its own folder; nothing imported`);
   }
   const tmp = `${dir}.${process.pid}.tmp`;
   fs.rmSync(tmp, { recursive: true, force: true }); // not-board: export repo
