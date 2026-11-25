@@ -227,9 +227,11 @@ export function swiftTargets(pkgFile: string, text: string): SwiftTarget[] {
   return out;
 }
 
+/** `[@attr …] [public|package|internal|fileprivate|private] import [kind] X` (Swift 6 access-level imports too) → the dir of
+ *  target X. */
 function swiftImports(file: string, text: string, tree: Tree): string[] {
   const out: string[] = [];
-  for (const m of stripComments(text).matchAll(/^[ \t]*(?:@\w+\s+)*import\s+(?:(?:struct|class|enum|protocol|func|var|let|typealias)\s+)?(\w+)/gm)) {
+  for (const m of stripComments(text).matchAll(/^[ \t]*(?:@\w+\s+)*(?:(?:public|package|internal|fileprivate|private)\s+)?import\s+(?:(?:struct|class|enum|protocol|func|var|let|typealias)\s+)?(\w+)/gm)) {
     const named = tree.swift.filter((t) => t.name === m[1]);
     // the importing file's own package wins; else the name must be unique in the repo
     const own = named.filter((t) => !t.pkg || file.startsWith(t.pkg + '/'));

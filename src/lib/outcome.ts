@@ -1,4 +1,3 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { HttpError, isoLocal, readTask, updateTask, withRepoLock, type UpdateOpts, atomicWrite } from './write.ts';
@@ -8,7 +7,9 @@ import { cardOwner, type Task, type Status } from './schema.ts';
 import { parseContext } from './collab.ts';
 import { askLive, planAsk, readAsks } from './asks.ts';
 import { parkNote, parkRoute } from './park.ts';
+import { buildStage, handsOffNote, handsOffOn, personOnly } from './hands-off.ts';
 import { validateAsk } from '../../public/user-ask.js';
+import * as boardFiles from './board-files.ts';
 
 function isLogPath(value: string): boolean { return !!value.trim() && value.length <= 2000 && !/[\r\n\0]/.test(value); }
 
@@ -24,7 +25,7 @@ export interface OutcomeInput { state: OutcomeKind; note: string; evidence: stri
 /** as_state / as_cause: what the board did with a needs-user outcome that carried no real decision (src/lib/park.ts). The
  *  record keeps the job's own state, so a replay of the same outcome still matches it. */
 /** status_kept: the card was done/cancelled when this outcome landed; it was recorded but moved nothing (no route, no ask). */
-export interface OutcomeRecord extends OutcomeInput { id: string; job: string; at: string; actor: string; version: number; route?: Route; reset_epoch?: number; response?: Task; as_state?: OutcomeKind; as_cause?: OutcomeCause; status_kept?: 'done' | 'cancelled' }
+export interface OutcomeRecord extends OutcomeInput { id: string; job: string; at: string; actor: string; version: number; route?: Route; reset_epoch?: number; response?: Task; as_state?: OutcomeKind; as_cause?: OutcomeCause; status_kept?: 'done' | 'cancelled'; fallback?: true }
 interface Route { kind: 'reviewer' | 'fix' | 'retry' | 'failed-terminal' | 'needs-user' | 'spec-rework'; job: string; next_owner: string; at: string }
 
 // `Decision:` and `Learned:` lines from a job's RESULT.md. Short single lines, capped, and never anything shaped like a
@@ -76,8 +77,8 @@ export function parseOutcome(body: Record<string, unknown>): OutcomeInput {
 const ledgerRel = (job: string) => `data/outcomes/${createHash('sha256').update(job).digest('hex')}.json`;
 export function allOutcomes(root: string): OutcomeRecord[] {
   const dir = path.join(root, 'data/outcomes');
-  if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir).filter((f) => f.endsWith('.json')).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'))).sort((a: OutcomeRecord, b: OutcomeRecord) => a.at.localeCompare(b.at) || a.version - b.version);
+  if (!boardFiles.existsSync(dir)) return [];
+  return boardFiles.readdirSync(dir).filter((f) => f.endsWith('.json')).map((f) => JSON.parse(boardFiles.readFileSync(path.join(dir, f), 'utf8'))).sort((a: OutcomeRecord, b: OutcomeRecord) => a.at.localeCompare(b.at) || a.version - b.version);
 }
 export function taskOutcomes(root: string, id: string) { return allOutcomes(root).filter((o) => o.id === id); }
 const HANDOFF_BLOCK = /(?:^|\n)## Handoff[ \t]*\n<!-- dasks-handoff -->\n([\s\S]*?)\n<!-- \/dasks-handoff -->/;
@@ -126,6 +127,15 @@ function payload(input: OutcomeInput, job: string): string {
 // One status change per job end: the run's outcome is the mover. A launcher close (`job_end: <run_id>` on a status write)
 // that lands first leaves this marker, and a later outcome for that run then keeps the status.
 export const jobEndRel = (id: string, runId: string, attempt: number) => `data/job-ends/${createHash('sha256').update(JSON.stringify([id, runId, attempt])).digest('hex')}.json`;
+/** The job-end marker of a run: undefined `to` when it cannot be read (it still counts as ended); null when there is none. */
+function jobEndMark(root: string, id: string, runId: string, attempt: number): { to?: string } | null {
+  const f = path.join(root, jobEndRel(id, runId, attempt));
+  if (!boardFiles.existsSync(f)) return null;
+  try { const j = JSON.parse(boardFiles.readFileSync(f, 'utf8')); return { to: typeof j?.to === 'string' ? j.to : undefined }; } catch { return {}; }
+}
+/** The record outcome-or-fail wrote for a job that ended without a result: only it carries `fallback: true`. An outcome an
+ *  agent posted itself, whatever its text, is never replaced. */
+const isFallback = (o: OutcomeRecord) => o.fallback === true;
 export function runOutcome(root: string, t: Task): OutcomeRecord | undefined {
   return t.run_id ? taskOutcomes(root, t.id).find((o) => o.run_id === t.run_id && o.attempt === Number(t.attempt)) : undefined;
 }
@@ -167,6 +177,9 @@ export function recordOutcome(root: string, id: string, body: Record<string, unk
     if (global && global.id !== id) throw new HttpError(409, 'job belongs to another card', { rule: 'outcome-job' });
     // outcome-or-fail only asks whether this never-started card already has an outcome, so later edits do not matter here.
     if (missingOnly && !previous && !cur.run_id) previous = outcomes.find((o) => o.job === implicit) ?? anyImplicit;
+    // A needs-spec question that arrives after the launcher's outcome-or-fail fallback recorded the run as failed replaces
+    // that fallback (same run record), so the question reaches the card's owner instead of a 409.
+    if (previous && !missingOnly && input.state === 'needs-spec' && isFallback(previous) && !terminal) previous = undefined;
     if (previous) {
       if (missingOnly || payload(previous, previous.job) === payload(input, job)) return previous.response ?? cur;
       throw new HttpError(409, 'a different outcome for this run is already recorded', { rule: 'outcome-conflict' });
@@ -181,10 +194,21 @@ export function recordOutcome(root: string, id: string, body: Record<string, unk
     // outcome's, or one the card already has open) or a note about something only the user can do. An infra-shaped note
     // is a failed run (cause infra, run again); anything else goes back to the card's owner (needs-spec).
     let state: OutcomeKind = input.state, cause = input.cause, rerouted: 'retry' | 'rework' | undefined;
+    // Hands-off mode (src/lib/hands-off.ts): a build-stage run puts the card on the person only for a taste pick or a
+    // person-only matter; anything else goes back to the card's spec stage, and a retry cap does too.
+    const handsOff = handsOffOn(root) && buildStage(cur) && actor !== 'user';
+    let handsOffSaid = '';
     if (input.state === 'needs-user' && !terminal) {
       const open = readAsks(root, id)?.open;
       if (input.ask && open && askLive(root, cur, open)) throw new HttpError(409, `${id} already waits on the user (${open.id}); one decision per card at a time`, { open });
-      const r = parkRoute([input.note, ...(input.decisions ?? [])].join(' '), !!input.ask || askLive(root, cur, open));
+      const said = [input.note, ...(input.decisions ?? [])].join(' ');
+      const ask = input.ask as { kind?: string } | undefined;
+      const mine = ask ? ask.kind === 'taste' || personOnly(JSON.stringify(ask)) : personOnly(said);
+      const live = askLive(root, cur, open);
+      // Hands-off: a person-only matter parks, an infra note runs again, anything else is kept as a note (needs-spec).
+      const r = !handsOff || live ? parkRoute(said, !!input.ask || live) : mine ? 'park' : parkRoute(said, false) === 'retry' ? 'retry' : 'kept';
+      // A review card stays in review for the captain; any other card goes back to its spec stage.
+      if (r === 'kept') { state = cur.status === 'review' ? 'needs-review' : 'needs-spec'; handsOffSaid = said; }
       if (r === 'retry') { state = 'failed'; cause = 'infra'; rerouted = r; }
       else if (r === 'rework') { state = 'needs-spec'; rerouted = r; }
     }
@@ -200,7 +224,13 @@ export function recordOutcome(root: string, id: string, body: Record<string, unk
     // are not applied as a move here either (done -> blocked-on-user is not a legal move); the failed run still counts,
     // so the next claim is refused at the cap (assertRetryAllowed).
     // A closed card keeps its status the same way (terminal), with no route, ask or cap at all.
-    const ended = !!terminal || !!cur.run_id && fs.existsSync(path.join(root, jobEndRel(id, runId, attempt)));
+    // Except a late needs-spec (a build that stopped to send its question back to the card's owner): when the run's job end
+    // closed it first (as failed), or the outcome is replayed later, the card that run left in todo (unclaimed, not yet in
+    // spec-rework) still goes to spec-rework for its owner, with the question kept.
+    // Only while the card is still where that job end put it (its marker's `to`): a card its owner moved since keeps its lane.
+    const endMark = cur.run_id ? jobEndMark(root, id, runId, attempt) : null;
+    const lateSpec = !terminal && state === 'needs-spec' && !!endMark && endMark.to === 'todo' && cur.status === 'todo' && !cur.claimed_by && cur.lane !== 'spec-rework';
+    const ended = !!terminal || !lateSpec && !!endMark;
     // Either limit caps the card, whichever this run reports: dispatch (assertRetryAllowed) checks both, so a card is
     // never sent back to todo while it can no longer be claimed (e.g. retry_cap lowered between runs).
     const capByQuota = causedCount >= cfg.quota_retry_cap;
@@ -209,26 +239,33 @@ export function recordOutcome(root: string, id: string, body: Record<string, unk
     const capByInfra = !ended && infra && infraCount >= cfg.infra_retry_cap;
     if (capByInfra) state = 'needs-spec';
     const capped = !ended && state === 'failed' && (capByFailures || capByQuota);
+    // The capped run still counts as failed, so the card is not claimed again until its attempts are reset.
+    if (capped && handsOff) handsOffSaid = `retry cap reached: ${input.note}`;
     const statuses: Record<OutcomeKind, Status> = { done: 'done', failed: 'todo', 'needs-review': 'review', 'needs-user': 'blocked-on-user', 'needs-spec': 'todo' };
-    const status = ended ? cur.status : capped ? 'blocked-on-user' : statuses[state];
+    const stays = !!handsOffSaid && cur.status === 'review';
+    const status = ended ? cur.status : capped ? (stays ? 'review' : handsOffSaid ? 'todo' : 'blocked-on-user') : statuses[state];
     const owner = cardOwner(cur);
     const nextOwner = capped || state === 'needs-spec' ? owner : caused ? 'retry' : { done: '', failed: 'fix', 'needs-review': 'reviewer', 'needs-user': owner }[state];
     const at = isoLocal();
     const kinds: Record<OutcomeKind, Route['kind'] | null> = { done: null, failed: 'fix', 'needs-review': 'reviewer', 'needs-user': 'needs-user', 'needs-spec': 'spec-rework' };
-    const kind = capped ? 'failed-terminal' : state === 'needs-spec' ? 'spec-rework' : caused ? 'retry' : kinds[state];
+    const kind = capped ? (stays ? 'reviewer' : handsOffSaid ? 'spec-rework' : 'failed-terminal') : state === 'needs-spec' ? 'spec-rework' : caused ? 'retry' : kinds[state];
     const route: Route | undefined = kind && !terminal ? { kind, job: `${job}:${kind}`, next_owner: nextOwner, at } : undefined;
     const reason = capped
       ? (capByFailures ? `retry cap reached after ${failures} failed runs; the card's owner to check. ${input.note}` : `retry cap reached after ${causedCount} quota or rate-limit failures; the card's owner to check. ${input.note}`).slice(0, 1500)
       : input.note;
+    // A review card that stays in review (hands-off) keeps its status and its context block: no move is written.
     const patch: Record<string, string> = ended ? { result: [input.note, ...input.evidence.slice(0, 1)].join('\n') }
+      : stays ? { next_owner: nextOwner, needs_user: '', result: [input.note, ...input.evidence.slice(0, 1)].join('\n') }
       : { status, next_owner: nextOwner, result: [input.note, ...input.evidence.slice(0, 1)].join('\n') };
-    if (capped) patch.lane = 'failed-terminal';
+    if (capped && !stays) patch.lane = handsOffSaid ? 'spec-rework' : 'failed-terminal';
+    if (capped && handsOffSaid) patch.needs_user = '';
     if (!ended && state === 'needs-spec') { patch.lane = 'spec-rework'; patch.needs_user = ''; }
     if (!ended && status === 'blocked-on-user') patch.needs_user = reason;
     // The outcome's own ask opens in this same write (one commit: a replay returns exactly this response).
     const asked = input.ask && !ended && status === 'blocked-on-user' ? planAsk(root, cur, input.ask, actor) : undefined;
     if (asked) patch.needs_user = asked.needs_user;
-    const note = rerouted && !ended ? `${input.note} · ${capByInfra ? `infra failed ${infraCount} times: back to the card's owner` : parkNote(rerouted, input.note).split(' (')[0]}`.slice(0, 1500)
+    const note = handsOffSaid && !ended ? `${input.note} · ${handsOffNote(cur, handsOffSaid).split(' (')[0]}`.slice(0, 1500)
+      : rerouted && !ended ? `${input.note} · ${capByInfra ? `infra failed ${infraCount} times: back to the card's owner` : parkNote(rerouted, input.note).split(' (')[0]}`.slice(0, 1500)
       : capByInfra ? `${input.note} · infra failed ${infraCount} times: back to the card's owner`.slice(0, 1500) : input.note;
     const pr = input.evidence.find((e) => e.startsWith('https://')); if (pr) { patch.pr = pr; patch.pr_summary = input.note; }
     if (ended && !pr && cur.pr && !/[\p{L}\p{N}]/u.test(cur.pr_summary || '')) patch.pr_summary = input.note;
@@ -238,10 +275,10 @@ export function recordOutcome(root: string, id: string, body: Record<string, unk
     // may have written none), so its handoff and ledger record are never refused for context.
     const have: Record<string, string | undefined> = ended ? (parseContext(cur.body) ?? {}) : {};
     const fill = (k: string) => (ended && have[k] && /[\p{L}\p{N}]/u.test(have[k]!) ? '' : reason);
-    const context = asked ? asked.context : ['review', 'blocked-on-user'].includes(status) ? { what: fill('what'), why: fill('why'), do: fill('do'), rec: fill('rec'), after: fill('after') } : undefined;
+    const context = asked ? asked.context : !stays && ['review', 'blocked-on-user'].includes(status) ? { what: fill('what'), why: fill('why'), do: fill('do'), rec: fill('rec'), after: fill('after') } : undefined;
     const as = state !== input.state || cause !== input.cause ? { as_state: state, ...(cause ? { as_cause: cause } : {}) } : {};
     const next = updateTask(root, id, patch, actor, { ...opts, context, body: input.handoff !== undefined ? withHandoff(cur.body, input.handoff) : undefined, action: 'outcome', outcome: state, appendNote: asked ? `${asked.note} · ${note}` : note,
-      extraFiles: (response) => [...(asked ? [asked.file] : []), { rel, content: JSON.stringify({ ...input, job, id, run_id: runId, attempt, reset_epoch: epoch, actor, at, version: Number(response.version), ...(route ? { route } : {}), ...as, ...(terminal ? { status_kept: terminal } : {}), response } satisfies OutcomeRecord) + '\n' }] });
+      extraFiles: (response) => [...(asked ? [asked.file] : []), { rel, content: JSON.stringify({ ...input, job, id, run_id: runId, attempt, reset_epoch: epoch, actor, at, version: Number(response.version), ...(route ? { route } : {}), ...as, ...(terminal ? { status_kept: terminal } : {}), ...(missingOnly ? { fallback: true as const } : {}), response } satisfies OutcomeRecord) + '\n' }] });
     if (input.state === 'needs-user') {
       try { decisionsToday(root, at.slice(0, 10)); } catch { /* GET rebuilds the projection from the committed ledger */ }
     }

@@ -155,6 +155,17 @@ test('dask begin --worktree keeps .dask/ out of the repo; submit needs gitleaks'
     const sub = spawnSync('python3', [path.join(ROOT, 'bin/dask'), 'submit', 'beta.t-cli', '--summary', 'b'], { cwd: wt, env: { ...h.env, DASK_TOOL: 'claude', PATH: '/usr/bin:/bin' }, encoding: 'utf8' });
     assert.equal(sub.status, 1);
     assert.match(sub.stderr, /gitleaks is not installed, so nothing was pushed/);
+    // A gitleaks that exits 0 after its own git log failed (an ERR line, 0 commits scanned) scanned nothing: still no push.
+    const bin = path.join(repo, '.fake-bin'); fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, 'gitleaks'), '#!/bin/bash\necho "ERR [git] fatal: bad revision" >&2\necho "INF 0 commits scanned." >&2\nexit 0\n', { mode: 0o755 });
+    const noscan = spawnSync('python3', [path.join(ROOT, 'bin/dask'), 'submit', 'beta.t-cli', '--summary', 'b'], { cwd: wt, env: { ...h.env, DASK_TOOL: 'claude', PATH: `${bin}:/usr/bin:/bin` }, encoding: 'utf8' });
+    assert.equal(noscan.status, 1, noscan.stdout + noscan.stderr);
+    assert.match(noscan.stderr, /gitleaks found something \(or failed\) in the commits to push; nothing pushed/);
+    // A clean run that counts 0 commits (a delete-only commit) passes the scan, and merges are read by their first-parent diff.
+    fs.writeFileSync(path.join(bin, 'gitleaks'), `#!/bin/bash\nprintf '%s\\n' "$*" > "${bin}/args"\necho "INF 0 commits scanned." >&2\nexit 0\n`, { mode: 0o755 });
+    const zero = spawnSync('python3', [path.join(ROOT, 'bin/dask'), 'submit', 'beta.t-cli', '--summary', 'b'], { cwd: wt, env: { ...h.env, DASK_TOOL: 'claude', PATH: `${bin}:/usr/bin:/bin` }, encoding: 'utf8' });
+    assert.doesNotMatch(zero.stderr, /gitleaks found something/, zero.stderr);
+    assert.match(fs.readFileSync(path.join(bin, 'args'), 'utf8'), /--log-opts \S+\.\.HEAD --diff-merges=first-parent /);
   } finally { await h.stop(); fs.rmSync(repo, { recursive: true, force: true }); }
 });
 

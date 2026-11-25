@@ -100,6 +100,24 @@ test('claims: lock, 409 for another actor, force takeover, release, cleared on d
   } finally { cleanup(); }
 });
 
+test('release checks the caller, not the who it sends: naming the holder or someone else needs force', () => {
+  const { root, cleanup } = tempRepo([task()]);
+  try {
+    updateTask(root, 'beta.t-smpl', {}, 'claude-code@laptop', { claim: { op: 'claim', who: 'claude-code@laptop' } });
+    // Another caller sends the holder's name as who: refused, nothing changes.
+    try { updateTask(root, 'beta.t-smpl', {}, 'codex@desktop', { claim: { op: 'release', who: 'claude-code@laptop' } }); assert.fail('no 409'); }
+    catch (e: any) { assert.equal(status(e), 409); assert.match(e.message, /not the caller codex@desktop/); }
+    assert.equal(readTask(root, 'beta.t-smpl').claimed_by, 'claude-code@laptop');
+    // The holder naming someone else is refused too; force still releases for someone else; the holder's own release works.
+    assert.throws(() => updateTask(root, 'beta.t-smpl', {}, 'claude-code@laptop', { claim: { op: 'release', who: 'codex@desktop' } }), /pass force=true/);
+    const own = updateTask(root, 'beta.t-smpl', {}, 'claude-code@laptop', { claim: { op: 'release', who: 'claude-code@laptop' } });
+    assert.ok(!own.claimed_by);
+    updateTask(root, 'beta.t-smpl', {}, 'claude-code@laptop', { claim: { op: 'claim', who: 'claude-code@laptop' } });
+    const forced = updateTask(root, 'beta.t-smpl', {}, 'codex@desktop', { claim: { op: 'release', who: 'claude-code@laptop', force: true } });
+    assert.ok(!forced.claimed_by);
+  } finally { cleanup(); }
+});
+
 test('started_at (run identity) is never reused within the same second', () => {
   const { root, cleanup } = tempRepo([task()]);
   try {

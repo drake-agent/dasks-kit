@@ -65,8 +65,8 @@ spec and notes on the board, nothing else: no branch, no commit, no push, no PR.
 
 A spec says what to build, why, and how anyone can tell it is done: the goal, the done check, the tests that prove it
 and the real constraints. It never says how to build it (no file-by-file plan, no step list, no code to paste): the
-builder reads the code and decides. `PUT /spec` refuses (422) a spec over 1,500 words (runs of non-whitespace), with a
-reason that says what to cut; the 262,144-byte cap (413) stays as well. The cap is checked on write only: a spec stored
+builder reads the code and decides. `PUT /spec` refuses (422) a first spec version over 1,500 words (runs of non-whitespace)
+and a later version over 1,600 words in total (room for a fix line on a full spec), with a reason that says what to cut; the 262,144-byte cap (413) stays as well. The cap is checked on write only: a spec stored
 over it before this rule stays readable, and still takes a write that does not make it longer or that changes only its
 `auto-ok` header lines (your answer to an ask). An auto-ok-only write is never refused for length.
 

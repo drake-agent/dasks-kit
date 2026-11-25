@@ -1,7 +1,7 @@
 // A card's real file list (docs/cards.md "touches"): the files its PR head changes, kept on the task as `touches_actual`
 // with that head's commit in `touches_sha`. The runner writes both after it opens or updates the card's PR. The board's
 // claim check then holds a doing card on this list instead of its planned `touches:` line. Pure: no I/O.
-import { normPath } from './touches.ts';
+import { literalTouch, normPath } from './touches.ts';
 
 /** The longest stored list, in characters of the joined `a, b` value. A longer PR is shortened to folder entries. */
 export const TOUCHES_CAP = 3000;
@@ -49,7 +49,7 @@ export const touchesList = (v: string | undefined): string[] => (v ?? '').split(
 /** The paths a doing card holds: its PR's real files when the runner stored them, else its planned `touches:` paths.
  *  [] holds nothing (a card without touches overlaps nothing). */
 export function lockTouches(t: { touches_actual?: string }, planned: string[]): string[] {
-  const actual = touchesList(t.touches_actual).filter((p) => normPath(p) !== '');
+  const actual = touchesList(t.touches_actual).map(literalTouch).filter((p) => normPath(p) !== '');
   return actual.length ? actual : planned;
 }
 

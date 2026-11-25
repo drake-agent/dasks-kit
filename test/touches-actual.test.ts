@@ -41,7 +41,9 @@ test('lockTouches: the stored PR list when there is one, else the plan; a root-o
   assert.deepEqual(lockTouches({ touches_actual: 'src/a.ts, docs/b.md' }, ['src']), ['src/a.ts', 'docs/b.md']);
   assert.deepEqual(lockTouches({ touches_actual: '' }, ['src']), ['src']);
   assert.deepEqual(lockTouches({}, []), []);
-  assert.deepEqual(lockTouches({ touches_actual: '[x].md' }, ['src']), ['src']);
+  assert.deepEqual(lockTouches({ touches_actual: './' }, ['src']), ['src']);
+  // A real root file with a bracket is that one file (escaped), never the whole repo.
+  assert.deepEqual(lockTouches({ touches_actual: '[x].md' }, ['src']), ['\\[x\\].md']);
 });
 
 test('prFilesRoute: GitHub PR links only', () => {
@@ -108,6 +110,21 @@ test('claim check: a doing card holds its PR files, not its plan', () => {
     const narrowed = { ...other, touches_actual: 'src/b/y.ts' };
     assert.doesNotThrow(() => assertTouchesFree(root, mine, [narrowed], projects as any), 'the PR changes other files');
     assert.throws(() => assertTouchesFree(root, mine, [{ ...other, body: 'touches: docs/\n', touches_actual: 'src/a/x.ts' }], projects as any), (e: any) => e.status === 409);
+  } finally { cleanup(); }
+});
+
+test('claim check: a PR file whose name holds glob characters locks as that one file, not its whole folder', () => {
+  // A real file app/[id]/page.tsx used to read as a pattern cut at `[`: it held all of app/ and blocked unrelated cards.
+  const projects = [{ id: 'beta', name: 'Beta', repo: '/r/beta' }];
+  const other = task({ id: 'beta.t-other', status: 'doing', claimed_by: 'runner@two', body: 'touches: app/\n', touches_actual: 'app/[id]/page.tsx, [slug].ts' } as any);
+  const { root, cleanup } = tempRepo([other]);
+  try {
+    assert.deepEqual(lockTouches(other, ['app']), ['app/\\[id\\]/page.tsx', '\\[slug\\].ts']);
+    const at = (planned: string) => task({ id: 'beta.t-mine', body: `touches: ${planned}\n` });
+    assert.doesNotThrow(() => assertTouchesFree(root, at('app/settings.ts'), [other], projects as any), 'another file in app/ is free');
+    assert.throws(() => assertTouchesFree(root, at('app/'), [other], projects as any), (e: any) => e.status === 409, 'the folder holding it overlaps');
+    assert.throws(() => assertTouchesFree(root, { ...at('docs/'), touches_actual: 'app/[id]/page.tsx' } as any, [other], projects as any), (e: any) => e.status === 409, 'the same real file overlaps');
+    assert.throws(() => assertTouchesFree(root, { ...at('docs/'), touches_actual: '[slug].ts' } as any, [other], projects as any), (e: any) => e.status === 409, 'a root file with a bracket is kept, not dropped');
   } finally { cleanup(); }
 });
 

@@ -15,7 +15,7 @@ How the user approves: the agent moves the card to blocked-on-user with needs_us
 --after …`); the user logs in on the board and taps approve. GET /api/merge-ok?card=&sha= then answers ok for that head
 only; a new push needs a new OK. The PR's card is its `human/<card>` or `dasks/<card>` branch, else a `<card>:` title
 prefix. Board URL: $DASKS_URL, else ~/.dasks/client.json."""
-import json, os, re, shlex, subprocess, sys, urllib.parse, urllib.request
+import json, os, re, shlex, subprocess, sys, urllib.error, urllib.parse, urllib.request
 
 def _client():
     home = os.environ.get("DASKS_HOME") or os.path.expanduser("~/.dasks")
@@ -101,6 +101,9 @@ def main():
     q = urllib.parse.urlencode({"card": card, "sha": sha})
     try:
         with urllib.request.urlopen(BOARD + "/api/merge-ok?" + q, timeout=15) as r: ok = json.loads(r.read() or b"{}").get("ok") is True
+    except urllib.error.HTTPError as e:
+        if e.code == 410: refuse("hands-off mode is on: the board reads no merge OK; land the card with `dask captain-merge %s`" % card)
+        refuse("the board could not confirm a merge OK (%s)" % e)
     except Exception as e: refuse("the board could not confirm a merge OK (%s)" % e)
     if not ok:
         refuse("no merge OK from the user for %s at head %s. Ask on the board: set the card to blocked-on-user with needs_user "

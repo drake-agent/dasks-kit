@@ -3,13 +3,13 @@
 // current view (`items`) and an append-only audit trail (`events`): every seed or report appends one event and is one
 // git commit under the repo lock. References only, never file bytes. Optional and warn-only: a report never changes the
 // task's status, claim or spec state.
-import fs from 'node:fs';
 import path from 'node:path';
 import { ACTOR_RE, TASK_ID_RE, isTaskId } from './schema.ts';
 import { HttpError, commitFiles, isoLocal, readTask, taskRelPath, withRepoLock } from './write.ts';
 import { looksLikeToken } from './outcome.ts';
 import { isEvidence } from './transitions.ts';
 import { readSpecUnlocked } from './specs.ts';
+import * as boardFiles from './board-files.ts';
 
 export const ITEM_STATES = ['open', 'done', 'failed'] as const;
 export type ItemState = typeof ITEM_STATES[number];
@@ -174,7 +174,7 @@ function validStore(o: any): o is ItemsFile {
 /** The stored file, null when never seeded; 500 `items store unreadable` when it does not parse or has the wrong shape. */
 function readStore(root: string, id: string): ItemsFile | null {
   let raw: string;
-  try { raw = fs.readFileSync(path.join(root, itemsRelPath(id)), 'utf8'); } catch (e: any) {
+  try { raw = boardFiles.readFileSync(path.join(root, itemsRelPath(id)), 'utf8'); } catch (e: any) {
     if (e.code === 'ENOENT') return null;
     throw new HttpError(500, `items store unreadable (${e.code ?? 'error'})`);
   }
@@ -200,7 +200,7 @@ function view(id: string, f: ItemsFile | null, history = false): ItemsView {
 
 function assertTask(root: string, id: string): void {
   if (!isTaskId(id)) throw new HttpError(400, 'bad task id');
-  if (!fs.existsSync(path.join(root, taskRelPath(id)))) throw new HttpError(404, `no task "${id}"`);
+  if (!boardFiles.existsSync(path.join(root, taskRelPath(id)))) throw new HttpError(404, `no task "${id}"`);
 }
 
 /** GET …/items: no lock (commitFiles writes atomically, so a read sees the old or the new file). */
@@ -213,7 +213,7 @@ export function itemsView(root: string, id: string, opts: { history?: boolean } 
 export function itemsProgress(root: string, id: string): string | undefined {
   try {
     const abs = path.join(root, itemsRelPath(id));
-    if (!fs.existsSync(abs)) return undefined;
+    if (!boardFiles.existsSync(abs)) return undefined;
     const f = readStore(root, id);
     if (!f || !f.items.length) return undefined;
     return `${f.items.filter((i) => i.state === 'done').length}/${f.items.length}`;

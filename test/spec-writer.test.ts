@@ -269,7 +269,7 @@ async function world(o: { env?: Record<string, string>; tools?: string[]; famili
   const projHead = g(proj, 'rev-parse', 'HEAD').trim();
   for (const t of o.tools ?? ['claude', 'codex']) fs.writeFileSync(path.join(fake, t), FAKE_AGENT, { mode: 0o755 });
   fs.writeFileSync(path.join(fake, 'gh'), FAKE_GH, { mode: 0o755 });
-  fs.writeFileSync(path.join(fake, 'gitleaks'), '#!/bin/bash\nexit 0\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(fake, 'gitleaks'), '#!/bin/bash\necho "INF 1 commits scanned." >&2\nexit 0\n', { mode: 0o755 });
 
   const card = 'beta.t-spec';
   const board = tempRepo(o.cards ?? [task({ id: card, title: 'Spec me', lane: o.lane ?? 'claude', priority: 'p1', body: 'touches: src/a\n\n## Context\nAdd src/a/built.txt that says hello.\n' } as any)]);

@@ -4,6 +4,7 @@
 // DASKS_PROG (set by the `dasks` wrapper) only changes the name shown in help and errors.
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { BoardError, client, envActor, machineName, IDEA_STATUSES, LESSON_STATUSES, STRUCTURES } from './board-client.mjs';
 
 const PROG = /^(gb|dasks)$/.test(process.env.DASKS_PROG || '') ? process.env.DASKS_PROG : 'dasks';
@@ -46,6 +47,8 @@ const USAGE = `%P — Dasks board CLI (alias: gb).
                                              version (BEHIND = older than the board's kit) and why a self-update held
   %P backup status | now                     the board data backup (backup.remote): last push, failures; now = push now
   %P summary                                 the latest daily summary (written at summary.at each day)
+  %P hands-off on | off | status             hands-off mode: build-stage stops never ask you, merges land without
+                                             a merge OK (run on the board's Mac; no restart needed)
   %P machine add <name> | list | revoke <name>   machine tokens for a fleet (run on the board's Mac; add prints
                                              the token once: give it to that Mac's install.sh --join)
   %P captain                                 who holds the captain lease, the harness chain
@@ -283,10 +286,16 @@ async function main() {
     }
     case 'summary':
       return show(await board.summary(), (r) => (r.summary ? r.summary.text : `no summary yet (the board writes one each day at ${r.at})`));
+    case 'hands-off': {
+      if (!['on', 'off', 'status'].includes(args[0])) die(`usage: ${PROG} hands-off on | off | status`);
+      const r = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', fileURLToPath(new URL('../src/cli/hands-off.ts', import.meta.url)), args[0]], { stdio: 'inherit' });
+      process.exitCode = r.status ?? 1;
+      return;
+    }
     case 'machine': {
       const [sub, name] = args;
       if (!['add', 'list', 'revoke'].includes(sub) || (sub !== 'list' && !name)) die(`usage: ${PROG} machine add <name> | list | revoke <name>`);
-      const tool = new URL('../bin/dasks-tokens.ts', import.meta.url).pathname;
+      const tool = fileURLToPath(new URL('../bin/dasks-tokens.ts', import.meta.url));
       const r = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', tool, 'machine', sub, ...(name ? [name] : [])], { stdio: 'inherit' });
       process.exitCode = r.status ?? 1;
       return;

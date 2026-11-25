@@ -1,11 +1,11 @@
 // Read the data/ tree into memory. Never throws on bad content: problems become loadErrors for `check`.
-import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
 import { ALL_STATUSES, type Board, type Goal, type Issue, isTaskId, KINDS, type Link, type NorthStar, type Task, TASK_ALL_FIELDS, TASK_OPTIONAL_FIELDS, SPEC_TASK_FIELDS } from './schema.ts';
+import * as boardFiles from './board-files.ts';
 
 export function readYaml(file: string): unknown {
-  return YAML.parse(fs.readFileSync(file, 'utf8'));
+  return YAML.parse(boardFiles.readFileSync(file, 'utf8'));
 }
 
 export interface ParsedMd { fm: Record<string, unknown>; body: string }
@@ -70,7 +70,7 @@ export const loadStats = { task_parses: 0 };
 
 /** Parse one task file (repo-relative path). Read and parse errors are thrown unchanged. */
 export function readTaskFile(root: string, rel: string): Task {
-  const buf = fs.readFileSync(path.join(root, rel));
+  const buf = boardFiles.readFileSync(path.join(root, rel));
   const t = taskFromParsed(parseFrontmatter(buf.toString('utf8')), rel, buf.length);
   loadStats.task_parses++;
   return t;
@@ -179,8 +179,8 @@ function i18nTitles(o: any): { title_ko?: string; title_en?: string } {
 }
 
 function safeList(d: string): string[] {
-  try { return fs.readdirSync(d); } catch { return []; }
+  try { return boardFiles.readdirSync(d); } catch { return []; }
 }
 function isDir(d: string): boolean {
-  try { return fs.statSync(d).isDirectory(); } catch { return false; }
+  try { return boardFiles.statSync(d).isDirectory(); } catch { return false; }
 }

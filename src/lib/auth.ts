@@ -14,7 +14,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type http from 'node:http';
 import { execFileSync } from 'node:child_process';
-import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, scryptSync } from 'node:crypto';
+import { sameBytes } from './same-bytes.ts';
 import { expandHome } from './config.ts';
 import { dasksHome } from './connection.mjs';
 import { HttpError } from './write.ts';
@@ -83,7 +84,7 @@ export function loadKey(dir: string, name: string): Buffer {
   return Buffer.from(hex, 'hex');
 }
 
-const eq = (a: Buffer, b: Buffer) => a.length === b.length && timingSafeEqual(a, b);
+const eq = sameBytes;
 const hmac = (key: Buffer, s: string) => createHmac('sha256', key).update(s).digest();
 
 // ---------- authenticators ----------

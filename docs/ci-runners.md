@@ -26,7 +26,9 @@ jobs:
 
 You need `gh`, logged in as someone with admin rights on the repo (registering a runner needs them). `--host` is an
 ssh host alias from `~/.ssh/config`; without it everything happens on this Mac. ssh runs with `BatchMode=yes`, so the
-host must take your key without a prompt. The other Mac needs nothing but bash and its user logged in.
+host must take your key without a prompt. Every ssh call sends keepalives and ends after `DASKS_CI_REMOTE_SEC` seconds
+(default 900), so a host that hangs fails that step instead of holding the command. The other Mac needs nothing but bash
+and its user logged in.
 
 **The user must be logged in at the Mac's screen.** Runners are LaunchAgents, and they live in that user's login
 session (`gui/<uid>`). An ssh session alone is not enough: launchd ends a job started there about a minute after ssh

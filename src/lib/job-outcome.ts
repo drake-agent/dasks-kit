@@ -1,10 +1,10 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { commitFiles, HttpError, isoLocal, withRepoLock } from './write.ts';
 import { isEvidence } from './transitions.ts';
 import { isTaskId } from './schema.ts';
 import { parseOutcome, type OutcomeKind } from './outcome.ts';
+import * as boardFiles from './board-files.ts';
 
 // Results of jobs that have no card of their own (a review-only job, for example).
 // POST /api/jobs/<job>/outcome stores one immutable record per (job, run_id) in data/job-outcomes/; it never moves a card.
@@ -39,8 +39,8 @@ export function recordJobOutcome(root: string, job: string, body: Record<string,
   return withRepoLock(root, () => {
     const rel = relOf(job, input.run_id);
     const abs = path.join(root, rel);
-    if (fs.existsSync(abs)) {
-      const previous = JSON.parse(fs.readFileSync(abs, 'utf8')) as JobOutcome;
+    if (boardFiles.existsSync(abs)) {
+      const previous = JSON.parse(boardFiles.readFileSync(abs, 'utf8')) as JobOutcome;
       if (payload(previous) === payload(input)) return previous;
       throw new HttpError(409, 'a different outcome for this run is already recorded', { rule: 'outcome-conflict' });
     }
@@ -52,11 +52,11 @@ export function recordJobOutcome(root: string, job: string, body: Record<string,
 
 export function jobOutcomes(root: string, job: string): JobOutcome[] {
   const dir = path.join(root, DIR);
-  if (!JOB_RE.test(job) || !fs.existsSync(dir)) return [];
+  if (!JOB_RE.test(job) || !boardFiles.existsSync(dir)) return [];
   return readJobOutcomes(dir)
     .filter((o) => o.job === job).sort((a, b) => a.at.localeCompare(b.at) || a.run_id.localeCompare(b.run_id));
 }
 
 function readJobOutcomes(dir: string): JobOutcome[] {
-  return fs.readdirSync(dir).filter((f) => f.endsWith('.json')).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as JobOutcome);
+  return boardFiles.readdirSync(dir).filter((f) => f.endsWith('.json')).map((f) => JSON.parse(boardFiles.readFileSync(path.join(dir, f), 'utf8')) as JobOutcome);
 }

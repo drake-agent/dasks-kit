@@ -479,7 +479,7 @@ export const SPEC_DENIED_TOOLS = 'Bash Edit Write MultiEdit NotebookEdit WebFetc
  *  other use (a path outside the view included) instead of asking. The run's cwd is the view. Variadic flags come
  *  before --model so none of them swallows the prompt. */
 export function specClaudeArgs(model: string, view: string, prompt: string): string[] {
-  const roots = [...new Set([view, (() => { try { return fs.realpathSync(view); } catch { return view; } })()])].map((d) => d.replace(/\/+$/, ''));
+  const roots = [...new Set([view, (() => { try { return fs.realpathSync(view); } catch { return view; } })()])].map((d) => d.replace(/\/+$/, '')); // not-board: a repo view
   const allow = roots.flatMap((d) => ['Read', 'Grep', 'Glob'].map((t) => `${t}(/${d}/**)`));
   return ['-p', '--tools', SPEC_TOOLS, '--disallowedTools', SPEC_DENIED_TOOLS, '--permission-mode', 'dontAsk', '--setting-sources', '',
     '--settings', JSON.stringify({ permissions: { allow, defaultMode: 'dontAsk' } }), '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',

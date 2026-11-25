@@ -1,5 +1,77 @@
 # Changelog
 
+## 1.2.0 — 2026-11-25
+
+- Optional SQLite board store: with `store.mode` `sqlite` in `config.json` the board keeps its `data/` files as rows of
+  one SQLite file (`node:sqlite`, no new dependency), so a write is one transaction instead of a lock, a journal and a
+  git commit. `node bin/board-store.ts import` fills the store once from the data repo; `compare` and `status` check
+  it. The server refuses to start (exit 2) on a store that is missing, empty or another board's. `store.mode` `git`
+  stays the default and behaves as before. See docs/storage.md.
+- SQLite store export: `node bin/board-store.ts export` replays the store's writes as git commits (one per write, same
+  message) into the store's own bare export repo, and `compare --export` checks it. In sqlite mode the backup exports
+  first and pushes that branch, the digest and the decisions witness read its history, a schema migration keeps a copy
+  of the db, and `dasks check`, `dasks-digest` and `bin/verify-decisions.ts` read the store. `restore --from <copy>` puts such a copy back and resumes the export. See docs/storage.md.
+- Live window: while the runner builds, reviews or fixes a card, it posts the agent's newest steps and the worktree's
+  diff since the run started to `POST /api/tasks/<card>/live` (agent token), and `GET /api/tasks/<card>/live` reads
+  them back. Both sides redact secrets; sensitive and config files show no content; steps, files and diff bytes are
+  capped, and the board keeps it in memory only, never in `data/`. `DASKS_RUNNER_LIVE_MS` sets the interval (`0` = off).
+  See docs/runner.md.
+- Card panel: a "Live" section shows a running card's newest steps, its phase, and the changed files with a coloured
+  diff (folded); it updates on the board's `live` event and keeps the last state after the run. A card without live
+  data shows nothing new.
+- Hands-off mode, off by default: `dasks hands-off on|off|status` sets `hands_off.enabled` in `config.json`, read on
+  each request (no restart). While it is on, `GET /api/merge-ok` answers 410 and `dask captain-merge` lands a card on
+  green CI and a clean review without a merge OK; review cards show no approve/reject; a build-stage park, question,
+  ask, needs-user outcome or retry cap becomes a card note (a doing card goes back to its spec stage) unless it is a
+  taste pick or about money, deleting data, a secret or credential, a physical device or a UI choice. `/api/status`, `/api/health`,
+  `/api/board` and `/api/captain` report `hands_off`. See docs/captain.md.
+- Specs: a later spec version may reach 1,600 words in total (room for a fix line, a decision or an answer, on a full
+  spec); the first version stays at 1,500. The spec writer prompt and the `spec-writer` skill say so. See docs/specs.md.
+- Specs: a spec versions folder that cannot be read (a permission error, a file in its place) answers 503 with
+  `Retry-After`, never "no spec yet" (404, version 0), and a `PUT /spec` on it stores nothing, so a second version 1 is
+  never written over a stored spec. `GET /api/asks` and `/asks.md` still answer 200: such a card is listed under
+  `unavailable` with the reason, and every other card's decision is served.
+- Touches from the real PR: a PR file whose name holds glob characters (`app/[id]/page.tsx`, `[slug].ts`) now holds
+  that one file. It used to be read as a pattern cut at `[`, so it held its whole folder (or, at the repo root, was
+  dropped). See docs/cards.md.
+- Code map: Swift access-level imports (`public import X`, `package import X`, `internal`, `fileprivate`, `private`) are
+  read as the same edge as `import X`.
+- Secret scan: a gitleaks run that exits 0 is clean only when it prints its `N commits scanned` summary and no error
+  line. gitleaks also exits 0 when its own `git log` fails (an `ERR [git]` line), for example for a base the clone does
+  not have; the runner then pushed a branch nothing had scanned. Now the runner's push, its saved-work push and
+  `dask submit` refuse to push in that case. A count of 0 (a delete-only commit) is still clean. See docs/runner.md.
+- Secret scan: merge commits are scanned by their first-parent diff (`--diff-merges=first-parent`), so a secret added
+  only while merging is caught; plain `git log -p` shows no patch for a merge.
+- `dasks ci`: every ssh call to another Mac sends keepalives and ends after `DASKS_CI_REMOTE_SEC` seconds (default 900),
+  so a host that hangs fails that step instead of holding the command for hours. See docs/ci-runners.md.
+- `GET /api/start` marks messages read only after the reply was sent in full, so a reply that fails on the way (a reset,
+  a closed connection) leaves them unread. `HEAD` never marks them read, and under auth `enforce` only a caller whose
+  token proves the actor name moves its read cursor; anyone else still gets the text, as a peek.
+- Read cursors of names that differ only in case (`Spec@host1`, `spec@host1`) keep separate files on a case-insensitive
+  disk. An all-lower-case name keeps the file it had.
+- Every secret compare goes through one helper that checks the length first, so a client-sent value of another byte
+  length is a refusal, never a 500.
+- `GET /api/board`: one reply (and one gzip, made off the main thread) per data version is reused for 3 seconds, so a
+  burst of reloads from open pages no longer stringifies and compresses the whole board again for each tab and stalls
+  the board. A write moves the version, so it shows at once, also
+  in a gzip reply whose compression was still running when the write finished (it is rebuilt, never sent older); `now` and `stuck` may be up to 3 seconds old.
+- Tests: tearing down a test server that was already killed by a signal returns at once instead of hanging until the
+  test timeout. The fleet test checks that `dasks machine list` never prints the whole token secret (it took the
+  part after the second `_`, which can be a short fragment because the secret may hold `_`, and failed by chance).
+- Card create: the near-duplicate check no longer refuses a title whose slug has no a-z0-9 (they all share the `task`
+  fallback id), a title like `Phase` while `Phase 2` (`<goal>.t-phase-2`) is open, or two long titles that share only their
+  first 40 slug characters. A real repeat (the same normalized title) is still 409.
+- Card create: the intake todo limit holds only a create that lands in todo; a card filed straight into review at the limit
+  is written instead of becoming an idea.
+- Card create: a retry is never replayed onto a done or cancelled card; filing the same create again after a cancel makes a
+  new card.
+- Release: the board checks the caller (the request's actor), not the `who` it sends. Releasing a claim you do not hold, or
+  naming someone else, needs `force`.
+- Outcomes: a needs-spec outcome that arrives after the run was already closed as failed (or is sent again) still moves the
+  card to spec-rework for its owner, with the question kept.
+- Ideas: the ideas file cap is 8 KB per idea (300 ideas), so the 300-idea count is the limit, also for ideas written in
+  3-byte characters (the fixed 128 KB cap refused new ideas after about 100 long ones).
+
 ## 1.1.1 — 2026-11-16
 
 - Rethink cards: while a rethink card is open (not done, not cancelled), the card it replaces no longer asks you for a

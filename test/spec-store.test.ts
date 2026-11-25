@@ -436,3 +436,22 @@ test('over HTTP: warnings are stored and read back; 422 lists every reason check
   assert.deepEqual(body.reasons, checkCard(bad).errors);
   assert.ok(body.reasons.length >= 3);
 }));
+
+test('an unreadable spec versions folder is a 503, never "no spec": a PUT on it stores nothing', async () => {
+  const { currentSpecVersion, specPaths, writeSpec, readSpec } = await import('../src/lib/specs.ts');
+  const { root, cleanup } = tempRepo();
+  try {
+    const t = createTask(root, { goal: 'alpha', title: 'Unreadable spec folder' }, 'helper');
+    assert.equal(currentSpecVersion(root, t.id), 0, 'no folder yet: no spec');
+    // A file where the versions folder belongs: readdir fails with ENOTDIR (a permission error reads the same way).
+    const dir = path.join(root, specPaths(t.id).versions);
+    fs.mkdirSync(path.dirname(dir), { recursive: true });
+    fs.writeFileSync(dir, 'not a folder');
+    const code = (fn: () => unknown) => { try { fn(); return 0; } catch (e: any) { return e.status ?? -1; } };
+    assert.equal(code(() => currentSpecVersion(root, t.id)), 503);
+    assert.equal(code(() => readSpec(root, t.id)), 503, 'a read says unknown, not 404 no spec');
+    assert.equal(code(() => writeSpec(root, t.id, { text: 'x', expected: 0, note: '' }, 'helper')), 503, 'a write is refused');
+    assert.equal(fs.readFileSync(dir, 'utf8'), 'not a folder', 'nothing was stored');
+    assert.equal(currentSpecVersion(root, 'not a task id'), 0, 'a bad id still has no spec');
+  } finally { cleanup(); }
+});

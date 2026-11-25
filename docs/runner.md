@@ -74,6 +74,8 @@ flowchart LR
   noted, so the daily summary lists them. Only the lines
   directly above the last `RESULT:` line count.
 - **gitleaks is required.** Without it the runner builds but never pushes, neither a finished branch nor saved work.
+  A gitleaks run that exits 0 counts as clean only with its `N commits scanned` summary and no error line (gitleaks also
+  exits 0 when its own `git log` fails); merges are scanned by their first-parent diff. `dask submit` uses the same rules.
 - It **never merges**, never pushes the default branch and never force-pushes.
 - **Review.** At most 2 passes per PR, and passes an earlier attempt left on the board count. Pass 1 reviews the whole
   change. If a finding blocks, the builder gets one fix pass and pass 2 re-checks only those findings and regressions
@@ -185,8 +187,8 @@ warns about that. It never holds a claim or a start, and it never changes depend
 - **The map.** For each project clone the runner keeps a map of which repo file imports which, read from the git tree
   at `origin/main` (else `origin/HEAD`), never the working tree, with no model and no network. It knows relative TS/JS
   imports (`import`, `export … from`, `require`, `import()`), Python `import` and `from … import` (absolute and
-  relative), Rust `mod x;` and `use crate::`/`self::`/`super::` paths, and Swift `import <Target>` of a SwiftPM target
-  declared in the repo. An import that does not name a file in the tree is dropped; package names are never followed.
+  relative), Rust `mod x;` and `use crate::`/`self::`/`super::` paths, and Swift `import <Target>` (also `public import`,
+  `package import` and the other access levels) of a SwiftPM target declared in the repo. An import that does not name a file in the tree is dropped; package names are never followed.
 - **When it is built.** Every look checks each clone's head in the background and rebuilds a map that is behind, one
   repo at a time, once per new head. A build reads at most 20,000 source files and 64 MB, skips files over 512 KB and
   stops after 60 s; past a file or byte limit the map is marked truncated. A failed build logs one line and the last map
@@ -201,6 +203,29 @@ warns about that. It never holds a claim or a start, and it never changes depend
 
   and writes one note on the card. Only file entries count: a directory or glob entry never makes this warning (it
   already locks by overlap), and a file the card creates is not in the map yet. A repo with no map gives no warnings.
+
+## Live window
+
+While a build, review or fix runs, the card's panel on the board shows what the agent is doing now and what it has
+changed so far. Every 15 s the runner reads the new lines of the phase's log (a Claude tool call or text, a Codex output
+line) and the worktree's changes since the run started (committed or not; untracked files are listed without content),
+and posts them to `POST /api/tasks/<card>/live` with its agent token. When the phase ends it posts the last state once
+more, marked ended, and the panel keeps showing it. Each update carries an increasing `seq`; the board ignores one that
+arrives after a newer one, so a slow update of an earlier phase never replaces a later state.
+
+<img alt="A card panel's live window: the newest steps, then the changed files and their diff" src="assets/live-window.jpg" width="480">
+
+- **Nothing secret leaves the machine.** The runner redacts every step and the diff before it sends them, and the board
+  does it again before it keeps them, secret command-line flags included (`-a`, `-p<pw>`, `--password`, `--token`,
+  `-u user:pass`, …). A file whose name says env, key, secret, token, password or credential, a credential file
+  (`.pgpass`, `.netrc`, `.git-credentials`, kubeconfig, `.docker/config.json`, keys and certificates, …), a config
+  format (`.yaml`, `.toml`, `.ini`, `.plist`, …), and a new or renamed file of `KEY=value` lines show only their header
+  line, never their content. A rename is judged by both names.
+- **Bounded.** The board keeps the newest 40 steps of 240 characters, 30 files and 16 KB of diff per card, for at most
+  64 cards, in memory only: nothing goes to `data/`, nothing is committed, and a board restart empties it.
+- **Never in the way.** One post at a time, each waited for at most 5 s, and the end of a phase waits at most 5 s for
+  the last one. A board error is skipped, a board without the route turns it off for that phase, and nothing
+  decides anything from it. `DASKS_RUNNER_LIVE_MS` sets the interval; `0` turns it off.
 
 ## Turn it on
 

@@ -81,16 +81,29 @@ function cleanEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+/** Every ssh call ends: a Mac that hangs (or a link that drops without a reset) fails its step instead of holding the
+ *  command for hours. Keepalives notice a dead link; DASKS_CI_REMOTE_SEC (default 900 s, room for a runner download)
+ *  caps the whole call. */
+const SSH_OPTS = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4'];
+function remoteSec(): number {
+  const n = Number(process.env.DASKS_CI_REMOTE_SEC ?? '');
+  return Number.isFinite(n) && n > 0 ? n : 900;
+}
+const remoteLimit = (): SpawnSyncOptions => ({ timeout: Math.round(remoteSec() * 1000), killSignal: 'SIGKILL' });
+function sshError(host: string, e: Error): string {
+  return (e as NodeJS.ErrnoException).code === 'ETIMEDOUT' ? `ssh to ${host} timed out after ${remoteSec()} s (DASKS_CI_REMOTE_SEC)` : `ssh: ${e.message}`;
+}
+
 /**
  * A script on the host: locally with bash, else over ssh. A secret goes to its stdin as the first line; its output is
  * always captured and the secret blanked out before anything is printed (`show` prints it after the run).
  */
 function onHost(host: string | undefined, script: string, args: string[], opt: { secret?: string; show?: boolean } = {}) {
-  const o: SpawnSyncOptions = { encoding: 'utf8', input: opt.secret ? opt.secret + '\n' : '', stdio: 'pipe', maxBuffer: 64 << 20, env: cleanEnv() };
+  const o: SpawnSyncOptions = { encoding: 'utf8', input: opt.secret ? opt.secret + '\n' : '', stdio: 'pipe', maxBuffer: 64 << 20, env: cleanEnv(), ...(host ? remoteLimit() : {}) };
   const r = host
-    ? spawnSync('ssh', ['-o', 'BatchMode=yes', host, remoteCommand(script, args)], o)
+    ? spawnSync('ssh', [...SSH_OPTS, host, remoteCommand(script, args)], o)
     : spawnSync('bash', ['--noprofile', '--norc', '-c', script, 'dasks-ci', ...args], o);
-  if (r.error) throw new Error(`${host ? 'ssh' : 'bash'}: ${r.error.message}`);
+  if (r.error) throw new Error(host ? sshError(host, r.error) : `bash: ${r.error.message}`);
   const blank = (s: unknown) => (opt.secret ? String(s ?? '').replaceAll(opt.secret, '[token]') : String(s ?? ''));
   const out = { status: r.status ?? 1, stdout: blank(r.stdout), stderr: blank(r.stderr) };
   if (opt.show) { process.stdout.write(out.stdout); process.stderr.write(out.stderr); }
@@ -185,7 +198,8 @@ function shipTarball(host: string, file: string, name: string) {
   const fd = fs.openSync(file, 'r');
   try {
     console.log(`copying ${name} to ${host}`);
-    const r = spawnSync('ssh', ['-o', 'BatchMode=yes', host, `mkdir -p "$HOME/.dasks/ci-runners/.cache" && cat > ${dst}.part && mv ${dst}.part ${dst}`], { stdio: [fd, 'inherit', 'inherit'], env: cleanEnv() });
+    const r = spawnSync('ssh', [...SSH_OPTS, host, `mkdir -p "$HOME/.dasks/ci-runners/.cache" && cat > ${dst}.part && mv ${dst}.part ${dst}`], { stdio: [fd, 'inherit', 'inherit'], env: cleanEnv(), ...remoteLimit() });
+    if (r.error) throw new Error(`copying ${name} to ${host} failed (${sshError(host, r.error)})`);
     if (r.status !== 0) throw new Error(`copying ${name} to ${host} failed`);
   } finally { fs.closeSync(fd); }
 }

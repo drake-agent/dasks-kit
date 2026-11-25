@@ -3,20 +3,22 @@
 // Every write runs under the repo lock, bumps the idea's version and the file's version, records the actor
 // (`added_by` / `updated_by`, the commit message, data/activity/ideas/<app>.jsonl) and is one git commit.
 // Promoting creates the task and links both ways (idea.promoted_task_id <-> task.idea) in that same commit.
-import fs from 'node:fs';
 import path from 'node:path';
 import { ACTOR_RE, GOAL_ID_RE, type Issue, type Board, type Task } from './schema.ts';
 import { loadGoals } from './load.ts';
 import { HttpError, commitFiles, createTask, isoLocal, slugify, withRepoLock } from './write.ts';
 import { type Activity, MAX_ACTIVITY } from './collab.ts';
 import { assertProject, projectIds } from './views.ts';
+import * as boardFiles from './board-files.ts';
 
 export const IDEA_STATUSES = ['open', 'promoted', 'dropped'] as const;
 export type IdeaStatus = typeof IDEA_STATUSES[number];
 export const IDEA_ID_RE = /^([a-z][a-z0-9]{0,23})\.(i-[a-z0-9]+(?:-[a-z0-9]+)*)$/;
 export const MAX_IDEAS = 300;
-export const MAX_IDEAS_BYTES = 128 * 1024;
 const LIMITS = { title: 120, title_ko: 120, title_en: 120, note: 600, note_ko: 600, note_en: 600, source: 300 } as const;
+// Every text field at its limit in 3-byte characters (Korean, for one) is about 7.4 KB plus the other fields: 8 KB per idea
+// keeps MAX_IDEAS the limit that binds (a fixed 128 KB held only about 100 long ideas).
+export const MAX_IDEAS_BYTES = MAX_IDEAS * 8 * 1024;
 /** Fields an agent may set when adding an idea, and may change later. */
 export const IDEA_TEXT = Object.keys(LIMITS) as (keyof typeof LIMITS)[];
 
@@ -64,7 +66,7 @@ export function ideaErrors(i: any, app: string): string[] {
 export function readIdeas(root: string, app: string): IdeaFile {
   const rel = ideasRelPath(app);
   let raw: string;
-  try { raw = fs.readFileSync(path.join(root, rel), 'utf8'); } catch (e: any) {
+  try { raw = boardFiles.readFileSync(path.join(root, rel), 'utf8'); } catch (e: any) {
     if (e.code === 'ENOENT') return { app, version: 0, updated: '', updated_by: '', ideas: [] };
     throw e;
   }
@@ -78,7 +80,7 @@ export function readIdeas(root: string, app: string): IdeaFile {
 
 export function readIdeaActivity(root: string, app: string, limit = 20): Activity[] {
   let raw = '';
-  try { raw = fs.readFileSync(path.join(root, activityRel(app)), 'utf8'); } catch { return []; }
+  try { raw = boardFiles.readFileSync(path.join(root, activityRel(app)), 'utf8'); } catch { return []; }
   const out: Activity[] = [];
   for (const l of raw.split('\n')) { if (!l.trim()) continue; try { out.push(JSON.parse(l)); } catch { /* skip */ } }
   return out.slice(-limit);
@@ -100,7 +102,7 @@ export const ideasArchiveRelPath = (app: string) => path.join('data', 'ideas', '
 
 function archivedIds(root: string, app: string): string[] {
   let raw = '';
-  try { raw = fs.readFileSync(path.join(root, ideasArchiveRelPath(app)), 'utf8'); } catch { return []; }
+  try { raw = boardFiles.readFileSync(path.join(root, ideasArchiveRelPath(app)), 'utf8'); } catch { return []; }
   return raw.split('\n').flatMap((l) => { try { const id = JSON.parse(l)?.id; return typeof id === 'string' ? [id] : []; } catch { return []; } });
 }
 
@@ -119,7 +121,7 @@ function filesFor(root: string, app: string, file: IdeaFile, entry: Activity): {
   const out = [{ rel: ideasRelPath(app), content }, { rel: activityRel(app), content: all.map((a) => JSON.stringify(a)).join('\n') + '\n' }];
   if (moved.length) {
     let prev = '';
-    try { prev = fs.readFileSync(path.join(root, ideasArchiveRelPath(app)), 'utf8'); } catch { /* first archive */ }
+    try { prev = boardFiles.readFileSync(path.join(root, ideasArchiveRelPath(app)), 'utf8'); } catch { /* first archive */ }
     out.push({ rel: ideasArchiveRelPath(app), content: prev + moved.map((i) => JSON.stringify(i)).join('\n') + '\n' });
   }
   return out;
@@ -237,7 +239,7 @@ export function checkIdeas(root: string, b: Board): Issue[] {
   const dir = path.join(root, 'data', 'ideas');
   const out: Issue[] = [];
   let files: string[] = [];
-  try { files = fs.readdirSync(dir); } catch { return out; }
+  try { files = boardFiles.readdirSync(dir); } catch { return out; }
   const projects = projectIds(b);
   const taskIds = new Set(b.tasks.map((t) => t.id));
   for (const f of files.sort()) {
@@ -246,7 +248,7 @@ export function checkIdeas(root: string, b: Board): Issue[] {
     const app = f.replace(/\.json$/, '');
     if (!f.endsWith('.json') || !projects.includes(app)) { out.push({ file, message: `unexpected file (want <project>.json, projects: ${projects.join(', ')})` }); continue; }
     let o: any;
-    try { o = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch (e: any) { out.push({ file, message: `parse error: ${e.message}` }); continue; }
+    try { o = JSON.parse(boardFiles.readFileSync(path.join(dir, f), 'utf8')); } catch (e: any) { out.push({ file, message: `parse error: ${e.message}` }); continue; }
     if (!Array.isArray(o?.ideas)) { out.push({ file, message: 'no ideas list' }); continue; }
     const seen = new Set<string>();
     for (const i of o.ideas) {

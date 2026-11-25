@@ -75,6 +75,14 @@ test('Rust: mod declarations, crate/self/super paths to the longest module file;
   assert.deepEqual(edges(m), ['src/lib.rs -> src/x.rs', 'src/lib.rs -> src/y/mod.rs', 'src/x.rs -> src/y/mod.rs', 'src/x.rs -> src/y/z.rs', 'src/y/mod.rs -> src/x.rs', 'src/y/mod.rs -> src/y/z.rs']);
 });
 
+test('Swift: an access-level import (public, package, internal, fileprivate, private import X) is the same edge', () => {
+  const pkg = 'let p = Package(targets: [.target(name: "App"), .target(name: "Core", path: "Lib/Core")])';
+  for (const level of ['public', 'package', 'internal', 'fileprivate', 'private']) {
+    const m = mapOf({ 'Package.swift': pkg, 'Sources/App/main.swift': `@preconcurrency ${level} import Core\n`, 'Lib/Core/Core.swift': '' });
+    assert.deepEqual(edges(m), ['Sources/App/main.swift -> Lib/Core/'], level);
+  }
+});
+
 test('Swift: import of a SwiftPM target is an edge to its dir; a .target() inside dependencies is not a target', () => {
   const pkg = 'let package = Package(name: "P", targets: [\n  .executableTarget(name: "App", dependencies: [.target(name: "Core"), .target(name: "Ghost")]),\n  .target(name: "Core", path: "Lib/Core"),\n  .testTarget(name: "AppTests", dependencies: ["App"]),\n])\n';
   assert.deepEqual(swiftTargets('Package.swift', pkg).map((t) => `${t.name}:${t.dir}`), ['App:Sources/App/', 'Core:Lib/Core/', 'AppTests:Tests/AppTests/']);

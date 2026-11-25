@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { MERGE_DIFFS, scannedClean } from './gitleaks-output.ts';
 import {
   agentCommand, agentText, attemptVerdict, continuePrompt, countStart, fixPrompt, prBody, RATE_LIMITED, readCodeReview, recheckPrompt, resumeLine, resultLine, reviewPrompt, runnerRules, withFollowUps,
   type HistoryRow, type Picked, type RunnerConfig, type RunnerState, type RunRecord, type Tool,
@@ -20,6 +21,7 @@ import { SPEC_RETRIES, type SpecPicked } from './runner.ts';
 import { fileRethink, limitNote } from './rethink.ts';
 import { lockTouches, prFilesRoute, SHA_RE } from './touches-actual.ts';
 import { claimWarnings } from './codemap/overlap.ts';
+import { livePusher } from './live-push.ts';
 import type { MapView } from './codemap/map.ts';
 
 export class BoardError extends Error {
@@ -53,6 +55,8 @@ export interface FlowEnv {
   rethinks?: number;
   /** The code map of a clone (null = none yet): a claimed card one import from a doing card gets a warning. */
   codemap?: (repo: string) => MapView | null;
+  /** How often a build, review or fix phase posts the card's live window (ms; unset or 0 = never). */
+  liveMs?: number;
 }
 
 const TOOL_NAME: Record<Tool, string> = { claude: 'Claude', codex: 'Codex' };
@@ -268,7 +272,10 @@ async function phase(env: FlowEnv, card: string, r: RunRecord, cfg: RunnerConfig
     onKept: (idle) => env.log(`${card}: past ${cfg.timeout_min} min and still writing (last change ${Math.floor(idle)} min ago): kept until ${cfg.idle_min} min without a change or ${cfg.max_min} min in all`),
   });
   env.track(card, agent);
+  // The card's live window (src/lib/live-push.ts): not for spec runs, which change no worktree.
+  const live = r.kind !== 'spec' && env.liveMs ? livePusher({ api: env.api, card, runId: r.run_id || r.job, phase: r.phase, dir: r.dir, base: r.start_sha || 'HEAD', logFile, intervalMs: env.liveMs }) : null;
   const res = await agent.done;
+  await live?.stop();
   env.track(card, null);
   return { ...res, text: agentText(res.raw) };
 }
@@ -452,8 +459,9 @@ export async function runCard(env: FlowEnv, p: Picked, cfg: RunnerConfig, title:
   if (!pushableBranch(branch, r.base)) { await settle(env, card, r, 'refusing to push a default branch', false); return; }
   const gl = env.which('gitleaks');
   if (!gl) { await settle(env, card, r, 'gitleaks is not installed (brew install gitleaks); nothing was pushed', false); return; }
-  const scan = spawnSync(gl, ['git', '--no-banner', '--redact', '--log-opts', `${r.base}..${branch}`, dir], { encoding: 'utf8', timeout: 180_000 });
-  if (scan.status !== 0) { await settle(env, card, r, 'gitleaks flagged the new commits (or failed); nothing was pushed', true); return; }
+  const scan = spawnSync(gl, ['git', '--no-banner', '--redact', '--log-opts', `${r.base}..${branch} ${MERGE_DIFFS}`, dir], { encoding: 'utf8', timeout: 180_000 });
+  // An exit 0 counts only with a scan that read the commits (scannedClean): gitleaks also exits 0 when its git log fails.
+  if (scan.status !== 0 || !scannedClean(`${scan.stdout ?? ''}\n${scan.stderr ?? ''}`)) { await settle(env, card, r, 'gitleaks flagged the new commits (or failed); nothing was pushed', true); return; }
   let pr = '';
   try {
     git(dir, 'push', '-u', 'origin', `refs/heads/${branch}:refs/heads/${branch}`);

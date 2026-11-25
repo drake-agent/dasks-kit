@@ -14,14 +14,15 @@ carry `Authorization: Bearer <token>` (see [auth.md](auth.md)). The MCP server a
 | `GET /api/tasks/<id>` | one card with its activity, outcomes, handoff and lessons (`?log=0` leaves out the activity) |
 | `GET /api/tasks/<id>/spec` | the current spec (`?version=N` an older one) |
 | `GET /api/ready` | cards ready to build: open, unclaimed, deps done, spec ready (`?all=1`, `?goal=a,b`); your pushes first, then bug fixes (kind `bug`); a card whose goal has a version target also carries `version_target` |
-| `GET /api/start` | one-call agent start: rules, unread messages, your cards, ready cards, cards in review, as text lines |
+| `GET /api/start` | one-call agent start: rules, unread messages, your cards, ready cards, cards in review, as text lines. It marks the messages read once the reply is sent in full; never for `?peek=1` or `HEAD`, and under auth `enforce` only when the caller's token proves its name |
 | `GET /api/stuck` | stuck cards and why |
 | `GET /api/status`, `/api/status/<app>` | where each project stands, or one project; `?format=text` for plain text ([below](#project-status)) |
 | `GET /api/versions` | each goal with a `version_target`: `milestone`, `total`, `done`, `open`, `ready`, `gate_card` ([versions.md](versions.md)) |
 | `GET /api/tasks/<id>/messages` | card messages (`/messages/wait` long-polls, `/participants` lists who is on the card) |
-| `GET /api/merge-ok?card=&sha=` | `{ok: true}` only when you approved a merge of that card at exactly that head |
+| `GET /api/merge-ok?card=&sha=` | `{ok: true}` only when you approved a merge of that card at exactly that head; 410 in hands-off mode ([captain.md](captain.md#hands-off-mode)) |
 | `GET /api/views`, `/api/ideas`, `/api/lessons` | project pages, ideas for later, lessons |
 | `GET /api/tasks/<id>/review-runs` | the recorded cross-model reviews of the card, one row per pass |
+| `GET /api/tasks/<id>/live` | the card's live window: the running agent's newest `steps`, changed `files`, `diff`, `phase`, `ended` ([runner.md](runner.md#live-window)); empty (`run_id: null`) when nothing was sent |
 | `GET /api/fleet`, `/api/whoami` | runners' heartbeats; who your token says you are ([fleet.md](fleet.md)) |
 | `GET /api/captain`, `/api/captain/chat?since=N` | the captain lease, harness chain and merge settings; the captain chat ([captain.md](captain.md)) |
 | `GET /api/backup` | the data backup: remote, branch, last good push, failures in a row, `state` (`off`, `never`, `ok`, `failing`) ([upgrade.md](upgrade.md#backup-and-restore)) |
@@ -42,6 +43,7 @@ carry `Authorization: Bearer <token>` (see [auth.md](auth.md)). The MCP server a
 | `POST /api/tasks/<id>/spec/review\|block\|unblock` | review the spec text, block it for Spec, lift a block |
 | `POST /api/tasks/<id>/messages` | send a card message |
 | `POST /api/tasks/<id>/review-runs` | record one cross-model review pass, 1 or 2 (`pass`, `head`, `reviewer`, `impl`, `verdict`, `open`, `answer`, …); the board adds the sender's family and the card's builders |
+| `POST /api/tasks/<id>/live` | the runner's live window update (`run_id`, `seq`, `phase`, `steps`, `files`, `diff`, `ended`); redacted and capped, kept in memory only; an update whose `seq` is not newer than the stored one arrived late and is ignored (`stale: true`); SSE `event: live` tells open pages |
 | `POST /api/nodes/<id>` | edit a goal, milestone or the north star (`title`, `title_ko`, `title_en`, `why`, …); a goal also takes `profile` ([cards.md](cards.md#project-profile)) and `version_target`, a milestone of that goal or empty ([versions.md](versions.md)) |
 | `POST /api/fleet/heartbeat` | a runner's heartbeat |
 | `POST /api/backup/now` | push the data repo to `backup.remote` now; 200 with the status, 502 when the push failed, 409 when no remote is set |

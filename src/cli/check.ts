@@ -7,9 +7,11 @@ import { checkIdeas } from '../lib/ideas.ts';
 import { checkLessons } from '../lib/lessons.ts';
 import { corruptJournalHelp, corruptJournals } from '../lib/write.ts';
 import { backupView, readBackupStatus } from '../lib/backup.ts';
+import { openBoardStore } from '../lib/board-store-open.ts';
 
 const root = boardRoot();
 const cfg = loadConfig(root); // the project list (config.json) is part of what check() checks
+openBoardStore(root, cfg, true); // sqlite mode: check the store, not the data repo's stale files
 const [cmd, ...rest] = process.argv.slice(2);
 if (cmd === 'check') {
   const b = loadBoard(root);

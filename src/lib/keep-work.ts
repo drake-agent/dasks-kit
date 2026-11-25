@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { runBounded, why, type ProcResult } from './proc.ts';
+import { MERGE_DIFFS, scannedClean } from './gitleaks-output.ts';
 import { redact } from './redact.ts';
 
 /** Names a WIP commit never takes, wherever they are: a scanner cannot tell a weak password from a config value. */
@@ -116,8 +117,9 @@ async function save({ repo, dir, branch, base, card, machine, reason, gitleaks }
     if (moved && moved.code !== 0) return tell(`Work not pushed: gitleaks is not installed, and the WIP commit could not be kept (${why(moved, 120)}). ${here(before)}.`);
     return tell(`Work not pushed: gitleaks is not installed. ${here(commits)}${wip.sha ? ', the last one a WIP commit' : ''}.`);
   }
-  const scan = await runBounded(gitleaks, ['git', '--no-banner', '--redact', '--log-opts', `${base}..${tip}`, repo], { cwd: repo, timeoutMs: SCAN_MS });
-  if (scan.code !== 0) {
+  const scan = await runBounded(gitleaks, ['git', '--no-banner', '--redact', '--log-opts', `${base}..${tip} ${MERGE_DIFFS}`, repo], { cwd: repo, timeoutMs: SCAN_MS });
+  // An exit 0 counts only with a scan that read the commits (scannedClean): gitleaks also exits 0 when its git log fails.
+  if (scan.code !== 0 || !scannedClean(`${scan.out}\n${scan.err}`)) {
     let kept = '';
     if (wip.sha) {
       const aside = keptRef(card, wip.sha);

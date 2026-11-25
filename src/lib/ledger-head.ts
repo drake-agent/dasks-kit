@@ -2,7 +2,8 @@
 // that line, HMAC'd with ledger.key. It lives next to the keys (not in data/), so cutting lines off the end of the ledger
 // (or emptying it) is caught: the chain alone cannot see a missing tail. Rewritten (tmp + rename) after every append.
 import fs from 'node:fs';
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
+import { sameBytes } from './same-bytes.ts';
 
 export interface Head { v: 1; seq: number; last: string; hmac: string }
 
@@ -30,7 +31,7 @@ export function writeHead(file: string, key: Buffer, seq: number, lastLine: stri
 export function headProblem(head: Head | null, key: Buffer, lines: string[]): string | null {
   if (!head) return lines.length ? 'ledger head is missing (deleted?) while the ledger has entries' : null;
   const want = Buffer.from(sign(key, head.seq, head.last), 'hex'); const got = Buffer.from(head.hmac, 'hex');
-  if (want.length !== got.length || !timingSafeEqual(want, got)) return 'ledger head HMAC mismatch';
+  if (!sameBytes(want, got)) return 'ledger head HMAC mismatch';
   if (lines.length < head.seq) return `ledger has ${lines.length} line(s) but its head vouches for ${head.seq}: entries were removed`;
   if (head.seq > 0 && sha256(lines[head.seq - 1]) !== head.last) return `line ${head.seq} is not the line the head vouches for`;
   return null;

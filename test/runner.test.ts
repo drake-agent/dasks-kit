@@ -476,7 +476,7 @@ async function world(env: Record<string, string> = {}) {
   const mainBefore = g(bare, 'rev-parse', 'main').trim();
   for (const t of ['claude', 'codex']) fs.writeFileSync(path.join(fake, t), FAKE_AGENT, { mode: 0o755 });
   fs.writeFileSync(path.join(fake, 'gh'), FAKE_GH, { mode: 0o755 });
-  if (env.NO_GITLEAKS !== '1') fs.writeFileSync(path.join(fake, 'gitleaks'), '#!/bin/bash\nprintf "%s\\n" "$*" >> "$FAKE_DIR/gitleaks.args"\n[ -f "$FAKE_DIR/leak" ] && exit 1\nexit 0\n', { mode: 0o755 });
+  if (env.NO_GITLEAKS !== '1') fs.writeFileSync(path.join(fake, 'gitleaks'), '#!/bin/bash\nprintf "%s\\n" "$*" >> "$FAKE_DIR/gitleaks.args"\n[ -f "$FAKE_DIR/leak" ] && exit 1\n[ -f "$FAKE_DIR/noscan" ] && { echo "ERR [git] fatal: bad revision" >&2; echo "INF 0 commits scanned." >&2; exit 0; }\necho "INF 1 commits scanned." >&2\nexit 0\n', { mode: 0o755 });
 
   const card = 'beta.t-build';
   const board = tempRepo([task({ id: card, title: 'Build me', lane: 'claude', priority: 'p1', spec_state: 'ready', body: 'touches: src/a\n\n## Context\nAdd src/a/built.txt.\n' } as any)]);
@@ -524,6 +524,7 @@ test('e2e success: Claude builds, Codex reviews (a repro blocks), one fix, a cle
     assert.equal(t.claimed_by, '', 'handed back: nobody holds the card');
     assert.match(t.body, /claim: #runner-[0-9a-f-]{36} closed \(runner: review/);
     assert.match(w.read('gitleaks.args'), /^git --no-banner --redact --log-opts/m, 'scanned before the push');
+    assert.match(w.read('gitleaks.args'), /--log-opts origin\/main\.\.dasks\/beta\.t-build --diff-merges=first-parent /, 'merges scanned by their first-parent diff');
     assert.doesNotMatch(w.read('claude.args'), /You are continuing/, 'no saved branch: a plain first run');
     const gh = w.read('gh.args');
     assert.match(gh, /^pr create --draft --base main --head dasks\/beta\.t-build --title beta\.t-build: Build me --body /m);
@@ -966,6 +967,19 @@ test('e2e stopped build: uncommitted edits become a WIP commit on origin, a secr
     assert.equal(w.g(w.bare, 'rev-parse', 'main').trim(), w.mainBefore, 'the default branch never moves');
     assert.doesNotMatch(w.read('gh.args'), /^pr (create|view)/m, 'no PR for WIP');
     assert.deepEqual(w.state().running, {});
+  } finally { await w.stop(); }
+});
+
+test('e2e gitleaks exit 0 that scanned nothing (its git log failed): the build is not pushed and no PR is opened', async () => {
+  const w = await world({ FAKE_AGENT: 'success', FAKE_REVIEW: 'clean' });
+  try {
+    fs.writeFileSync(path.join(w.fake, 'noscan'), '');
+    await w.runner('--once');
+    const t = await w.get();
+    assert.notEqual(t.status, 'review');
+    assert.match(t.body, /gitleaks flagged the new commits \(or failed\); nothing was pushed/);
+    assert.equal(w.g(w.bare, 'for-each-ref', 'refs/heads/dasks').trim(), '', 'nothing on origin');
+    assert.doesNotMatch(w.read('gh.args'), /^pr create/m);
   } finally { await w.stop(); }
 });
 
