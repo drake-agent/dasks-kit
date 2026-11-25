@@ -69,6 +69,7 @@ line itself is never rewritten.
 
 - Any task write may set both: `touches_actual` as `a, b` or a list of paths, `touches_sha` as 40 hex or empty.
   An empty list clears both, so does a new `pr` link. A write of only these two keeps `updated`.
+- Each stored path is a real file name, never a pattern: `app/[id]/page.tsx` holds that one file, not all of `app/`.
 - The list is capped at 3000 characters. A longer one is shortened to folder entries (`src/lib/`, holding the whole
   folder), deepest level first; root files stay. If even the top-level folders do not fit, nothing is stored and the
   `touches:` line holds. The list never counts toward the card's size limit.

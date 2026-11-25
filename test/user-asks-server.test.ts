@@ -241,3 +241,24 @@ test('respec without a spec blocks for Spec; a card that left blocked-on-user dr
     assert.equal(again.status, 201); assert.equal(again.body.ask.id, 'k2');
   } finally { await s.cleanup(); }
 });
+
+test('one card with an unreadable spec folder is listed as unavailable; the other decisions are still served', async () => {
+  const s = await setup();
+  try {
+    assert.equal((await s.as(AGENT, '/api/asks/shared.t-big', ASK)).status, 201);
+    assert.equal((await s.as(AGENT, '/api/asks/shared.t-small', ASK)).status, 201);
+    assert.equal((await s.get('/api/asks')).body.count, 2);
+    // A file where t-small's versions folder belongs: its spec version cannot be read (503 for that card alone).
+    const dir = path.join(s.root, 'data/specs/shared/t-small/versions');
+    fs.renameSync(dir, dir + '.aside'); fs.writeFileSync(dir, 'not a folder');
+    const r = await s.get('/api/asks');
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.items.map((i: any) => i.card), ['shared.t-big']);
+    assert.deepEqual(r.body.unavailable.map((u: any) => u.card), ['shared.t-small']);
+    const md = await fetch(s.url + '/asks.md');
+    assert.equal(md.status, 200);
+    assert.match(await md.text(), /## shared\.t-small\n- unavailable: /);
+    fs.rmSync(dir); fs.renameSync(dir + '.aside', dir);
+    assert.equal((await s.get('/api/asks')).body.count, 2, 'back once the folder reads again');
+  } finally { await s.cleanup(); }
+});

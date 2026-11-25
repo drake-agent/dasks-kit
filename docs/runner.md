@@ -185,8 +185,8 @@ warns about that. It never holds a claim or a start, and it never changes depend
 - **The map.** For each project clone the runner keeps a map of which repo file imports which, read from the git tree
   at `origin/main` (else `origin/HEAD`), never the working tree, with no model and no network. It knows relative TS/JS
   imports (`import`, `export … from`, `require`, `import()`), Python `import` and `from … import` (absolute and
-  relative), Rust `mod x;` and `use crate::`/`self::`/`super::` paths, and Swift `import <Target>` of a SwiftPM target
-  declared in the repo. An import that does not name a file in the tree is dropped; package names are never followed.
+  relative), Rust `mod x;` and `use crate::`/`self::`/`super::` paths, and Swift `import <Target>` (also `public import`,
+  `package import` and the other access levels) of a SwiftPM target declared in the repo. An import that does not name a file in the tree is dropped; package names are never followed.
 - **When it is built.** Every look checks each clone's head in the background and rebuilds a map that is behind, one
   repo at a time, once per new head. A build reads at most 20,000 source files and 64 MB, skips files over 512 KB and
   stops after 60 s; past a file or byte limit the map is marked truncated. A failed build logs one line and the last map

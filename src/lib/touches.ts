@@ -5,13 +5,20 @@
  *  `.` and `..` are resolved; a path is cut at its first segment with a glob. */
 export function normPath(p: string): string {
   const out: string[] = [];
-  for (const seg of p.trim().split('/')) {
-    if (/[*?[{]/.test(seg)) break;
+  // An entry holding `\` is a real file name (literalTouch): its escapes are undone and glob characters stay letters.
+  const lit = p.includes('\\');
+  for (const seg of (lit ? p.trim().replace(/\\(.)/g, '$1') : p.trim()).split('/')) {
+    if (!lit && /[*?[{]/.test(seg)) break;
     if (seg === '' || seg === '.') continue;
     if (seg === '..') out.pop(); else out.push(seg);
   }
   return out.join('/');   // '' = repo root
 }
+
+/** A real file name (from a PR's file list) as a touches entry: `\` and the glob characters `*?[]{}` escaped with `\`, so
+ *  `app/[id]/page.tsx` stays that one file instead of reading as a pattern cut at `[` (which held all of `app/`). Planned
+ *  `touches:` never hold `\` (PATH_CHARS), so an entry with one is always such a file. */
+export const literalTouch = (p: string): string => p.replace(/[\\*?[\]{}]/g, '\\$&');
 
 const NONE = /^(none|-|\[\])$/i;
 const WHOLE_REPO = new Set(['.', './', '**']);

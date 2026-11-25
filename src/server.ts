@@ -427,18 +427,28 @@ const boardDecision = (t: Task, fresh = false) => (liveAsk(t, fresh) || quietRev
 /** GET /api/asks: the open user decisions, newest first. */
 function asksDoc() {
   const tasks = new Map(board.tasks.map((t) => [t.id, t]));
+  // A card whose facts cannot be read right now (an unreadable spec folder: 503) is listed under `unavailable` with the
+  // reason; every other card's decision is still served.
+  const unavailable: { card: string; error: string }[] = [];
   const items = [...askMap()].flatMap(([card, a]) => {
     const t = tasks.get(card);
-    if (!t || !askLive(ROOT, t, a)) return [];
-    return [{ card, title: askTitle(t), app: t.goal, kind: a.kind, asked_at: a.asked_at, asked_by: a.asked_by, text: askText(a), lines: askLines(a),
-      options: a.options, rec: a.rec, request: askRequest(ROOT, t, a) }];
+    try {
+      if (!t || !askLive(ROOT, t, a)) return [];
+      return [{ card, title: askTitle(t), app: t.goal, kind: a.kind, asked_at: a.asked_at, asked_by: a.asked_by, text: askText(a), lines: askLines(a),
+        options: a.options, rec: a.rec, request: askRequest(ROOT, t, a) }];
+    } catch (e) {
+      if (!(e instanceof HttpError && e.status === 503)) throw e;
+      unavailable.push({ card, error: e.message });
+      return [];
+    }
   }).sort((x, y) => (x.asked_at < y.asked_at ? 1 : x.asked_at > y.asked_at ? -1 : x.card.localeCompare(y.card)));
-  return { format: 'dasks-asks/1', now: new Date().toISOString(), count: items.length, items };
+  return { format: 'dasks-asks/1', now: new Date().toISOString(), count: items.length, items, ...(unavailable.length ? { unavailable } : {}) };
 }
 function asksMarkdown(d: ReturnType<typeof asksDoc>): string {
   const out = ['# Decisions', `now: ${d.now}`, `count: ${d.count}`, ''];
   if (!d.items.length) out.push('_none_', '');
   for (const i of d.items) out.push(`## ${i.card}`, `- title: ${i.title}`, `- kind: ${i.kind}`, `- asked: ${i.asked_at} by ${i.asked_by}`, '', i.text, `choices: ${i.request.choices.join(' / ')}`, '');
+  for (const u of d.unavailable ?? []) out.push(`## ${u.card}`, `- unavailable: ${u.error}`, '');
   return out.join('\n');
 }
 

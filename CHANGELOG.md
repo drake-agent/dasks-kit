@@ -25,6 +25,17 @@
   ask, needs-user outcome or retry cap becomes a card note (a doing card goes back to its spec stage) unless it is a
   taste pick or about money, deleting data, a secret or credential, a physical device or a UI choice. `/api/status`, `/api/health`,
   `/api/board` and `/api/captain` report `hands_off`. See docs/captain.md.
+- Specs: a later spec version may reach 1,600 words in total (room for a fix line, a decision or an answer, on a full
+  spec); the first version stays at 1,500. The spec writer prompt and the `spec-writer` skill say so. See docs/specs.md.
+- Specs: a spec versions folder that cannot be read (a permission error, a file in its place) answers 503 with
+  `Retry-After`, never "no spec yet" (404, version 0), and a `PUT /spec` on it stores nothing, so a second version 1 is
+  never written over a stored spec. `GET /api/asks` and `/asks.md` still answer 200: such a card is listed under
+  `unavailable` with the reason, and every other card's decision is served.
+- Touches from the real PR: a PR file whose name holds glob characters (`app/[id]/page.tsx`, `[slug].ts`) now holds
+  that one file. It used to be read as a pattern cut at `[`, so it held its whole folder (or, at the repo root, was
+  dropped). See docs/cards.md.
+- Code map: Swift access-level imports (`public import X`, `package import X`, `internal`, `fileprivate`, `private`) are
+  read as the same edge as `import X`.
 
 ## 1.1.1 — 2026-11-16
 
