@@ -59,8 +59,8 @@ the db file; every other command refuses a store that cannot stand for R (as the
 
 | Command | What it does |
 |---|---|
-| `node bin/board-store.ts import --root R` | Clone R bare into `<folder of the db>/export.git` (its branch at R's HEAD, marked with the store's id), then fill the empty store from R's tracked `data/` files (not `data/decisions/`) in one transaction with the import's record (R's real path, branch and HEAD). Refuses a store that has files, an `export.git` that is not this store's, a board path through a symlink, and uncommitted or untracked files under `data/`. |
-| `node bin/board-store.ts compare --root R` | The store against R's `data/` files on disk: counts, files only in one side, files whose bytes differ. Exit 1 on any difference. |
+| `node bin/board-store.ts import --root R` | Clone R bare into `<folder of the db>/export.git` (its branch at R's HEAD, marked with the store's id), then fill the empty store with the bytes HEAD holds for R's tracked `data/` files (not `data/decisions/`; git's bytes, so working-tree line-ending filters change nothing) in one transaction with the import's record (R's real path, branch and HEAD). Runs under an import lock. Refuses a store that has files, another import of the same db, an `export.git` already in the folder (never removed), a link or submodule on a board path, and uncommitted or untracked files under `data/`. |
+| `node bin/board-store.ts compare --root R` | The store against R's `data/` files on disk, hashed through the repo's filters as git would store them: counts, files only in one side, files whose bytes differ. Exit 1 on any difference. |
 | `node bin/board-store.ts status --root R` | Mode, db, files, head, pending changes and the export repo. |
 
 ### Switching on
