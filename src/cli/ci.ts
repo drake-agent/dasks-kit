@@ -89,7 +89,7 @@ function remoteSec(): number {
   const n = Number(process.env.DASKS_CI_REMOTE_SEC ?? '');
   return Number.isFinite(n) && n > 0 ? n : 900;
 }
-const remoteLimit = (): SpawnSyncOptions => ({ timeout: remoteSec() * 1000, killSignal: 'SIGKILL' });
+const remoteLimit = (): SpawnSyncOptions => ({ timeout: Math.round(remoteSec() * 1000), killSignal: 'SIGKILL' });
 function sshError(host: string, e: Error): string {
   return (e as NodeJS.ErrnoException).code === 'ETIMEDOUT' ? `ssh to ${host} timed out after ${remoteSec()} s (DASKS_CI_REMOTE_SEC)` : `ssh: ${e.message}`;
 }

@@ -147,6 +147,10 @@ test('saveWork: a gitleaks exit 0 that scanned nothing (its git log failed) is n
     fs.writeFileSync(silent, '#!/bin/bash\nexit 0\n', { mode: 0o755 });
     assert.match(await saveWork(w.input({ gitleaks: silent })), /^Work not pushed: gitleaks flagged/, 'no scan count at all is no scan either');
     assert.equal(w.onOrigin(), '');
+    // A clean run that counts 0 commits (a delete-only commit adds no line to scan) is still clean.
+    const zero = path.join(w.tmp, 'gitleaks-zero');
+    fs.writeFileSync(zero, '#!/bin/bash\necho "INF 0 commits scanned." >&2\nexit 0\n', { mode: 0o755 });
+    assert.match(await saveWork(w.input({ gitleaks: zero })), /^Work saved: /);
   } finally { w.done(); }
 });
 
@@ -287,5 +291,23 @@ test('saveWork with the real gitleaks: a token in an uncommitted file is caught 
     assert.equal(w.onOrigin(), '');
     fs.writeFileSync(path.join(w.dir, 'conf.txt'), 'harmless\n');
     assert.match(await saveWork(w.input({ gitleaks: realGitleaks })), /^Work saved: /);
+  } finally { w.done(); }
+});
+
+test('saveWork with the real gitleaks: a token added only in a merge commit is caught (merges are scanned by their first-parent diff)', { skip: !realGitleaks && 'gitleaks is not installed' }, async () => {
+  const w = world();
+  try {
+    w.worktree();
+    const id = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid'];
+    w.g(w.dir, 'checkout', '-q', '-b', 'side');
+    fs.writeFileSync(path.join(w.dir, 'side.txt'), 'side\n'); w.g(w.dir, 'add', 'side.txt'); w.g(w.dir, ...id, 'commit', '-qm', 'side');
+    w.g(w.dir, 'checkout', '-q', BRANCH);
+    fs.writeFileSync(path.join(w.dir, 'mine.txt'), 'mine\n'); w.g(w.dir, 'add', 'mine.txt'); w.g(w.dir, ...id, 'commit', '-qm', 'mine');
+    w.g(w.dir, 'merge', '-q', '--no-ff', '--no-commit', 'side');
+    const token = 'ghp_' + 'aB3dE6gH9kL2nP5qR8tU1wX4zC7fJ0mS3vY6';
+    fs.writeFileSync(path.join(w.dir, 'conf.txt'), `github_token = "${token}"\n`); w.g(w.dir, 'add', 'conf.txt');
+    w.g(w.dir, ...id, 'commit', '-qm', 'merge side');
+    assert.match(await saveWork(w.input({ gitleaks: realGitleaks })), /gitleaks flagged/);
+    assert.equal(w.onOrigin(), '', 'nothing left this Mac');
   } finally { w.done(); }
 });

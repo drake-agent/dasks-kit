@@ -74,8 +74,8 @@ flowchart LR
   noted, so the daily summary lists them. Only the lines
   directly above the last `RESULT:` line count.
 - **gitleaks is required.** Without it the runner builds but never pushes, neither a finished branch nor saved work.
-  A gitleaks run that exits 0 counts as clean only when it says it scanned at least one commit and logged no error
-  (gitleaks also exits 0 when its own `git log` fails); `dask submit` uses the same rule.
+  A gitleaks run that exits 0 counts as clean only with its `N commits scanned` summary and no error line (gitleaks also
+  exits 0 when its own `git log` fails); merges are scanned by their first-parent diff. `dask submit` uses the same rules.
 - It **never merges**, never pushes the default branch and never force-pushes.
 - **Review.** At most 2 passes per PR, and passes an earlier attempt left on the board count. Pass 1 reviews the whole
   change. If a finding blocks, the builder gets one fix pass and pass 2 re-checks only those findings and regressions

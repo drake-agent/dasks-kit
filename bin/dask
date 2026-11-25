@@ -430,14 +430,15 @@ def secret_scan(where, base):
     """gitleaks over the commits on this branch not on base. Required: without it nothing is pushed."""
     gl = next((p for p in [os.path.join(d, "gitleaks") for d in os.environ.get("PATH", "").split(":") if d] if os.access(p, os.X_OK)), None)
     if not gl: die("gitleaks is not installed, so nothing was pushed (the scan is required). Fix: brew install gitleaks")
-    try: r = subprocess.run([gl, "git", "--no-banner", "--redact", "--log-opts", "%s..HEAD" % base, where], capture_output=True, text=True, timeout=120)
+    try: r = subprocess.run([gl, "git", "--no-banner", "--redact", "--log-opts", "%s..HEAD --diff-merges=first-parent" % base, where], capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired: die("secret scan timed out; nothing pushed")
-    # An exit 0 counts only with a scan that read the commits: gitleaks also exits 0 when its own git log fails (an
-    # "ERR [git]" line and "0 commits scanned"), and then nothing was scanned. Same rule as src/lib/gitleaks-output.ts.
+    # An exit 0 counts only with its "N commits scanned" summary and no error line: gitleaks also exits 0 when its own git
+    # log fails (an "ERR [git]" line). 0 is fine (a delete-only commit). Same rule as src/lib/gitleaks-output.ts; merges
+    # are scanned by their first-parent diff.
     out = re.sub(r"\x1b\[[0-9;]*m", "", (r.stdout or "") + "\n" + (r.stderr or ""))
     n = re.search(r"(\d+) commits scanned", out)
-    clean = not re.search(r"(^|\s)(ERR|FTL)\s|\[git\]", out, re.M) and bool(n) and int(n.group(1)) > 0
-    if r.returncode != 0 or not clean: die("gitleaks found something (or failed) in the commits to push; nothing pushed. Run: gitleaks git --log-opts %s..HEAD ." % base)
+    clean = not re.search(r"(^|\s)(ERR|FTL)\s|\[git\]", out, re.M) and bool(n)
+    if r.returncode != 0 or not clean: die("gitleaks found something (or failed) in the commits to push; nothing pushed. Run: gitleaks git --log-opts \"%s..HEAD --diff-merges=first-parent\" ." % base)
 
 def cmd_submit(a, tool, summary, dry, handoff=None):
     cid = check_id(a[0])

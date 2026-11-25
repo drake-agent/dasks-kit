@@ -524,6 +524,7 @@ test('e2e success: Claude builds, Codex reviews (a repro blocks), one fix, a cle
     assert.equal(t.claimed_by, '', 'handed back: nobody holds the card');
     assert.match(t.body, /claim: #runner-[0-9a-f-]{36} closed \(runner: review/);
     assert.match(w.read('gitleaks.args'), /^git --no-banner --redact --log-opts/m, 'scanned before the push');
+    assert.match(w.read('gitleaks.args'), /--log-opts origin\/main\.\.dasks\/beta\.t-build --diff-merges=first-parent /, 'merges scanned by their first-parent diff');
     assert.doesNotMatch(w.read('claude.args'), /You are continuing/, 'no saved branch: a plain first run');
     const gh = w.read('gh.args');
     assert.match(gh, /^pr create --draft --base main --head dasks\/beta\.t-build --title beta\.t-build: Build me --body /m);
