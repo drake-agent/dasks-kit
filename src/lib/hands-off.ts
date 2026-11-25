@@ -27,7 +27,7 @@ export function handsOffOn(root: string): boolean {
 }
 
 /** Things only a person can do or decide: money, deleting data, a secret or credential, a physical device, a taste or UI
- *  pick. Matching fails toward asking: a word here keeps the ask with the person. */
+ *  pick. Matching is by words and errs toward asking: a word here keeps the ask with the person. */
 const PERSON_ONLY = new RegExp([
   '결제|billing|비용|요금|유료|구독|subscri|\\bpaid\\b|\\bpay(?:ment|ing)?\\b|money|price|\\$\\d',
   '삭제|지우|\\bdelet|\\bwipe|\\berase|\\bpurge',
@@ -57,7 +57,7 @@ export function handsOffMove(cur: Pick<Task, 'status'>, owner: string): Record<s
  *  person-only, the field changes that keep it off the person's list (undefined = drop that field from the write) and the
  *  note to add. null = let the write through as sent. `text`: everything else the write says (note, result, context
  *  block); a person-only word anywhere in it keeps the ask with the person. */
-export function handsOffWrite(cur: Task, fields: Record<string, unknown>, text: string, o: { actor: string; hasAsk: boolean; owner: string }): { fields: Record<string, string | undefined>; note: string } | null {
+export function handsOffWrite(cur: Task, fields: Record<string, unknown>, text: string, o: { actor: string; hasAsk: boolean; owner: string; statusKept?: boolean }): { fields: Record<string, string | undefined>; note: string } | null {
   if (o.actor === 'user' || o.hasAsk || !buildStage(cur)) return null;
   const standing = (cur.needs_user ?? '').trim();
   const asked = typeof fields.needs_user === 'string' ? fields.needs_user.trim() : '';
@@ -66,7 +66,8 @@ export function handsOffWrite(cur: Task, fields: Record<string, unknown>, text: 
   if (!fresh && !parks) return null;
   const said = [asked, text, standing].map((x) => x.trim()).filter(Boolean).join(' ');
   if (personOnly(said)) return null;
-  const out: Record<string, string | undefined> = handsOffMove(cur, o.owner);
+  // A write whose status was already kept (a stale job end) moves nothing: its new question is just not stored.
+  const out: Record<string, string | undefined> = o.statusKept ? { needs_user: undefined } : handsOffMove(cur, o.owner);
   if (parks && cur.status === 'review') out.status = undefined;
   return { fields: out, note: handsOffNote(cur, said) };
 }

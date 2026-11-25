@@ -146,10 +146,10 @@ While it is on:
   for the captain.
 - **Build-stage stops never wait on you.** For a card in doing or review, a machine's park, a new `needs_user`, a
   `POST /api/asks` conflict ask and a `needs-user` outcome are kept as a card note. A doing card goes back to its spec
-  stage (todo, lane `spec-rework`, its owner next), where the spec writer can still ask you. A run that hits `retry_cap`
+  stage (todo, lane `spec-rework`, its owner next), where the spec writer can still ask you. A run that hits `retry_cap` (on a review card: stays in review)
   goes there too instead of `failed-terminal`; its failed runs still count, so nobody claims it before a reset.
 - **What still reaches you:** anything at the spec stage (a card not yet in doing), your own writes, a taste pick
-  (`kind: taste`), and a question about money, deleting data, a secret or credential (a token, key, password or login), a physical device or a UI or design choice. A person who moves a quiet review card by hand needs no decision first.
+  (`kind: taste`), and a question about money, deleting data, a secret or credential (a token, key, password or login), a physical device or a UI or design choice. The match is by words and errs toward asking: a stray word (say "token" in an infra note) keeps the ask with you. A person who moves a quiet review card by hand needs no decision first.
 
 ### Where reviews come from
 

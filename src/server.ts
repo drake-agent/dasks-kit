@@ -664,11 +664,11 @@ function verifiedLedger(fresh = false): Decision[] | null {
 const statKey = (f: string) => { try { const s = fs.statSync(f); return `${s.mtimeMs}:${s.size}`; } catch { return 'none'; } };
 /** src/lib/park.ts: a machine's blocked-on-user write without a real decision goes back to the card's owner. Called under the repo
  *  lock; changes `fields` and returns the note to append (or the note unchanged). */
-function unparkWrite(id: string, fields: Record<string, unknown>, actor: string, note: string | undefined, text: string, opts: { context?: unknown; warnings?: string[] }, sweep = false): string | undefined {
+function unparkWrite(id: string, fields: Record<string, unknown>, actor: string, note: string | undefined, text: string, opts: { context?: unknown; warnings?: string[] }, sweep = false, statusKept = false): string | undefined {
   // Hands-off mode (src/lib/hands-off.ts): a build-stage card is not put on the person for anything but a person-only matter.
   const was = handsOffOn(ROOT) && actor !== 'user' ? readTask(ROOT, id) : null;
   const ctx = opts.context && typeof opts.context === 'object' ? Object.values(opts.context as Record<string, unknown>).filter((v) => typeof v === 'string').join(' ') : '';
-  const h = was ? handsOffWrite(was, fields, `${text} ${ctx}`, { actor, hasAsk: false, owner: cardOwner(was) }) : null;
+  const h = was ? handsOffWrite(was, fields, `${text} ${ctx}`, { actor, hasAsk: false, owner: cardOwner(was), statusKept }) : null;
   if (h) {
     for (const [k, v] of Object.entries(h.fields)) if (v === undefined) delete fields[k]; else fields[k] = v;
     if (fields.status !== 'review') opts.context = undefined;
@@ -1387,7 +1387,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
         const task = withRepoLock(ROOT, () => {
           const cur = readTask(ROOT, id);
           note = handsOffNote(cur, asked.wants);
-          return updateTask(ROOT, id, handsOffMove(cur, cardOwner(cur)), who, { appendNote: note, warnings: [] });
+          // A routed ask never clears a question the card already carries (it may be a person-only one).
+          const move: Record<string, string> = handsOffMove(cur, cardOwner(cur));
+          if ((cur.needs_user ?? '').trim()) delete move.needs_user;
+          return updateTask(ROOT, id, move, who, { appendNote: note, warnings: [] });
         });
         reloadAfterWrite();
         return send(res, 200, { routed: 'note', note, task: publicTask(task) });
@@ -1493,6 +1496,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
       // job_end (a runner's finish): the run's outcome is the one status change of a job end. If it is already
       // recorded the close keeps the status; otherwise this write moves the card and leaves a marker so a late outcome
       // for the same run does not move it again.
+      let statusKept = false; // a job_end close whose status is kept: hands-off must not move the card either
       const t = withRepoLock(ROOT, () => {
         if (job_end !== undefined) {
           const cur = readTask(ROOT, id);
@@ -1500,7 +1504,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
             const marker = jobEndRel(id, cur.run_id!, Number(cur.attempt));
             if (runOutcome(ROOT, cur) || fs.existsSync(path.join(ROOT, marker))) {
               // The run's job end already moved the card (its outcome, or an earlier close): a replayed close keeps the status.
-              delete fields.status; opts.context = undefined;
+              delete fields.status; opts.context = undefined; statusKept = true;
               opts.warnings!.push('status kept: this run\'s outcome or an earlier close already moved the card');
             } else if (fields.status !== undefined && fields.status !== cur.status) {
               opts.extraFiles = [{ rel: marker, content: JSON.stringify({ id, run_id: cur.run_id, attempt: Number(cur.attempt), from: cur.status, to: fields.status, actor }) + '\n' }];
@@ -1508,11 +1512,11 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
           } else {
             // An older run's close (or one for a card with no run): it must not move the current run's card. The note,
             // result and PR still land; the status and its context block do not.
-            delete fields.status; opts.context = undefined;
+            delete fields.status; opts.context = undefined; statusKept = true;
             opts.warnings!.push('status kept: job_end is for an older run');
           }
         }
-        const appendNote = unparkWrite(id, fields, actor, note, `${String(fields.needs_user ?? '')} ${note ?? ''}`, opts, sweep);
+        const appendNote = unparkWrite(id, fields, actor, note, `${String(fields.needs_user ?? '')} ${note ?? ''}`, opts, sweep, statusKept);
         askRuleWrite(id, fields, actor, opts);
         return updateTask(ROOT, id, fields, actor, { ...opts, ifStatus: if_status, body: newBody, appendNote, appendBlock: append_block, housekeeping: bool(housekeeping), reopen: bool(reopen), push, ...(actor === 'user' ? { statusGate: needsReceipt } : {}) });
       });

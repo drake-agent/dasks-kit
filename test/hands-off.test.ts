@@ -174,3 +174,25 @@ test('dasks hands-off runs from an install path with a space in it (review R8)',
     assert.equal(JSON.parse(fs.readFileSync(path.join(data, 'config.json'), 'utf8')).hands_off.enabled, true);
   } finally { fs.rmSync(d, { recursive: true, force: true }); }
 });
+
+test('a routed ask keeps the card\'s question; a stale job end is not moved by hands-off (review R9, R10)', async () => {
+  const b = await board([['beta.t-k1', 'review'], ['beta.t-k2', 'todo']]);
+  try {
+    b.set(true);
+    // R9: a person-only question already on a review card survives a conflict ask that is kept as a note.
+    const money = 'Pay for the larger CI plan? If approved, the build runs there.';
+    assert.equal((await b.s.post('/api/tasks/beta.t-k1', { needs_user: money }, 'job-runner')).status, 200);
+    const r = await b.s.post('/api/asks/beta.t-k1', CONFLICT, 'job-runner');
+    assert.equal(r.status, 200); assert.equal((await r.json()).routed, 'note');
+    const k1 = (((await (await fetch(`${b.s.url}/api/board`)).json()).tasks) as any[]).find((t) => t.id === 'beta.t-k1');
+    assert.equal(k1.needs_user, money); assert.ok(k1.decision_request, 'it still asks the person');
+    // R10: a close for an older run keeps the status, and hands-off does not move the current run either.
+    const run = await (await b.s.post('/api/tasks/beta.t-k2', { status: 'doing', lane: 'none', note: 'claim: #job-a open (beta, codex)' }, 'beta-lead')).json();
+    assert.ok(run.run_id);
+    const stale = await b.s.post('/api/tasks/beta.t-k2', { job_end: 'some-older-run', status: 'blocked-on-user', needs_user: 'Merge this PR? If approved, it merges.', what: 'w', why: 'y', do: 'd', rec: 'r', after: 'a' }, 'job-runner');
+    assert.equal(stale.status, 200, await stale.clone().text());
+    assert.match(stale.headers.get('x-dasks-warning') ?? '', /status%20kept/);
+    const k2 = await b.get('beta.t-k2');
+    assert.deepEqual([k2.status, k2.lane, k2.claimed_by, k2.needs_user ?? ''], ['doing', 'none', run.claimed_by, '']);
+  } finally { await b.stop(); }
+});
