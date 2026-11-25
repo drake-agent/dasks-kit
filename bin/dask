@@ -432,7 +432,12 @@ def secret_scan(where, base):
     if not gl: die("gitleaks is not installed, so nothing was pushed (the scan is required). Fix: brew install gitleaks")
     try: r = subprocess.run([gl, "git", "--no-banner", "--redact", "--log-opts", "%s..HEAD" % base, where], capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired: die("secret scan timed out; nothing pushed")
-    if r.returncode != 0: die("gitleaks found something (or failed) in the commits to push; nothing pushed. Run: gitleaks git --log-opts %s..HEAD ." % base)
+    # An exit 0 counts only with a scan that read the commits: gitleaks also exits 0 when its own git log fails (an
+    # "ERR [git]" line and "0 commits scanned"), and then nothing was scanned. Same rule as src/lib/gitleaks-output.ts.
+    out = re.sub(r"\x1b\[[0-9;]*m", "", (r.stdout or "") + "\n" + (r.stderr or ""))
+    n = re.search(r"(\d+) commits scanned", out)
+    clean = not re.search(r"(^|\s)(ERR|FTL)\s|\[git\]", out, re.M) and bool(n) and int(n.group(1)) > 0
+    if r.returncode != 0 or not clean: die("gitleaks found something (or failed) in the commits to push; nothing pushed. Run: gitleaks git --log-opts %s..HEAD ." % base)
 
 def cmd_submit(a, tool, summary, dry, handoff=None):
     cid = check_id(a[0])

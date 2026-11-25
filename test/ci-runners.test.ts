@@ -86,6 +86,8 @@ esac
 `);
   exe(path.join(d.bin, 'ssh'), `#!/bin/bash
 printf '%s\\n' "$*" >> "$FAKE_STATE/ssh.args"
+# FAKE_SSH_HANG: the host never answers
+[ -n "$FAKE_SSH_HANG" ] && exec sleep 600
 while [ $# -gt 0 ]; do case $1 in -o) shift 2 ;; -*) shift ;; *) break ;; esac; done
 shift
 export HOME="$FAKE_REMOTE_HOME"
@@ -146,7 +148,18 @@ test('plan over ssh reads the host, not this Mac', () => {
     assert.equal(r.status, 0, r.out);
     assert.match(r.out, /host mac2: 10 cores, 32 GB RAM/);
     assert.match(r.out, /jobs at once: 5/);
-    assert.match(s.read('ssh.args'), /^-o BatchMode=yes mac2 /m);
+    assert.match(s.read('ssh.args'), /^-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 mac2 /m);
+  } finally { s.cleanup(); }
+});
+
+test('a host that never answers ends the call at DASKS_CI_REMOTE_SEC instead of holding the command', () => {
+  const s = setup();
+  try {
+    const t0 = Date.now();
+    const r = s.runEnv({ FAKE_SSH_HANG: '1', DASKS_CI_REMOTE_SEC: '1' }, 'plan', '--host', 'mac2');
+    assert.notEqual(r.status, 0, r.out);
+    assert.match(r.out, /ssh to mac2 timed out after 1 s \(DASKS_CI_REMOTE_SEC\)/);
+    assert.ok(Date.now() - t0 < 30_000, 'ended at the limit');
   } finally { s.cleanup(); }
 });
 

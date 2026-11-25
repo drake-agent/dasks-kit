@@ -29,7 +29,8 @@ function world() {
     return g(cwd, 'rev-parse', 'HEAD');
   };
   const input = (over: Partial<SaveInput> = {}): SaveInput => ({ repo, dir, branch: BRANCH, base: BASE, card: CARD, machine: 'box', reason: 'timeout: card timeout', gitleaks: path.join(tmp, 'gitleaks'), ...over });
-  fs.writeFileSync(path.join(tmp, 'gitleaks'), '#!/bin/bash\nexit 0\n', { mode: 0o755 });
+  // Like the real one, a clean run says how many commits it read (an exit 0 without it is not a clean scan).
+  fs.writeFileSync(path.join(tmp, 'gitleaks'), '#!/bin/bash\necho "INF 1 commits scanned." >&2\nexit 0\n', { mode: 0o755 });
   // the card worktree, as the run sets it up
   const worktree = () => g(repo, 'worktree', 'add', '-q', '-b', BRANCH, dir, BASE);
   const onOrigin = () => { const r = spawnSync('git', ['rev-parse', '-q', '--verify', `refs/heads/${BRANCH}`], { cwd: bare, encoding: 'utf8' }); return r.status === 0 ? r.stdout.trim() : ''; };
@@ -130,6 +131,22 @@ test('saveWork: staged, changed and new paths all go in; a second run names the 
     assert.ok(fs.existsSync(path.join(w.dir, 'new.txt')));
     assert.match(await saveWork(w.input()), new RegExp(`^Work saved: branch ${BRANCH} on origin @ ${tip.slice(0, 7)}\\.`));
     assert.equal(w.onOrigin(), tip);
+  } finally { w.done(); }
+});
+
+test('saveWork: a gitleaks exit 0 that scanned nothing (its git log failed) is not clean: nothing is pushed', async () => {
+  const w = world();
+  try {
+    w.worktree();
+    fs.writeFileSync(path.join(w.dir, 'new.txt'), 'n');
+    const noscan = path.join(w.tmp, 'gitleaks-noscan');
+    fs.writeFileSync(noscan, '#!/bin/bash\necho "ERR [git] fatal: bad revision" >&2\necho "INF 0 commits scanned." >&2\nexit 0\n', { mode: 0o755 });
+    assert.match(await saveWork(w.input({ gitleaks: noscan })), /^Work not pushed: gitleaks flagged the new commits \(or failed\)/);
+    assert.equal(w.onOrigin(), '', 'nothing left this Mac');
+    const silent = path.join(w.tmp, 'gitleaks-silent');
+    fs.writeFileSync(silent, '#!/bin/bash\nexit 0\n', { mode: 0o755 });
+    assert.match(await saveWork(w.input({ gitleaks: silent })), /^Work not pushed: gitleaks flagged/, 'no scan count at all is no scan either');
+    assert.equal(w.onOrigin(), '');
   } finally { w.done(); }
 });
 

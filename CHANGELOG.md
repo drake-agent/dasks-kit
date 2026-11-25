@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Secret scan: a gitleaks run that exits 0 is clean only when it says it scanned at least one commit and logged no error.
+  gitleaks also exits 0 when its own `git log` fails (an `ERR [git]` line, `0 commits scanned`), for example for a base
+  the clone does not have; the runner then pushed a branch nothing had scanned. Now the runner's push, its saved-work
+  push and `dask submit` refuse to push in that case. See docs/runner.md.
+- `dasks ci`: every ssh call to another Mac sends keepalives and ends after `DASKS_CI_REMOTE_SEC` seconds (default 900),
+  so a host that hangs fails that step instead of holding the command for hours. See docs/ci-runners.md.
+
 ## 1.1.1 — 2026-11-16
 
 - Rethink cards: while a rethink card is open (not done, not cancelled), the card it replaces no longer asks you for a

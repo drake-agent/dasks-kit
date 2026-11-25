@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { scannedClean } from './gitleaks-output.ts';
 import {
   agentCommand, agentText, attemptVerdict, continuePrompt, countStart, fixPrompt, prBody, RATE_LIMITED, readCodeReview, recheckPrompt, resumeLine, resultLine, reviewPrompt, runnerRules, withFollowUps,
   type HistoryRow, type Picked, type RunnerConfig, type RunnerState, type RunRecord, type Tool,
@@ -453,7 +454,8 @@ export async function runCard(env: FlowEnv, p: Picked, cfg: RunnerConfig, title:
   const gl = env.which('gitleaks');
   if (!gl) { await settle(env, card, r, 'gitleaks is not installed (brew install gitleaks); nothing was pushed', false); return; }
   const scan = spawnSync(gl, ['git', '--no-banner', '--redact', '--log-opts', `${r.base}..${branch}`, dir], { encoding: 'utf8', timeout: 180_000 });
-  if (scan.status !== 0) { await settle(env, card, r, 'gitleaks flagged the new commits (or failed); nothing was pushed', true); return; }
+  // An exit 0 counts only with a scan that read the commits (scannedClean): gitleaks also exits 0 when its git log fails.
+  if (scan.status !== 0 || !scannedClean(`${scan.stdout ?? ''}\n${scan.stderr ?? ''}`)) { await settle(env, card, r, 'gitleaks flagged the new commits (or failed); nothing was pushed', true); return; }
   let pr = '';
   try {
     git(dir, 'push', '-u', 'origin', `refs/heads/${branch}:refs/heads/${branch}`);
