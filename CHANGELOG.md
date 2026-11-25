@@ -5,13 +5,14 @@
 - `GET /api/start` marks messages read only after the reply was sent in full, so a reply that fails on the way (a reset,
   a closed connection) leaves them unread. `HEAD` never marks them read, and under auth `enforce` only a caller whose
   token proves the actor name moves its read cursor; anyone else still gets the text, as a peek.
-- Read cursors of names that differ only in case (`Spec@box`, `spec@box`) keep separate files on a case-insensitive
+- Read cursors of names that differ only in case (`Spec@host1`, `spec@host1`) keep separate files on a case-insensitive
   disk. An all-lower-case name keeps the file it had.
 - Every secret compare goes through one helper that checks the length first, so a client-sent value of another byte
   length is a refusal, never a 500.
 - `GET /api/board`: one reply (and one gzip, made off the main thread) per data version is reused for 3 seconds, so a
   burst of reloads from open pages no longer stringifies and compresses the whole board again for each tab and stalls
-  the board. A write moves the version, so it shows at once; `now` and `stuck` may be up to 3 seconds old.
+  the board. A write moves the version, so it shows at once, also
+  in a gzip reply whose compression was still running when the write finished (it is rebuilt, never sent older); `now` and `stuck` may be up to 3 seconds old.
 - Tests: tearing down a test server that was already killed by a signal returns at once instead of hanging until the
   test timeout.
 

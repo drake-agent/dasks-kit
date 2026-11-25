@@ -109,6 +109,10 @@ let boardCache: { key: string; body: Record<string, any> } | null = null;
 /** How long one built /api/board reply (JSON and gzip) is served again for the same key. */
 const BOARD_REPLY_MS = 3000;
 const gzipAsync = promisify(gzip);
+/** The /api/board gzip. DASKS_TEST_BOARD_GZIP_DELAY_MS (tests only) holds it that long, so a write can land meanwhile. */
+const BOARD_GZIP_DELAY_MS = Number(process.env.DASKS_TEST_BOARD_GZIP_DELAY_MS ?? 0) || 0;
+const boardGzip = (json: string): Promise<Buffer> => BOARD_GZIP_DELAY_MS > 0
+  ? new Promise((r) => setTimeout(r, BOARD_GZIP_DELAY_MS)).then(() => gzipAsync(json)) : gzipAsync(json);
 let boardReply: { key: string; at: number; json: string; gz: Promise<Buffer> | null } | null = null;
 let digestCache: { key: string; text: string } | null = null;
 const headOf = () => { try { return git(ROOT, ['rev-parse', 'HEAD']).trim(); } catch { return ''; } };
@@ -1012,36 +1016,44 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
     if (p === '/api/merge-ok') return mergeOkRead(res, url);
     if (p === '/api/board') {
       // check() and the roll-up only change with the data (or the date, for "late"): computed once per version and day,
-      // and with the config that decides which lanes are valid.
-      const key = `${version}|${localDate(new Date())}|${lanesKey()}`;
-      if (boardCache?.key !== key) {
-        const r = check(board);
-        boardCache = { key, body: {
-          version, northstar: board.northstar, goals: board.goals,
-          // done_at: the move to done (activity), for "done in 24h"; `updated` moves with any note. Only recent cards are read.
-          tasks: board.tasks.map((t) => { const o = publicTask(t); if (t.status !== 'done' || !(Date.now() - Date.parse(t.updated) < 7 * 86_400_000)) return o; const ms = lastDone(t.id); return ms === null ? o : { ...o, done_at: new Date(ms).toISOString() }; }),
-          links: board.links, rollup: rollup(board),
-          check: { errors: r.errors.length, warnings: r.warnings.length, issues: [...r.errors, ...r.warnings].slice(0, 20) },
-          lanes: laneList(),
-        } };
-      }
-      // Every open page refetches the board on each change event. The whole reply (and its gzip) is built once per key and
-      // reused for BOARD_REPLY_MS, so a burst of reloads does not stringify and compress it again per tab on the main
-      // thread; a write moves `version`, so the next request builds a new one at once. `now` and `stuck` may be that old.
-      const t0 = Date.now();
-      if (boardReply?.key !== key || t0 - boardReply.at >= BOARD_REPLY_MS) {
-        const { version: v0, ...rest } = boardCache.body;
-        const now = new Date(t0);
-        boardReply = { key, at: t0, json: JSON.stringify({ version: v0, now: now.toISOString(), ...rest, projects: cfg.projects, stuck: stuckReport(board, now, cfg.stuck, replaced) }), gz: null };
-      }
-      const reply = boardReply;
+      // and with the config that decides which lanes are valid. Every open page refetches the board on each change event:
+      // the whole reply (and its gzip) is built once per key and reused for BOARD_REPLY_MS, so a burst of reloads does not
+      // stringify and compress it again per tab on the main thread. `now` and `stuck` may be that old.
+      const build = () => {
+        const key = `${version}|${localDate(new Date())}|${lanesKey()}`;
+        if (boardCache?.key !== key) {
+          const r = check(board);
+          boardCache = { key, body: {
+            version, northstar: board.northstar, goals: board.goals,
+            // done_at: the move to done (activity), for "done in 24h"; `updated` moves with any note. Only recent cards are read.
+            tasks: board.tasks.map((t) => { const o = publicTask(t); if (t.status !== 'done' || !(Date.now() - Date.parse(t.updated) < 7 * 86_400_000)) return o; const ms = lastDone(t.id); return ms === null ? o : { ...o, done_at: new Date(ms).toISOString() }; }),
+            links: board.links, rollup: rollup(board),
+            check: { errors: r.errors.length, warnings: r.warnings.length, issues: [...r.errors, ...r.warnings].slice(0, 20) },
+            lanes: laneList(),
+          } };
+        }
+        const t0 = Date.now();
+        if (boardReply?.key !== key || t0 - boardReply.at >= BOARD_REPLY_MS) {
+          const { version: v0, ...rest } = boardCache.body;
+          const now = new Date(t0);
+          boardReply = { key, at: t0, json: JSON.stringify({ version: v0, now: now.toISOString(), ...rest, projects: cfg.projects, stuck: stuckReport(board, now, cfg.stuck, replaced) }), gz: null };
+        }
+        return boardReply;
+      };
+      let reply = build();
       // gzip once per reply, off the main thread, for clients that accept it (browsers, fetch); the same accept rule as send().
       if (acceptsGzip(req.headers['accept-encoding'])) {
         const head = { 'Content-Type': 'application/json; charset=utf-8', 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding', 'Cache-Control': 'no-store', ...SECURITY_HEADERS };
         if (req.method === 'HEAD') { res.writeHead(200, head); return res.end(); }
-        const body = await (reply.gz ??= gzipAsync(reply.json).catch((e) => { reply.gz = null; throw e; }));
-        res.writeHead(200, head);
-        return res.end(body);
+        for (let tries = 0; ; tries++) {
+          const r0 = reply;
+          const body = await (r0.gz ??= boardGzip(r0.json).catch((e) => { r0.gz = null; throw e; }));
+          // A write that finished while the gzip ran moved the version: a reply is never older than it. Send the reply
+          // built now (its own gzip, or plain after two tries).
+          reply = build();
+          if (reply === r0) { res.writeHead(200, head); return res.end(body); }
+          if (tries >= 2) return send(res, 200, reply.json);
+        }
       }
       return send(res, 200, reply.json);
     }

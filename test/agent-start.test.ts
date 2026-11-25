@@ -151,9 +151,9 @@ function mcpCall(url: string, actor: string, name: string, args: any): Promise<{
 
 test('read cursor files: names that differ only in case keep their own file; a lower-case name keeps its old file', () => {
   const root = '/r';
-  assert.equal(cursorFile(root, 'spec@box'), path.join(root, 'run', 'start-cursors', 'spec@box.json'));
-  assert.equal(cursorFile(root, 'Spec@box'), path.join(root, 'run', 'start-cursors', '+spec@box.json'));
-  assert.notEqual(cursorFile(root, 'Spec@box').toLowerCase(), cursorFile(root, 'spec@box').toLowerCase(), 'distinct on a case-insensitive disk');
+  assert.equal(cursorFile(root, 'spec@host1'), path.join(root, 'run', 'start-cursors', 'spec@host1.json'));
+  assert.equal(cursorFile(root, 'Spec@host1'), path.join(root, 'run', 'start-cursors', '+spec@host1.json'));
+  assert.notEqual(cursorFile(root, 'Spec@host1').toLowerCase(), cursorFile(root, 'spec@host1').toLowerCase(), 'distinct on a case-insensitive disk');
   assert.equal(cursorFile(root, 'human-claude@laptop'), cursorFile(root, 'claude-code@laptop'), 'a session pair still shares one');
 });
 
