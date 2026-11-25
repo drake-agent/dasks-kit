@@ -6,7 +6,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { tempRepo } from './helpers.ts';
 import { serve } from './state-support.ts';
-import { createTask, HttpError, type CreateOpts } from '../src/lib/write.ts';
+import { createTask, HttpError, updateTask, type CreateOpts } from '../src/lib/write.ts';
 
 const BODY = '## Context\nretry me';
 const base = (over: Record<string, unknown> = {}) => ({ goal: 'beta', milestone: 'beta.m1', title: 'Arc', body: BODY, ...over });
@@ -131,5 +131,18 @@ test('a trailing newline in the body does not stop a replay', () => {
     const b = createTask(root, base(), 'beta-lead', at(30_000), o);
     assert.equal(b.id, a.id);
     assert.equal(o.replayed, true);
+  } finally { cleanup(); }
+});
+
+test('a finished card is not a replay target: filing the same create again after a cancel makes a new card', () => {
+  const { root, cleanup } = tempRepo([]);
+  try {
+    const a = createTask(root, base(), 'beta-lead', NOW, {});
+    updateTask(root, a.id, { status: 'cancelled' }, 'beta-lead', {});
+    const o: CreateOpts = {};
+    const b = createTask(root, base(), 'beta-lead', at(30_000), o);
+    assert.equal(b.id, 'beta.t-arc-2', 'a new card, not the cancelled one');
+    assert.equal(b.status, 'todo');
+    assert.ok(!o.replayed);
   } finally { cleanup(); }
 });

@@ -15,8 +15,10 @@ export const IDEA_STATUSES = ['open', 'promoted', 'dropped'] as const;
 export type IdeaStatus = typeof IDEA_STATUSES[number];
 export const IDEA_ID_RE = /^([a-z][a-z0-9]{0,23})\.(i-[a-z0-9]+(?:-[a-z0-9]+)*)$/;
 export const MAX_IDEAS = 300;
-export const MAX_IDEAS_BYTES = 128 * 1024;
 const LIMITS = { title: 120, title_ko: 120, title_en: 120, note: 600, note_ko: 600, note_en: 600, source: 300 } as const;
+// Every text field at its limit in 3-byte characters (Korean, for one) is about 7.4 KB plus the other fields: 8 KB per idea
+// keeps MAX_IDEAS the limit that binds (a fixed 128 KB held only about 100 long ideas).
+export const MAX_IDEAS_BYTES = MAX_IDEAS * 8 * 1024;
 /** Fields an agent may set when adding an idea, and may change later. */
 export const IDEA_TEXT = Object.keys(LIMITS) as (keyof typeof LIMITS)[];
 

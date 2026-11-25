@@ -247,3 +247,25 @@ test('closed card: run-less outcome-or-fail returns the current run\'s stored re
     const got = await oof.json(); assert.equal(got.status, 'done'); assert.equal(Number(got.attempt), 2); assert.equal(head(root), before);
   } finally { await s.stop(); cleanup(); }
 });
+
+// A build stops to send its question back to the card's owner and its run is closed as failed first; the needs-spec
+// outcome arrives later (or is replayed). Whatever the end order, the card goes to spec-rework with the question kept.
+test('job_end failed first: a late needs-spec outcome still sends the card to spec-rework, also when replayed', async () => {
+  const { root, cleanup } = tempRepo([task()]); const s = await serve(root);
+  const Q = 'the spec must say which of the two stores is kept';
+  try {
+    const run = await claimRun(s);
+    const fin = await s.post(card, { status: 'todo', result: 'run/job.log', note: 'claim: #job-a closed (failed)', job_end: run.run_id }, 'job-runner');
+    assert.equal(fin.status, 200, await fin.clone().text()); assert.equal((await fin.json()).status, 'todo');
+    const late = { state: 'needs-spec', note: Q, evidence: ['run/job.log'], run_id: run.run_id };
+    const r = await s.post(card + '/outcome', late); assert.equal(r.status, 200, await r.clone().text());
+    let t = await (await fetch(s.url + card)).json();
+    assert.deepEqual([t.status, t.lane, t.needs_user ?? ''], ['todo', 'spec-rework', '']);
+    assert.ok(String(t.body).includes(Q), 'the question is kept in the note');
+    // the same outcome again: one outcome, same card, no new commit
+    const before = head(root);
+    assert.equal((await s.post(card + '/outcome', late)).status, 200);
+    t = await (await fetch(s.url + card)).json();
+    assert.deepEqual([t.status, t.lane, t.outcomes.length], ['todo', 'spec-rework', 1]); assert.equal(head(root), before);
+  } finally { await s.stop(); cleanup(); }
+});

@@ -200,7 +200,11 @@ export function recordOutcome(root: string, id: string, body: Record<string, unk
     // are not applied as a move here either (done -> blocked-on-user is not a legal move); the failed run still counts,
     // so the next claim is refused at the cap (assertRetryAllowed).
     // A closed card keeps its status the same way (terminal), with no route, ask or cap at all.
-    const ended = !!terminal || !!cur.run_id && fs.existsSync(path.join(root, jobEndRel(id, runId, attempt)));
+    // Except a late needs-spec (a build that stopped to send its question back to the card's owner): when the run's job end
+    // closed it first (as failed), or the outcome is replayed later, the card that run left in todo (unclaimed, not yet in
+    // spec-rework) still goes to spec-rework for its owner, with the question kept.
+    const lateSpec = !terminal && state === 'needs-spec' && cur.status === 'todo' && !cur.claimed_by && cur.lane !== 'spec-rework';
+    const ended = !!terminal || !lateSpec && !!cur.run_id && fs.existsSync(path.join(root, jobEndRel(id, runId, attempt)));
     // Either limit caps the card, whichever this run reports: dispatch (assertRetryAllowed) checks both, so a card is
     // never sent back to todo while it can no longer be claimed (e.g. retry_cap lowered between runs).
     const capByQuota = causedCount >= cfg.quota_retry_cap;
