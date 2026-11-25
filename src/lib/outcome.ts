@@ -24,7 +24,7 @@ export interface OutcomeInput { state: OutcomeKind; note: string; evidence: stri
 /** as_state / as_cause: what the board did with a needs-user outcome that carried no real decision (src/lib/park.ts). The
  *  record keeps the job's own state, so a replay of the same outcome still matches it. */
 /** status_kept: the card was done/cancelled when this outcome landed; it was recorded but moved nothing (no route, no ask). */
-export interface OutcomeRecord extends OutcomeInput { id: string; job: string; at: string; actor: string; version: number; route?: Route; reset_epoch?: number; response?: Task; as_state?: OutcomeKind; as_cause?: OutcomeCause; status_kept?: 'done' | 'cancelled' }
+export interface OutcomeRecord extends OutcomeInput { id: string; job: string; at: string; actor: string; version: number; route?: Route; reset_epoch?: number; response?: Task; as_state?: OutcomeKind; as_cause?: OutcomeCause; status_kept?: 'done' | 'cancelled'; fallback?: true }
 interface Route { kind: 'reviewer' | 'fix' | 'retry' | 'failed-terminal' | 'needs-user' | 'spec-rework'; job: string; next_owner: string; at: string }
 
 // `Decision:` and `Learned:` lines from a job's RESULT.md. Short single lines, capped, and never anything shaped like a
@@ -132,8 +132,9 @@ function jobEndMark(root: string, id: string, runId: string, attempt: number): {
   if (!fs.existsSync(f)) return null;
   try { const j = JSON.parse(fs.readFileSync(f, 'utf8')); return { to: typeof j?.to === 'string' ? j.to : undefined }; } catch { return {}; }
 }
-/** The record outcome-or-fail writes for a job that ended without a result (src/lib/bodies.ts parseOutcomeOrFail). */
-const isFallback = (o: OutcomeRecord) => o.state === 'failed' && o.note === 'ended without a result' && !o.as_state;
+/** The record outcome-or-fail wrote for a job that ended without a result: only it carries `fallback: true`. An outcome an
+ *  agent posted itself, whatever its text, is never replaced. */
+const isFallback = (o: OutcomeRecord) => o.fallback === true;
 export function runOutcome(root: string, t: Task): OutcomeRecord | undefined {
   return t.run_id ? taskOutcomes(root, t.id).find((o) => o.run_id === t.run_id && o.attempt === Number(t.attempt)) : undefined;
 }
@@ -258,7 +259,7 @@ export function recordOutcome(root: string, id: string, body: Record<string, unk
     const context = asked ? asked.context : ['review', 'blocked-on-user'].includes(status) ? { what: fill('what'), why: fill('why'), do: fill('do'), rec: fill('rec'), after: fill('after') } : undefined;
     const as = state !== input.state || cause !== input.cause ? { as_state: state, ...(cause ? { as_cause: cause } : {}) } : {};
     const next = updateTask(root, id, patch, actor, { ...opts, context, body: input.handoff !== undefined ? withHandoff(cur.body, input.handoff) : undefined, action: 'outcome', outcome: state, appendNote: asked ? `${asked.note} · ${note}` : note,
-      extraFiles: (response) => [...(asked ? [asked.file] : []), { rel, content: JSON.stringify({ ...input, job, id, run_id: runId, attempt, reset_epoch: epoch, actor, at, version: Number(response.version), ...(route ? { route } : {}), ...as, ...(terminal ? { status_kept: terminal } : {}), response } satisfies OutcomeRecord) + '\n' }] });
+      extraFiles: (response) => [...(asked ? [asked.file] : []), { rel, content: JSON.stringify({ ...input, job, id, run_id: runId, attempt, reset_epoch: epoch, actor, at, version: Number(response.version), ...(route ? { route } : {}), ...as, ...(terminal ? { status_kept: terminal } : {}), ...(missingOnly ? { fallback: true as const } : {}), response } satisfies OutcomeRecord) + '\n' }] });
     if (input.state === 'needs-user') {
       try { decisionsToday(root, at.slice(0, 10)); } catch { /* GET rebuilds the projection from the committed ledger */ }
     }

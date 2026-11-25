@@ -304,3 +304,18 @@ test('a late needs-spec outcome leaves a card alone that its owner moved after t
     assert.deepEqual([t.status, t.lane], ['todo', 'none'], "the owner's lane is kept");
   } finally { await s.stop(); cleanup(); }
 });
+
+test('a failed outcome an agent posted itself is never replaced by a later needs-spec, whatever its note', async () => {
+  const { root, cleanup } = tempRepo([task()]); const s = await serve(root);
+  try {
+    const run = await claimRun(s);
+    assert.equal((await s.post(card, { status: 'todo', result: 'run/job.log', note: 'claim: #job-a closed (failed)', job_end: run.run_id }, 'job-runner')).status, 200);
+    const own = await s.post(card + '/outcome', { state: 'failed', note: 'ended without a result', evidence: ['run/job.log'], decisions: ['Keep the existing store'], run_id: run.run_id });
+    assert.equal(own.status, 200, await own.clone().text());
+    const late = await s.post(card + '/outcome', { state: 'needs-spec', note: 'Which store should be kept?', evidence: ['run/job.log'], run_id: run.run_id });
+    assert.equal(late.status, 409, await late.clone().text());
+    const t = await (await fetch(s.url + card)).json();
+    assert.equal(t.outcomes.length, 1);
+    assert.deepEqual(t.outcomes[0].decisions, ['Keep the existing store'], 'the decision is kept');
+  } finally { await s.stop(); cleanup(); }
+});
