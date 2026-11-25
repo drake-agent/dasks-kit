@@ -3,9 +3,10 @@
 //   dasks-digest --since <iso>   print changes since a time (no write), same text as GET /api/digest
 import { boardRoot, loadConfig } from '../lib/config.ts';
 import { digestText, runDigest } from '../lib/digest.ts';
+import { openBoardStore } from '../lib/board-store-open.ts';
 
 const root = boardRoot();
-loadConfig(root); // the project list (config.json) is part of what check() checks
+openBoardStore(root, loadConfig(root), true); // config.json: the project list; sqlite mode reads and writes the store
 const i = process.argv.indexOf('--since');
 if (i >= 0) {
   const since = process.argv[i + 1];

@@ -3,7 +3,6 @@
 //   data/specs/<goal>/<slug>/versions/<n>.md    the exact text of version n (authoritative)
 //   data/specs/<goal>/<slug>/versions/<n>.json  {version, by, at, note, sha256, section_authors, warnings}
 // A write commits all three under the repo lock, so a refusal or a failed commit leaves nothing behind.
-import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { HttpError, commitFiles, isoLocal, readTask, updateTask, withRepoLock } from './write.ts';
@@ -13,6 +12,7 @@ import { checkCard } from './contract.ts';
 import { loadConfig } from './config.ts';
 import { touchesErrors, touchesValue } from './touches.ts';
 import { doneLineCheck } from './done-line.ts';
+import * as boardFiles from './board-files.ts';
 
 export const SPEC_MAX_BYTES = 262_144;      // decoded spec text, UTF-8
 export const SPEC_MAX_BODY = 2_097_152;     // raw JSON body of PUT /spec (a spec at the cap written as \uXXXX is ~1.5 MiB)
@@ -45,7 +45,7 @@ export function specPaths(id: string) {
 /** The highest stored version (0 = no spec yet). */
 export function currentSpecVersion(root: string, id: string): number {
   let names: string[] = [];
-  try { names = fs.readdirSync(path.join(root, specPaths(id).versions)); } catch { return 0; }
+  try { names = boardFiles.readdirSync(path.join(root, specPaths(id).versions)); } catch { return 0; }
   return names.reduce((n, f) => { const m = /^([1-9]\d{0,8})\.json$/.exec(f); return m ? Math.max(n, Number(m[1])) : n; }, 0);
 }
 
@@ -68,8 +68,8 @@ export function readSpecUnlocked(root: string, id: string, version?: number): Sp
   if (n > cur) throw new HttpError(404, `${id} has no spec version ${n}`, { current_spec_version: cur });
   const p = specPaths(id);
   try {
-    const rec = JSON.parse(fs.readFileSync(path.join(root, p.meta(n)), 'utf8')) as VersionRecord;
-    return view(fs.readFileSync(path.join(root, p.text(n)), 'utf8'), rec);
+    const rec = JSON.parse(boardFiles.readFileSync(path.join(root, p.meta(n)), 'utf8')) as VersionRecord;
+    return view(boardFiles.readFileSync(path.join(root, p.text(n)), 'utf8'), rec);
   } catch (e: any) {
     if (e.code === 'ENOENT') throw new HttpError(404, `${id} has no spec version ${n}`, { current_spec_version: cur });
     throw e;
@@ -186,7 +186,7 @@ export function prepareSpecWrite(root: string, id: string, put: SpecPut, actor: 
     throw new HttpError(409, `spec of ${id} is at version ${cur}, not ${put.expected}: re-read it (GET /api/tasks/${id}/spec) and retry`, { current_spec_version: cur });
   const text = put.text;
   const verdict = checkCard(text, loadConfig(root).families);
-  const prevText = cur ? fs.readFileSync(path.join(root, p.text(cur)), 'utf8') : undefined;
+  const prevText = cur ? boardFiles.readFileSync(path.join(root, p.text(cur)), 'utf8') : undefined;
   // The pair rule judges a new spec, or a write that changes the impl / review lines: a stored pair this write leaves as
   // it is (an older spec's model names, say) is a warning, so a body edit or the user's auto-ok answer still goes through.
   if (prevText !== undefined && samePair(prevText, text)) {
@@ -204,7 +204,7 @@ export function prepareSpecWrite(root: string, id: string, put: SpecPut, actor: 
   verdict.errors.push(...specWordErrors(text, prevText));
   if (verdict.errors.length)
     throw new HttpError(422, `the spec breaks the card contract (${verdict.errors.length} reason${verdict.errors.length > 1 ? 's' : ''})`, { reasons: verdict.errors, warnings: verdict.warnings });
-  const prev: SectionAuthors = cur ? (JSON.parse(fs.readFileSync(path.join(root, p.meta(cur)), 'utf8')) as VersionRecord).section_authors : { acceptance_tests: null, oracle: null };
+  const prev: SectionAuthors = cur ? (JSON.parse(boardFiles.readFileSync(path.join(root, p.meta(cur)), 'utf8')) as VersionRecord).section_authors : { acceptance_tests: null, oracle: null };
   // 403 last: a claimant of this card adding, changing, removing or restoring Acceptance / Oracle.
   assertProtectedWrite(root, id, prevText ?? '', text, actor);
   const n = cur + 1;

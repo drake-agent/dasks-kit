@@ -128,7 +128,7 @@ export function codemapCache(stateDir: string, log: (line: string) => void, buil
   const load = (repo: string) => {
     if (maps.has(repo)) return maps.get(repo);
     try {
-      const m = JSON.parse(fs.readFileSync(fileFor(repo), 'utf8'));
+      const m = JSON.parse(fs.readFileSync(fileFor(repo), 'utf8')); // not-board: code map state
       if (m && m.repo === repo && typeof m.sha === 'string' && Array.isArray(m.files) && Array.isArray(m.edges)) { maps.set(repo, m); return m as CodeMap; }
     } catch { /* none yet, or broken: built again */ }
     return undefined;
@@ -142,9 +142,9 @@ export function codemapCache(stateDir: string, log: (line: string) => void, buil
       tried.set(repo, head);
       try {
         const m = await build(repo, head);
-        fs.mkdirSync(stateDir, { recursive: true });
+        fs.mkdirSync(stateDir, { recursive: true }); // not-board: code map state
         const f = fileFor(repo), tmp = `${f}.${process.pid}.tmp`;
-        fs.writeFileSync(tmp, JSON.stringify(m)); fs.renameSync(tmp, f);
+        fs.writeFileSync(tmp, JSON.stringify(m)); fs.renameSync(tmp, f); // not-board: code map state
         maps.set(repo, m);
         log(`code map: ${repo} at ${head.slice(0, 7)}: ${m.files.length} files, ${m.edges.length} imports${m.truncated ? ` (truncated: past the file or byte limit)` : ''}`);
       } catch (e: any) {

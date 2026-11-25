@@ -1,4 +1,3 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { HttpError, isoLocal, readTask, updateTask, withRepoLock, type UpdateOpts, atomicWrite } from './write.ts';
@@ -9,6 +8,7 @@ import { parseContext } from './collab.ts';
 import { askLive, planAsk, readAsks } from './asks.ts';
 import { parkNote, parkRoute } from './park.ts';
 import { validateAsk } from '../../public/user-ask.js';
+import * as boardFiles from './board-files.ts';
 
 function isLogPath(value: string): boolean { return !!value.trim() && value.length <= 2000 && !/[\r\n\0]/.test(value); }
 
@@ -76,8 +76,8 @@ export function parseOutcome(body: Record<string, unknown>): OutcomeInput {
 const ledgerRel = (job: string) => `data/outcomes/${createHash('sha256').update(job).digest('hex')}.json`;
 export function allOutcomes(root: string): OutcomeRecord[] {
   const dir = path.join(root, 'data/outcomes');
-  if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir).filter((f) => f.endsWith('.json')).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'))).sort((a: OutcomeRecord, b: OutcomeRecord) => a.at.localeCompare(b.at) || a.version - b.version);
+  if (!boardFiles.existsSync(dir)) return [];
+  return boardFiles.readdirSync(dir).filter((f) => f.endsWith('.json')).map((f) => JSON.parse(boardFiles.readFileSync(path.join(dir, f), 'utf8'))).sort((a: OutcomeRecord, b: OutcomeRecord) => a.at.localeCompare(b.at) || a.version - b.version);
 }
 export function taskOutcomes(root: string, id: string) { return allOutcomes(root).filter((o) => o.id === id); }
 const HANDOFF_BLOCK = /(?:^|\n)## Handoff[ \t]*\n<!-- dasks-handoff -->\n([\s\S]*?)\n<!-- \/dasks-handoff -->/;
@@ -200,7 +200,7 @@ export function recordOutcome(root: string, id: string, body: Record<string, unk
     // are not applied as a move here either (done -> blocked-on-user is not a legal move); the failed run still counts,
     // so the next claim is refused at the cap (assertRetryAllowed).
     // A closed card keeps its status the same way (terminal), with no route, ask or cap at all.
-    const ended = !!terminal || !!cur.run_id && fs.existsSync(path.join(root, jobEndRel(id, runId, attempt)));
+    const ended = !!terminal || !!cur.run_id && boardFiles.existsSync(path.join(root, jobEndRel(id, runId, attempt)));
     // Either limit caps the card, whichever this run reports: dispatch (assertRetryAllowed) checks both, so a card is
     // never sent back to todo while it can no longer be claimed (e.g. retry_cap lowered between runs).
     const capByQuota = causedCount >= cfg.quota_retry_cap;

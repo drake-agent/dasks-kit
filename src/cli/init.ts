@@ -20,23 +20,23 @@ const port = portArg === undefined ? 4747 : Number(portArg);
 if (!Number.isInteger(port) || port < 1024 || port > 65535) { console.error('--port must be 1024-65535'); process.exit(2); }
 
 const cfgFile = path.join(root, 'config.json');
-if (fs.existsSync(path.join(root, 'data', 'northstar.yaml'))) {
+if (fs.existsSync(path.join(root, 'data', 'northstar.yaml'))) { // not-board: init builds a new git board
   if (portArg !== undefined) {
-    const cfg = fs.existsSync(cfgFile) ? JSON.parse(fs.readFileSync(cfgFile, 'utf8')) : {};
+    const cfg = fs.existsSync(cfgFile) ? JSON.parse(fs.readFileSync(cfgFile, 'utf8')) : {}; // not-board: init builds a new git board
     if (cfg.server?.port !== port) {
       cfg.server = { ...(cfg.server ?? {}), port };
-      fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2) + '\n');
+      fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2) + '\n'); // not-board: init builds a new git board
       console.log(`board exists at ${root}; server.port set to ${port}`);
     } else console.log(`board exists at ${root}; left as it is`);
   } else console.log(`board exists at ${root}; left as it is`);
   process.exit(0);
 }
-if (fs.existsSync(root) && (!fs.statSync(root).isDirectory() || fs.readdirSync(root).length)) {
+if (fs.existsSync(root) && (!fs.statSync(root).isDirectory() || fs.readdirSync(root).length)) { // not-board: init builds a new git board
   console.error(`init: ${root} exists and is not a Dasks board (no data/northstar.yaml); nothing changed. Pick an empty or new folder.`);
   process.exit(1);
 }
 const build = `${root.replace(/\/+$/, '')}.init-${process.pid}`;
-fs.rmSync(build, { recursive: true, force: true });
+fs.rmSync(build, { recursive: true, force: true }); // not-board: init builds a new git board
 
 const now = new Date();
 const pad = (n: number) => String(n).padStart(2, '0');
@@ -65,8 +65,8 @@ const files: Record<string, string> = {
 try {
   for (const [rel, content] of Object.entries(files)) {
     const f = path.join(build, rel);
-    fs.mkdirSync(path.dirname(f), { recursive: true });
-    fs.writeFileSync(f, content);
+    fs.mkdirSync(path.dirname(f), { recursive: true }); // not-board: init builds a new git board
+    fs.writeFileSync(f, content); // not-board: init builds a new git board
   }
   loadConfig(build);
   const r = check(loadBoard(build));
@@ -76,11 +76,11 @@ try {
   // The board commits as itself; the user's global git identity is not needed (or changed).
   git('config', 'user.name', 'Dasks board'); git('config', 'user.email', 'board@dasks.invalid');
   git('add', '--', ...Object.keys(files)); git('commit', '-qm', 'dasks: new board');
-  if (fs.existsSync(root)) fs.rmdirSync(root);
-  fs.mkdirSync(path.dirname(root), { recursive: true });
-  fs.renameSync(build, root);
+  if (fs.existsSync(root)) fs.rmdirSync(root); // not-board: init builds a new git board
+  fs.mkdirSync(path.dirname(root), { recursive: true }); // not-board: init builds a new git board
+  fs.renameSync(build, root); // not-board: init builds a new git board
 } catch (e: any) {
-  fs.rmSync(build, { recursive: true, force: true });
+  fs.rmSync(build, { recursive: true, force: true }); // not-board: init builds a new git board
   console.error(`init: ${e.message}`);
   process.exit(1);
 }

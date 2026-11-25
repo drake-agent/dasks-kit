@@ -2,12 +2,12 @@
 // on the same project (and the same files) starts with it.
 // Agents add lessons as proposals; only the user (a logged-in human session, actor "user") confirms one. Anyone may
 // retire a lesson that no longer holds. Every write runs under the repo lock, records the actor and is one git commit.
-import fs from 'node:fs';
 import path from 'node:path';
 import { ACTOR_RE, GOAL_ID_RE, isTaskId, type Board, type Issue } from './schema.ts';
 import { loadGoals } from './load.ts';
 import { HttpError, commitFiles, isoLocal, slugify, withRepoLock } from './write.ts';
 import { assertProject, projectIds } from './views.ts';
+import * as boardFiles from './board-files.ts';
 
 export const LESSON_STATUSES = ['proposed', 'confirmed', 'retired'] as const;
 export type LessonStatus = typeof LESSON_STATUSES[number];
@@ -97,7 +97,7 @@ export function lessonErrors(l: any, app: string): string[] {
 export function readLessons(root: string, app: string): LessonFile {
   const rel = lessonsRelPath(app);
   let raw: string;
-  try { raw = fs.readFileSync(path.join(root, rel), 'utf8'); } catch (e: any) {
+  try { raw = boardFiles.readFileSync(path.join(root, rel), 'utf8'); } catch (e: any) {
     if (e.code === 'ENOENT') return { app, version: 0, updated: '', updated_by: '', lessons: [] };
     throw e;
   }
@@ -159,7 +159,7 @@ export function lessonSummaries(root: string, b: Pick<Board, 'goals'>) {
 
 function archivedIds(root: string, app: string): string[] {
   let raw = '';
-  try { raw = fs.readFileSync(path.join(root, lessonsArchiveRelPath(app)), 'utf8'); } catch { return []; }
+  try { raw = boardFiles.readFileSync(path.join(root, lessonsArchiveRelPath(app)), 'utf8'); } catch { return []; }
   return raw.split('\n').flatMap((l) => { try { const id = JSON.parse(l)?.id; return typeof id === 'string' ? [id] : []; } catch { return []; } });
 }
 
@@ -186,7 +186,7 @@ function filesFor(root: string, app: string, file: LessonFile, w: Writing): { fi
   const files = [{ rel: lessonsRelPath(app), content: JSON.stringify(file, null, 2) + '\n' }];
   if (moved.length) {
     let prev = '';
-    try { prev = fs.readFileSync(path.join(root, lessonsArchiveRelPath(app)), 'utf8'); } catch { /* first archive */ }
+    try { prev = boardFiles.readFileSync(path.join(root, lessonsArchiveRelPath(app)), 'utf8'); } catch { /* first archive */ }
     files.push({ rel: lessonsArchiveRelPath(app), content: prev + moved.map((l) => JSON.stringify(l)).join('\n') + '\n' });
   }
   return { files, archived: moved.map((l) => l.id) };
@@ -264,7 +264,7 @@ export function checkLessons(root: string, b: Board): Issue[] {
   const dir = path.join(root, 'data', 'lessons');
   const out: Issue[] = [];
   let files: string[] = [];
-  try { files = fs.readdirSync(dir); } catch { return out; }
+  try { files = boardFiles.readdirSync(dir); } catch { return out; }
   const projects = projectIds(b);
   for (const f of files.sort()) {
     if (f.startsWith('.') || f === 'archive') continue;
@@ -272,7 +272,7 @@ export function checkLessons(root: string, b: Board): Issue[] {
     const app = f.replace(/\.json$/, '');
     if (!f.endsWith('.json') || !projects.includes(app)) { out.push({ file, message: `unexpected file (want <project>.json, projects: ${projects.join(', ')})` }); continue; }
     let o: any;
-    try { o = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch (e: any) { out.push({ file, message: `parse error: ${e.message}` }); continue; }
+    try { o = JSON.parse(boardFiles.readFileSync(path.join(dir, f), 'utf8')); } catch (e: any) { out.push({ file, message: `parse error: ${e.message}` }); continue; }
     if (!Array.isArray(o?.lessons)) { out.push({ file, message: 'no lessons list' }); continue; }
     const seen = new Set<string>();
     for (const l of o.lessons) {

@@ -1,7 +1,6 @@
 // Per-project views (Dasks): one page per app goal at /p/<app>, laid out by data/views/<app>.json.
 // Agents write the config through the API (PUT /api/views/<app>), humans only look. Missing file = built-in default.
 // Every write is validated, bumps `version`, records the actor (`updated_by`, commit message, activity line).
-import fs from 'node:fs';
 import path from 'node:path';
 import { type Board, type Issue, ACTOR_RE, GOAL_ID_RE, goalIdsOf } from './schema.ts';
 import { loadGoals } from './load.ts';
@@ -11,6 +10,7 @@ import {
   MAX_VIEW_BYTES, defaultStructure, defaultView, validateStructure, validateView,
   type Structure, type View, type ViewBody,
 } from './view-config.ts';
+import * as boardFiles from './board-files.ts';
 
 export {
   MAX_VIEW_BYTES, MAX_WIDGETS, STAT_ITEMS, STRUCTURES, DEFAULT_STRUCTURE, defaultStructure,
@@ -37,7 +37,7 @@ export function viewActivityRelPath(app: string): string {
 
 /** Version of a view file that fails validation: its own integer `version` if it still parses, else 0. */
 function brokenVersion(root: string, app: string): number {
-  try { const o = JSON.parse(fs.readFileSync(path.join(root, viewRelPath(app)), 'utf8')); return Number.isInteger(o?.version) && o.version >= 0 ? o.version : 0; }
+  try { const o = JSON.parse(boardFiles.readFileSync(path.join(root, viewRelPath(app)), 'utf8')); return Number.isInteger(o?.version) && o.version >= 0 ? o.version : 0; }
   catch { return 0; }
 }
 
@@ -45,9 +45,9 @@ function brokenVersion(root: string, app: string): number {
 export function readView(root: string, app: string): View {
   const rel = viewRelPath(app);
   // Cheap guard for callers without a loaded board: a project is a goal file (the server also checks the parent).
-  if (!fs.existsSync(path.join(root, 'data', 'goals', `${app}.yaml`))) throw new HttpError(404, `no project "${app}"`);
+  if (!boardFiles.existsSync(path.join(root, 'data', 'goals', `${app}.yaml`))) throw new HttpError(404, `no project "${app}"`);
   let text: string;
-  try { text = fs.readFileSync(path.join(root, rel), 'utf8'); } catch (e: any) {
+  try { text = boardFiles.readFileSync(path.join(root, rel), 'utf8'); } catch (e: any) {
     if (e.code === 'ENOENT') return defaultView(app);
     throw e;
   }
@@ -129,7 +129,7 @@ export function writeView(root: string, app: string, input: unknown, actor: stri
 
 export function readViewActivity(root: string, app: string, limit = 20): Activity[] {
   let text = '';
-  try { text = fs.readFileSync(path.join(root, viewActivityRelPath(app)), 'utf8'); } catch { return []; }
+  try { text = boardFiles.readFileSync(path.join(root, viewActivityRelPath(app)), 'utf8'); } catch { return []; }
   const out: Activity[] = [];
   for (const l of text.split('\n')) { if (!l.trim()) continue; try { out.push(JSON.parse(l)); } catch { /* skip */ } }
   return out.slice(-limit);
@@ -146,7 +146,7 @@ export function checkViews(root: string, b: Board): Issue[] {
   const dir = path.join(root, 'data', 'views');
   const warnings: Issue[] = [];
   let files: string[] = [];
-  try { files = fs.readdirSync(dir); } catch { return warnings; }
+  try { files = boardFiles.readdirSync(dir); } catch { return warnings; }
   for (const f of files.sort()) {
     if (f.startsWith('.')) continue;
     const file = `data/views/${f}`;
@@ -154,7 +154,7 @@ export function checkViews(root: string, b: Board): Issue[] {
     const projects = projectIds(b);
     if (!f.endsWith('.json') || !projects.includes(app)) { warnings.push({ file, message: `unexpected file (want <project>.json, projects: ${projects.join(', ')})` }); continue; }
     let o: any;
-    try { o = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch (e: any) { warnings.push({ file, message: `parse error: ${e.message} (page falls back to an error; fix it with PUT /api/views/${app})` }); continue; }
+    try { o = JSON.parse(boardFiles.readFileSync(path.join(dir, f), 'utf8')); } catch (e: any) { warnings.push({ file, message: `parse error: ${e.message} (page falls back to an error; fix it with PUT /api/views/${app})` }); continue; }
     try { validateView(app, o, milestonesOf(b, app)); } catch (e: any) { warnings.push({ file, message: e.message }); }
     if (!Number.isInteger(o?.version) || o.version < 1) warnings.push({ file, message: 'version must be a positive integer' });
   }

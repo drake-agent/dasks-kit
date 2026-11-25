@@ -2,7 +2,6 @@
 // lists them; the user's signed answer moves the card on. The shape lives in public/user-ask.js.
 //   data/asks/<goal>/<slug>.json   {v, card, open: Ask | null, answered: Ask[]}   (tracked, committed with the task write)
 //   data/decisions/asks.jsonl      the signed answers (same format and key as the approve/reject ledger, its own file)
-import fs from 'node:fs';
 import path from 'node:path';
 import { HttpError, readTask, updateTask, withRepoLock } from './write.ts';
 import { TASK_ID_RE, type SpecReview, type Task } from './schema.ts';
@@ -10,6 +9,7 @@ import { readActivity, TERMINAL } from './collab.ts';
 import { currentSpec, fieldsAfterSpecWrite, isBlocked, stateOf } from './spec-state.ts';
 import { currentSpecVersion, isoNow, prepareSpecWrite } from './specs.ts';
 import { askScope, askText, choiceOf, choicesOf, EFFECT_LABEL, hasHeader, pickAsk, sameExceptAutoOk, setAutoOk, validateAsk } from '../../public/user-ask.js';
+import * as boardFiles from './board-files.ts';
 
 export interface AskOption { key: string; text: string; effect: 'proceed' | 'respec' | 'cancel' }
 export interface Ask {
@@ -29,7 +29,7 @@ export function asksRelPath(id: string): string {
   return `${ASKS_DIR}/${m[1]}/${m[2]}.json`;
 }
 export function readAsks(root: string, id: string): AskFile | null {
-  try { return JSON.parse(fs.readFileSync(path.join(root, asksRelPath(id)), 'utf8')); } catch (e: any) { if (e.code === 'ENOENT') return null; throw e; }
+  try { return JSON.parse(boardFiles.readFileSync(path.join(root, asksRelPath(id)), 'utf8')); } catch (e: any) { if (e.code === 'ENOENT') return null; throw e; }
 }
 const content = (f: AskFile) => JSON.stringify(f, null, 1) + '\n';
 
@@ -37,12 +37,12 @@ const content = (f: AskFile) => JSON.stringify(f, null, 1) + '\n';
 export function openAsks(root: string): Map<string, Ask> {
   const out = new Map<string, Ask>();
   let goals: string[] = [];
-  try { goals = fs.readdirSync(path.join(root, ASKS_DIR)); } catch { return out; }
+  try { goals = boardFiles.readdirSync(path.join(root, ASKS_DIR)); } catch { return out; }
   for (const g of goals) {
     let files: string[] = [];
-    try { files = fs.readdirSync(path.join(root, ASKS_DIR, g)).filter((f) => f.endsWith('.json')); } catch { continue; }
+    try { files = boardFiles.readdirSync(path.join(root, ASKS_DIR, g)).filter((f) => f.endsWith('.json')); } catch { continue; }
     for (const f of files) {
-      try { const a: AskFile = JSON.parse(fs.readFileSync(path.join(root, ASKS_DIR, g, f), 'utf8')); if (a?.open && a.card === `${g}.${f.slice(0, -5)}`) out.set(a.card, a.open); }
+      try { const a: AskFile = JSON.parse(boardFiles.readFileSync(path.join(root, ASKS_DIR, g, f), 'utf8')); if (a?.open && a.card === `${g}.${f.slice(0, -5)}`) out.set(a.card, a.open); }
       catch { /* a broken file asks nothing; the check reports it */ }
     }
   }
