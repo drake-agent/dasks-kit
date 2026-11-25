@@ -713,9 +713,11 @@ def merge_checks(cid, t, cap):
     if not SHA_RE.match(sha): raise Refused("gh gave no head sha")
     why = ci_problem(info.get("statusCheckRollup") or [], sha)
     if why: raise Refused(why)
-    ok = call("GET", "/api/merge-ok?" + urllib.parse.urlencode({"card": cid, "sha": sha}), who=captain_actor(), missing_ok=False) or {}
+    # Hands-off mode: no merge OK is read or asked for; a clean card lands as with captain.auto_merge.
+    hands_off = cap.get("hands_off") is True
+    ok = {} if hands_off else call("GET", "/api/merge-ok?" + urllib.parse.urlencode({"card": cid, "sha": sha}), who=captain_actor(), missing_ok=False) or {}
     if ok.get("ok") is True: return pr, sha, info, "the human approved this head on the board"
-    auto = cap.get("auto_merge") is True
+    auto = cap.get("auto_merge") is True or hands_off
     why = review_problem((call("GET", "/api/tasks/%s/review-runs" % cid, who=captain_actor(), missing_ok=False) or {}).get("passes") or [], sha,
                          other_machine=auto and cap.get("same_machine_review") is not True)
     if why: raise Refused(why)
@@ -744,6 +746,12 @@ def cmd_captain_merge(a, method, dry):
         # The lease must outlast the merge call: renewed now with room to spare, and the call is cut off well before.
         held = lease_renew_problem(me, lease_id, max(int(cap.get("lease_sec") or 0), 180))
         if held: die("not merged: %s" % held, 3)
+        # Merging on hands-off mode alone: the owner may have turned it off since the checks, so read it again now.
+        if cap.get("hands_off") is True and cap.get("auto_merge") is not True:
+            now = call("GET", "/api/captain", who=me, missing_ok=False) or {}
+            if now.get("hands_off") is not True and now.get("auto_merge") is not True:
+                ok = call("GET", "/api/merge-ok?" + urllib.parse.urlencode({"card": cid, "sha": sha}), who=me, missing_ok=False) or {}
+                if ok.get("ok") is not True: raise ReadyForHuman(sha)
         gh_merge(pr, method, sha, min(int(os.environ.get("DASKS_MERGE_TIMEOUT_SEC") or 60), 60))
     except ReadyForHuman as e:
         print("dask: %s; it waits for your merge OK on the board for this exact head" % e, file=sys.stderr)
@@ -754,7 +762,9 @@ def cmd_captain_merge(a, method, dry):
         sys.exit(3)
     except Refused as e:
         reason = str(e)
-        if not dry and t.get("status") == "review":
+        if not dry and t.get("status") == "review" and cap.get("hands_off") is True:
+            call("POST", "/api/tasks/" + cid, {"note": "captain-merge refused: %s. Hands-off mode: the captain looks next." % reason}, me)
+        elif not dry and t.get("status") == "review":
             call("POST", "/api/tasks/" + cid, {"note": "captain-merge refused: %s. The merge stays with the human." % reason}, me)
             call("POST", "/api/tasks/%s/messages" % cid, {"text": "Not merged by the captain: %s. This one is yours to decide." % reason, "to": "user", "kind": "heads-up", "request_id": "dask-%s" % uuid.uuid4()}, me)
         print("dask: not merged: %s" % reason, file=sys.stderr); sys.exit(3)

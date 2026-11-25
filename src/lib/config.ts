@@ -76,8 +76,13 @@ export interface Config {
   summary: SummaryConfig;
   /** The review triage page (src/lib/triage.ts): a card in review with no activity for stale_days is stale. */
   review: ReviewConfig;
+  /** Hands-off mode (src/lib/hands-off.ts, docs/captain.md): build-stage stops never ask the person; merges land without a
+   *  merge OK. Re-read on each request; `dasks hands-off on|off` flips it. */
+  hands_off: HandsOffConfig;
 }
 
+export interface HandsOffConfig { enabled: boolean }
+export const DEFAULT_HANDS_OFF: HandsOffConfig = { enabled: false };
 export interface SummaryConfig { at: string }
 export interface ReviewConfig { stale_days: number }
 export const DEFAULT_SUMMARY: SummaryConfig = { at: '08:30' };
@@ -150,6 +155,7 @@ export const DEFAULT_CONFIG: Config = {
   store: { mode: 'git', sqlite_path: '' },
   summary: DEFAULT_SUMMARY,
   review: DEFAULT_REVIEW,
+  hands_off: DEFAULT_HANDS_OFF,
 };
 
 export function expandHome(p: string): string {
@@ -181,6 +187,7 @@ export function loadConfig(root: string): Config {
     store: { ...DEFAULT_CONFIG.store, ...(user.store ?? {}) },
     summary: { ...DEFAULT_SUMMARY, ...(user.summary ?? {}) },
     review: { ...DEFAULT_REVIEW, ...(user.review ?? {}) },
+    hands_off: { ...DEFAULT_HANDS_OFF, ...(user.hands_off ?? {}) },
   };
   for (const e of backupConfigErrors(user.backup)) throw new Error(`config: ${e}`);
   validateConfig(cfg);
@@ -219,6 +226,7 @@ function validateConfig(cfg: Config): void {
   if (!Number.isInteger(gap) || (gap !== 0 && (gap < 60 || gap > 86400))) throw new Error('config: captain.watch_gap_sec must be 0 (off) or 60-86400');
   for (const k of ['auto_merge', 'same_machine_review'] as const) if (typeof cfg.captain[k] !== 'boolean') throw new Error(`config: captain.${k} must be true or false`);
   if (typeof cfg.summary.at !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(cfg.summary.at)) throw new Error('config: summary.at must be HH:MM (24 h, this Mac\'s time zone)');
+  if (typeof cfg.hands_off.enabled !== 'boolean') throw new Error('config: hands_off.enabled must be true or false');
   if (!(Number.isFinite(cfg.review.stale_days) && cfg.review.stale_days > 0)) throw new Error('config: review.stale_days must be a number > 0');
   if (!Number.isInteger(cfg.server.port) || cfg.server.port < 1024 || cfg.server.port > 65535) throw new Error('config: bad server.port');
   if (!Number.isSafeInteger(cfg.retry_cap) || cfg.retry_cap < 1) throw new Error('config: retry_cap must be a positive integer');

@@ -366,6 +366,7 @@ function renderChrome() {
   const n = needsYou().length;
   // Project pages replace the nav (no badges there), so only touch the badges that exist.
   for (const b of [$('#badge-top'), $('#badge-bottom')].filter(Boolean)) { b.textContent = n; b.hidden = !n; }
+  const ho = $('#hands-off'); if (ho) ho.hidden = S.data.hands_off !== true; // read-only: config.json hands_off.enabled
   // /asks draws the same top bar from this snapshot (chrome.js), so its badge matches.
   store('dasks.chrome', JSON.stringify({ at: Date.now(), n }));
   renderDoneTicker();

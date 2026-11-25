@@ -64,6 +64,7 @@ import { itemsProgress, itemsView, reportItem, seedItems } from './lib/items.ts'
 import { assertTouchesFree, repoKey } from './lib/claim-guard.ts';
 import { migrateBoard, SchemaTooNew, SCHEMA_VERSION } from './lib/migrate.ts';
 import { nodeProblem } from './lib/node-floor.ts';
+import { buildStage, handsOffMove, handsOffNote, handsOffOn, handsOffWrite, personOnly } from './lib/hands-off.ts';
 import { type Body, parseAnswer, parseCardAction, parseChat, parseLease, parseLeaseCheck, parseNodePatch, parseOutcomeOrFail, parseResetAttempts, parseTaskPatch, versionOf } from './lib/bodies.ts';
 import * as boardFiles from './lib/board-files.ts';
 import { openBoardStore } from './lib/board-store-open.ts';
@@ -415,11 +416,13 @@ function replaced(t: Task): boolean {
   } catch { return false; }
 }
 /** The approve/reject question a card asks (decisions.ts), unless an open rethink card replaces it. */
-const askOf = (t: Task) => (replaced(t) ? null : decisionRequest(t));
+const askOf = (t: Task) => (replaced(t) || quietReview(t) ? null : decisionRequest(t));
+/** Hands-off mode: a review card asks the person nothing (no approve/reject) unless its question is person-only. */
+const quietReview = (t: Task) => t.status === 'review' && handsOffOn(ROOT) && !personOnly(t.needs_user ?? '');
 /** The approve/reject question a card asks on the board, unless it waits on a user decision instead. fresh (the write
  *  checks and POST /api/decisions, read from disk): the rethink card's state is only cached, so a replaced card still
  *  asks there; it is left out of the lists only. */
-const boardDecision = (t: Task, fresh = false) => (liveAsk(t, fresh) ? null : fresh ? decisionRequest(t) : askOf(t));
+const boardDecision = (t: Task, fresh = false) => (liveAsk(t, fresh) || quietReview(t) ? null : fresh ? decisionRequest(t) : askOf(t));
 
 /** GET /api/asks: the open user decisions, newest first. */
 function asksDoc() {
@@ -493,7 +496,7 @@ function health(res: http.ServerResponse) {
   // The backup is not a part: a failing push is a warning, never a reason to stop serving.
   const b = backupNow();
   const warnings = [b.warning, NODE_PROBLEM].filter((w): w is string => !!w);
-  return send(res, ready ? 200 : 503, { ok: ready, ready, version, ...parts, backup: { state: b.state }, warnings, reload: { ...reloadStats, task_parses: loadStats.task_parses } });
+  return send(res, ready ? 200 : 503, { ok: ready, ready, version, hands_off: handsOffOn(ROOT), ...parts, backup: { state: b.state }, warnings, reload: { ...reloadStats, task_parses: loadStats.task_parses } });
 }
 
 function setWarningHeader(warnings: string[], res: http.ServerResponse) {
@@ -667,7 +670,17 @@ function verifiedLedger(fresh = false): Decision[] | null {
 const statKey = (f: string) => { try { const s = boardFiles.statSync(f); return `${s.mtimeMs}:${s.size}`; } catch { return 'none'; } };
 /** src/lib/park.ts: a machine's blocked-on-user write without a real decision goes back to the card's owner. Called under the repo
  *  lock; changes `fields` and returns the note to append (or the note unchanged). */
-function unparkWrite(id: string, fields: Record<string, unknown>, actor: string, note: string | undefined, text: string, opts: { context?: unknown; warnings?: string[] }, sweep = false): string | undefined {
+function unparkWrite(id: string, fields: Record<string, unknown>, actor: string, note: string | undefined, text: string, opts: { context?: unknown; warnings?: string[] }, sweep = false, statusKept = false): string | undefined {
+  // Hands-off mode (src/lib/hands-off.ts): a build-stage card is not put on the person for anything but a person-only matter.
+  const was = handsOffOn(ROOT) && actor !== 'user' ? readTask(ROOT, id) : null;
+  const ctx = opts.context && typeof opts.context === 'object' ? Object.values(opts.context as Record<string, unknown>).filter((v) => typeof v === 'string').join(' ') : '';
+  const h = was ? handsOffWrite(was, fields, `${text} ${ctx}`, { actor, hasAsk: false, owner: cardOwner(was), statusKept }) : null;
+  if (h) {
+    for (const [k, v] of Object.entries(h.fields)) if (v === undefined) delete fields[k]; else fields[k] = v;
+    if (fields.status !== 'review') opts.context = undefined;
+    opts.warnings?.push(h.note);
+    return note ? `${note} · ${h.note}` : h.note;
+  }
   if (fields.status !== 'blocked-on-user') return note;
   const cur = readTask(ROOT, id);
   const hasAsk = cur.status === 'blocked-on-user' && askLive(ROOT, cur, readAsks(ROOT, id)?.open);
@@ -855,6 +868,7 @@ async function decide(req: http.IncomingMessage, res: http.ServerResponse) {
 /** GET /api/merge-ok?card=&sha=: is there a merge OK for this card at exactly this head (mergeOkAt)?
  *  Read fresh from a verified ledger: one that does not verify answers 503, and nobody merges on it. */
 function mergeOkRead(res: http.ServerResponse, url: URL) {
+  if (handsOffOn(ROOT)) return send(res, 410, { error: 'hands-off mode is on: no merge OK is read; a card lands on green CI and a clean review (dask captain-merge)', hands_off: true });
   const card = url.searchParams.get('card'), sha = url.searchParams.get('sha');
   if (!card || !isTaskId(card)) return send(res, 400, { error: 'card must be a task id' });
   if (!sha || !SHA40_RE.test(sha)) return send(res, 400, { error: 'sha must be 40 lowercase hex' });
@@ -969,7 +983,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
     if (p === '/api/captain') {
       const l = lease.current();
       return send(res, 200, { lease: l ? { holder: l.holder, since: l.since, expires_at: l.expires_at } : null, harness: cfg.captain.harness, lease_sec: cfg.captain.lease_sec,
-        auto_merge: cfg.captain.auto_merge, same_machine_review: cfg.captain.same_machine_review, watch_gap_sec: cfg.captain.watch_gap_sec, chat_seq: chat.lastSeq });
+        auto_merge: cfg.captain.auto_merge, same_machine_review: cfg.captain.same_machine_review, watch_gap_sec: cfg.captain.watch_gap_sec, chat_seq: chat.lastSeq, hands_off: handsOffOn(ROOT) });
     }
     if (p === '/api/captain/chat') {
       const q = url.searchParams.get('since') ?? '0';
@@ -998,7 +1012,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
     if (p === '/api/board') {
       // check() and the roll-up only change with the data (or the date, for "late"): computed once per version and day,
       // and with the config that decides which lanes are valid.
-      const key = `${version}|${localDate(new Date())}|${lanesKey()}`;
+      const key = `${version}|${localDate(new Date())}|${lanesKey()}|${handsOffOn(ROOT)}`;
       if (boardCache?.key !== key) {
         const r = check(board);
         boardCache = { key, body: {
@@ -1012,7 +1026,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
       }
       const { version: v0, ...rest } = boardCache.body;
       const now = new Date();
-      const json = JSON.stringify({ version: v0, now: now.toISOString(), ...rest, projects: cfg.projects, stuck: stuckReport(board, now, cfg.stuck, replaced) });
+      const json = JSON.stringify({ version: v0, now: now.toISOString(), ...rest, projects: cfg.projects, hands_off: handsOffOn(ROOT), stuck: stuckReport(board, now, cfg.stuck, replaced) });
       // Every open tab reads every task on each reload: gzip it for clients that accept it (browsers, fetch).
       if (/\bgzip\b/.test(String(req.headers['accept-encoding'] || ''))) {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding', 'Cache-Control': 'no-store', ...SECURITY_HEADERS });
@@ -1029,6 +1043,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
       const now = new Date();
       // Only cards updated in the window can have closed in it, so the activity log is read for few cards.
       const r = statusRoute(p, url.searchParams, { board, stuck: stuckReport(board, now, cfg.stuck, replaced), now, doneAt: (t) => { const ms = lastDone(t.id); return ms === null ? null : new Date(ms).toISOString(); } });
+      if (r.status === 200 && !r.type && r.body && typeof r.body === 'object') Object.assign(r.body, { hands_off: handsOffOn(ROOT) });
       return send(res, r.status, r.body, r.type);
     }
     if (p === '/api/ready') {
@@ -1391,6 +1406,21 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
       const who = rawActor(req);
       if (!who) return send(res, 400, { error: 'a decision request must name its writer (X-Dasks-Actor)' });
       if (!board.tasks.some((t) => t.id === id)) return send(res, 404, { error: 'not found' });
+      // Hands-off mode: a build-stage card's ask is kept as a card note unless it is a taste pick or a person-only matter.
+      const asked = validateAsk(body).length ? null : pickAsk(body);
+      if (asked && handsOffOn(ROOT) && asked.kind !== 'taste' && !personOnly(JSON.stringify(asked)) && buildStage(readTask(ROOT, id))) {
+        let note = '';
+        const task = withRepoLock(ROOT, () => {
+          const cur = readTask(ROOT, id);
+          note = handsOffNote(cur, asked.wants);
+          // A routed ask never clears a question the card already carries (it may be a person-only one).
+          const move: Record<string, string> = handsOffMove(cur, cardOwner(cur));
+          if ((cur.needs_user ?? '').trim()) delete move.needs_user;
+          return updateTask(ROOT, id, move, who, { appendNote: note, warnings: [] });
+        });
+        reloadAfterWrite();
+        return send(res, 200, { routed: 'note', note, task: publicTask(task) });
+      }
       const out = createAsk(ROOT, id, body, who);
       reloadAfterWrite();
       return send(res, 201, { ask: out.ask, text: out.text, section: conflictsSection([out.ask]), task: publicTask(out.task) });
@@ -1492,6 +1522,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
       // job_end (a runner's finish): the run's outcome is the one status change of a job end. If it is already
       // recorded the close keeps the status; otherwise this write moves the card and leaves a marker so a late outcome
       // for the same run does not move it again.
+      let statusKept = false; // a job_end close whose status is kept: hands-off must not move the card either
       const t = withRepoLock(ROOT, () => {
         if (job_end !== undefined) {
           const cur = readTask(ROOT, id);
@@ -1499,7 +1530,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
             const marker = jobEndRel(id, cur.run_id!, Number(cur.attempt));
             if (runOutcome(ROOT, cur) || boardFiles.existsSync(path.join(ROOT, marker))) {
               // The run's job end already moved the card (its outcome, or an earlier close): a replayed close keeps the status.
-              delete fields.status; opts.context = undefined;
+              delete fields.status; opts.context = undefined; statusKept = true;
               opts.warnings!.push('status kept: this run\'s outcome or an earlier close already moved the card');
             } else if (fields.status !== undefined && fields.status !== cur.status) {
               opts.extraFiles = [{ rel: marker, content: JSON.stringify({ id, run_id: cur.run_id, attempt: Number(cur.attempt), from: cur.status, to: fields.status, actor }) + '\n' }];
@@ -1507,11 +1538,11 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
           } else {
             // An older run's close (or one for a card with no run): it must not move the current run's card. The note,
             // result and PR still land; the status and its context block do not.
-            delete fields.status; opts.context = undefined;
+            delete fields.status; opts.context = undefined; statusKept = true;
             opts.warnings!.push('status kept: job_end is for an older run');
           }
         }
-        const appendNote = unparkWrite(id, fields, actor, note, `${String(fields.needs_user ?? '')} ${note ?? ''}`, opts, sweep);
+        const appendNote = unparkWrite(id, fields, actor, note, `${String(fields.needs_user ?? '')} ${note ?? ''}`, opts, sweep, statusKept);
         askRuleWrite(id, fields, actor, opts);
         return updateTask(ROOT, id, fields, actor, { ...opts, ifStatus: if_status, body: newBody, appendNote, appendBlock: append_block, housekeeping: bool(housekeeping), reopen: bool(reopen), push, ...(actor === 'user' ? { statusGate: needsReceipt } : {}) });
       });

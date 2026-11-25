@@ -440,3 +440,72 @@ test('captain-merge with auto_merge: a review from the builder\'s machine is ref
     assert.equal((await (await fetch(`${s.url}/api/tasks/${card}`)).json()).status, 'done');
   } finally { await s.stop(); cleanup(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('captain-merge in hands-off mode: no merge OK is read or asked for; a clean card merges, a refusal stays with the captain', async () => {
+  const card = 'beta.t-hands';
+  const { root, cleanup } = tempRepo([task({ id: card, title: 'Hands-off', status: 'review', pr: PR } as any)]);
+  claimedCards(root, [card]);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dasks-merge-'));
+  fs.writeFileSync(path.join(dir, 'gh'), FAKE_GH, { mode: 0o755 });
+  const view = (checks: unknown[]) => fs.writeFileSync(path.join(dir, 'view.json'), JSON.stringify({ url: PR, state: 'OPEN', isDraft: false, headRefOid: HEAD, baseRefName: 'main', statusCheckRollup: checks, changedFiles: 1 }));
+  fs.writeFileSync(path.join(dir, 'files.jsonl'), JSON.stringify(['src/app.ts', '']) + '\n');
+  fs.writeFileSync(path.join(dir, 'gh.args'), '');
+  const s = await captainBoard(root, { same_machine_review: true }, { HOME: dir });
+  try {
+    const cfgFile = path.join(root, 'cap-config.json');
+    const mergeOk = () => fetch(`${s.url}/api/merge-ok?card=${card}&sha=${HEAD}`).then((r) => r.status);
+    assert.equal(await mergeOk(), 200, 'off: the merge OK is read');
+    // Turned on in config.json while the server runs: no restart.
+    fs.writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfgFile, 'utf8')), hands_off: { enabled: true } }));
+    assert.equal(await mergeOk(), 410);
+    assert.equal((await (await fetch(`${s.url}/api/captain`)).json()).hands_off, true);
+    const lease = await post(s.url, '/api/captain/lease', 'captain@one', { ttl_sec: 600 });
+    await post(s.url, `/api/tasks/${card}/review-runs`, 'codex@two', row(1));
+    const env = { ...clean(), HOME: dir, DASKS_URL: s.url, DASKS_MACHINE: 'one', FAKE_DIR: dir, PATH: `${dir}:/usr/bin:/bin`, DASKS_CAPTAIN_LEASE: lease.body.lease_id };
+    const merge = () => spawnSync('python3', [path.join(ROOT, 'bin/dask'), 'captain-merge', card], { env, encoding: 'utf8' });
+    view([check({ conclusion: 'FAILURE' })]);
+    const refused = merge();
+    assert.equal(refused.status, 3, refused.stdout + refused.stderr);
+    let t = await (await fetch(`${s.url}/api/tasks/${card}`)).json();
+    assert.match(t.body, /captain-merge refused: CI failed .* Hands-off mode: the captain looks next/);
+    assert.equal(t.needs_user ?? '', '');
+    assert.equal((await (await fetch(`${s.url}/api/tasks/${card}/messages`)).json()).messages.length, 0, 'nothing sent to the person');
+    view([check()]);
+    const ok = merge();
+    assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+    assert.match(fs.readFileSync(path.join(dir, 'gh.args'), 'utf8'), new RegExp(`^pr merge ${PR} --squash --match-head-commit ${HEAD}$`, 'm'));
+    t = await (await fetch(`${s.url}/api/tasks/${card}`)).json();
+    assert.equal(t.status, 'done');
+    assert.equal(t.needs_user ?? '', '', 'no merge OK was asked');
+  } finally { await s.stop(); cleanup(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('captain-merge: hands-off turned off during the checks means no merge without an OK (review R1)', async () => {
+  const card = 'beta.t-flip';
+  const { root, cleanup } = tempRepo([task({ id: card, title: 'Flip', status: 'review', pr: PR } as any)]);
+  claimedCards(root, [card]);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dasks-merge-'));
+  fs.writeFileSync(path.join(dir, 'gh'), FAKE_GH, { mode: 0o755 });
+  // A draft PR: `gh pr ready` runs after the checks and before the merge call, and turns hands-off off on the board.
+  fs.writeFileSync(path.join(dir, 'view.json'), JSON.stringify({ url: PR, state: 'OPEN', isDraft: true, headRefOid: HEAD, baseRefName: 'main', statusCheckRollup: [check()], changedFiles: 1 }));
+  fs.writeFileSync(path.join(dir, 'files.jsonl'), JSON.stringify(['src/app.ts', '']) + '\n');
+  fs.writeFileSync(path.join(dir, 'gh.args'), '');
+  const s = await captainBoard(root, { same_machine_review: true }, { HOME: dir });
+  try {
+    const cfgFile = path.join(root, 'cap-config.json');
+    const base = JSON.parse(fs.readFileSync(cfgFile, 'utf8'));
+    fs.writeFileSync(cfgFile, JSON.stringify({ ...base, hands_off: { enabled: true } }));
+    fs.writeFileSync(path.join(dir, 'off.json'), JSON.stringify({ ...base, hands_off: { enabled: false } }));
+    fs.writeFileSync(path.join(dir, 'on-ready'), `#!/bin/bash\ncp "${path.join(dir, 'off.json')}" "${cfgFile}"\n`, { mode: 0o755 });
+    const lease = await post(s.url, '/api/captain/lease', 'captain@one', { ttl_sec: 600 });
+    await post(s.url, `/api/tasks/${card}/review-runs`, 'codex@two', row(1));
+    const env = { ...clean(), HOME: dir, DASKS_URL: s.url, DASKS_MACHINE: 'one', FAKE_DIR: dir, PATH: `${dir}:/usr/bin:/bin`, DASKS_CAPTAIN_LEASE: lease.body.lease_id };
+    const r = spawnSync('python3', [path.join(ROOT, 'bin/dask'), 'captain-merge', card], { env, encoding: 'utf8' });
+    assert.equal(r.status, 3, r.stdout + r.stderr);
+    assert.match(r.stderr, /waits for your merge OK/);
+    assert.ok(!/^pr merge/m.test(fs.readFileSync(path.join(dir, 'gh.args'), 'utf8')), 'not merged');
+    const t = await (await fetch(`${s.url}/api/tasks/${card}`)).json();
+    assert.equal(t.status, 'review');
+    assert.ok(String(t.needs_user).startsWith(`head ${HEAD} `), t.needs_user);
+  } finally { await s.stop(); cleanup(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
