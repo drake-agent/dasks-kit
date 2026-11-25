@@ -7,7 +7,8 @@
 //   node bin/board-store.ts export  --root R [--db F]             replay pending writes as commits, oldest first, onto the
 //                                                                 export branch of the store's own repo (never into R)
 //   node bin/board-store.ts status  --root R [--db F]             mode, files, pending writes, export repo
-//   node bin/board-store.ts restore --root R [--db F] --from S    put a db copy (a migration's snapshot) back as the store
+//   node bin/board-store.ts restore --root R [--db F] --from S [--discard-pending]  put a db copy (a migration's snapshot)
+//                                                                 back as the store
 //                                                                 and the export branch back where that copy left it
 // The db is --db, else R's config store.sqlite_path. Every command but import refuses a store that cannot stand for R.
 import fs from 'node:fs';
@@ -169,40 +170,61 @@ export function exportCmd(root: string, log: (s: string) => void = console.log):
 }
 
 /** Put a db copy back as the store (the board stopped): the copy must be this data repo's store with this export repo,
- *  and the commit it last exported must be on the export branch. The branch goes back to that commit (the old tip is
- *  kept as refs/board-store/before-restore-<time>), so the export resumes from the copy; what was exported after the
- *  copy was made leaves the branch, as it left the db. */
-export function restoreCmd(root: string, db: string, from: string): string {
+ *  and the commit it last exported must be on the export branch. Refuses while the current db holds unexported changes
+ *  (they would be lost) unless `discardPending`. The branch moves first (compare-and-swap; the old tip is kept as
+ *  refs/board-store/before-restore-<time>), then the current db is kept as `<db>.before-restore-<time>` and the copy
+ *  takes its place; any failure puts both back as they were. */
+export function restoreCmd(root: string, db: string, from: string, discardPending = false): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const tmp = `${db}.restore-${process.pid}`;
+  const drop = () => fs.rmSync(tmp, { force: true }); // not-board: the db copy
   fs.copyFileSync(from, tmp); // not-board: the db copy
   let repo = ''; let ref = ''; let want = '';
   try {
-    store.openSqliteBoard(root, tmp);
-    repo = store.exportRepo()!; ref = store.exportRef(); want = store.meta('export_head')!;
-  } catch (e) { fs.rmSync(tmp, { force: true }); throw e; } // not-board: the db copy
-  finally { store.closeSqliteBoard(); }
+    if (fs.existsSync(db)) { // not-board: the current db
+      let pending = -1; let why = '';
+      try { store.openSqliteBoard(root, db); pending = store.pendingCount(); } catch (e: any) { why = String(e?.message ?? e); } finally { store.closeSqliteBoard(); }
+      if (pending !== 0 && !discardPending) throw new Error(pending > 0 ? `the current db holds ${pending} change(s) not exported yet, which the restore would lose; export first, or pass --discard-pending; nothing restored` : `the current db cannot be read (${why}); pass --discard-pending to replace it; nothing restored`);
+    }
+    try { store.openSqliteBoard(root, tmp); repo = store.exportRepo()!; ref = store.exportRef(); want = store.meta('export_head')!; } finally { store.closeSqliteBoard(); }
+  } catch (e) { drop(); throw e; }
   const tip = git(repo, ['rev-parse', '--verify', ref]).trim();
   try { git(repo, ['merge-base', '--is-ancestor', want, tip]); }
-  catch { fs.rmSync(tmp, { force: true }); throw new Error(`the copy last exported ${want}, which is not on ${ref} (${tip}); nothing restored`); } // not-board: the db copy
-  const kept = `refs/board-store/before-restore-${new Date().toISOString().replace(/[:.]/g, '-')}`;
-  git(repo, ['update-ref', kept, tip]);
-  for (const f of [`${db}-wal`, `${db}-shm`]) fs.rmSync(f, { force: true }); // not-board: the replaced db's journal
-  fs.renameSync(tmp, db); // not-board: the db
-  if (tip !== want) git(repo, ['update-ref', '-m', 'board-store restore', ref, want, tip]);
-  return `restored ${from} as ${db}; ${ref} back at ${want.slice(0, 12)} (was ${tip.slice(0, 12)}, kept as ${kept})`;
+  catch { drop(); throw new Error(`the copy last exported ${want}, which is not on ${ref} (${tip}); nothing restored`); }
+  const kept = `refs/board-store/before-restore-${stamp}`;
+  try {
+    git(repo, ['update-ref', kept, tip]);
+    if (tip !== want) git(repo, ['update-ref', '-m', 'board-store restore', ref, want, tip]);
+  } catch (e) {
+    drop(); try { git(repo, ['update-ref', '-d', kept, tip]); } catch { /* not made */ }
+    throw new Error(`could not move ${ref} back to ${want.slice(0, 12)}: ${String((e as any)?.stderr || (e as Error).message).trim()}; nothing restored`);
+  }
+  const old = `${db}.before-restore-${stamp}`;
+  const moved: string[] = [];
+  try {
+    for (const sfx of ['', '-wal', '-shm']) if (fs.existsSync(db + sfx)) { fs.renameSync(db + sfx, old + sfx); moved.push(sfx); } // not-board: the current db
+    fs.renameSync(tmp, db); // not-board: the db
+  } catch (e) {
+    for (const sfx of moved) fs.renameSync(old + sfx, db + sfx); // not-board: the current db back
+    drop();
+    if (tip !== want) git(repo, ['update-ref', '-m', 'board-store restore undone', ref, tip, want]);
+    git(repo, ['update-ref', '-d', kept, tip]);
+    throw new Error(`could not put the copy in place (${(e as Error).message}); db and branch put back as they were`);
+  }
+  return `restored ${from} as ${db} (the old db kept as ${old}); ${ref} back at ${want.slice(0, 12)} (was ${tip.slice(0, 12)}, kept as ${kept})`;
 }
 
 function main(argv: string[]): number {
-  const { values, positionals } = parseArgs({ args: argv, options: { root: { type: 'string' }, db: { type: 'string' }, export: { type: 'boolean' }, from: { type: 'string' } }, allowPositionals: true });
+  const { values, positionals } = parseArgs({ args: argv, options: { root: { type: 'string' }, db: { type: 'string' }, export: { type: 'boolean' }, from: { type: 'string' }, 'discard-pending': { type: 'boolean' } }, allowPositionals: true });
   const cmd = positionals[0];
   if (!['import', 'compare', 'export', 'status', 'restore'].includes(cmd ?? '') || !values.root || (cmd === 'restore' && !values.from)) {
-    console.error('usage: board-store.ts import|compare|export|status --root DIR [--db FILE] [--export] | restore --root DIR [--db FILE] --from COPY'); return 2;
+    console.error('usage: board-store.ts import|compare|export|status --root DIR [--db FILE] [--export] | restore --root DIR [--db FILE] --from COPY [--discard-pending]'); return 2;
   }
   const root = path.resolve(values.root);
   const cfg = loadConfig(root);
   const db = values.db ? path.resolve(values.db) : storeDbPath(cfg);
   if (cmd === 'restore') {
-    try { console.log(restoreCmd(root, db, path.resolve(values.from!))); return 0; }
+    try { console.log(restoreCmd(root, db, path.resolve(values.from!), !!values['discard-pending'])); return 0; }
     catch (e: any) { console.error(`board-store restore: ${String(e?.stderr || e?.message || e).trim()}`); return 1; }
   }
   try { store.openSqliteBoard(root, db, { create: cmd === 'import' }); }

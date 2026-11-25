@@ -321,21 +321,68 @@ test('restore puts a db copy back and the export branch back where the copy left
   } finally { cleanup(); }
 });
 
-test('two overlapping digest runs on the store: the one that loses gives up instead of moving .last-run back', () => {
-  const { root, cleanup } = tempRepo([task({ id: 'beta.t-one' })]);
+test('two overlapping digest runs on the store: a run overtaken after its check gives up instead of moving .last-run back', () => {
+  const { root, cleanup } = tempRepo([task({ id: 'beta.t-one' }), task({ id: 'beta.t-two' })]);
   try {
     const db = path.join(tmpDir(), 'board.db');
     const cfg = config({ mode: 'sqlite', sqlite_path: db });
+    const repo = path.join(path.dirname(db), 'export.git');
+    const lastRun = () => git(repo, 'show', 'main:data/digest/.last-run');
     assert.equal(cli(root, cfg, 'import').status, 0);
     inStore(root, cfg, () => commitFiles(root, [{ rel: 'data/tasks/beta/t-one.md', content: serializeTask(task({ id: 'beta.t-one', status: 'doing' })) }], 'test: beta.t-one doing'));
     assert.equal(cli(root, cfg, 'export').status, 0);
-    let inner: ReturnType<typeof runDigest> | null = null;
-    const outer = inStore(root, cfg, () => runDigest(root, new Date(), () => { inner = runDigest(root, new Date()); }));
-    assert.equal(inner!.skipped, false, 'the run that finished first wrote');
-    assert.equal(outer.skipped, true, 'the slower run gave up');
-    const r = cli(root, cfg, 'export'); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /exported 1 change/);
+    let inner: ReturnType<typeof runDigest> | null = null; let innerSaw = '';
+    // run A passes its check and pauses; meanwhile a card moves, is exported, and run B runs to the end; then A goes on
+    const outer = inStore(root, cfg, () => runDigest(root, new Date(), () => {
+      commitFiles(root, [{ rel: 'data/tasks/beta/t-two.md', content: serializeTask(task({ id: 'beta.t-two', status: 'doing' })) }], 'test: beta.t-two doing');
+      assert.equal(cli(root, cfg, 'export').status, 0);
+      innerSaw = git(repo, 'rev-parse', 'main');
+      inner = runDigest(root, new Date());
+    }));
+    assert.equal(inner!.skipped, false, 'run B wrote');
+    assert.equal(outer.skipped, true, 'run A, overtaken, gave up');
+    assert.equal(cli(root, cfg, 'export').status, 0);
+    assert.equal(lastRun(), innerSaw, '.last-run is run B\'s, not moved back to run A\'s');
+    const day = git(repo, 'ls-tree', '--name-only', 'main', 'data/digest/').split('\n').find((f) => f.endsWith('.md'))!;
+    assert.equal((git(repo, 'show', `main:${day}`).match(/^## /gm) ?? []).length, 1, 'one run wrote: the first change is counted once');
+  } finally { cleanup(); }
+});
+
+test('restore refuses to drop unexported changes, and a restore that cannot move the branch leaves db and branch as they were', () => {
+  const { root, cleanup } = tempRepo([task()]);
+  try {
+    const db = path.join(tmpDir(), 'board.db');
+    const cfg = config({ mode: 'sqlite', sqlite_path: db });
+    const snap = path.join(tmpDir(), 'before.db');
+    assert.equal(cli(root, cfg, 'import').status, 0);
+    inStore(root, cfg, () => commitFiles(root, [{ rel: 'data/links.yaml', content: '[]\n' }], 'test: first write'));
+    assert.equal(cli(root, cfg, 'export').status, 0);
+    inStore(root, cfg, () => snapshotDb(snap));
+    inStore(root, cfg, () => commitFiles(root, [{ rel: 'data/links.yaml', content: '[ ]\n' }], 'test: exported after the copy'));
+    assert.equal(cli(root, cfg, 'export').status, 0);
+    inStore(root, cfg, () => commitFiles(root, [{ rel: 'data/links.yaml', content: '[  ]\n' }], 'test: not exported'));
     const repo = path.join(path.dirname(db), 'export.git');
-    assert.equal(git(repo, 'show', `main:data/digest/.last-run`), git(repo, 'rev-parse', 'main~1'), '.last-run is the newer run\'s');
+    const tip = git(repo, 'rev-parse', 'main');
+    const dbBytes = fs.readFileSync(db);
+    let r = cli(root, cfg, 'restore', '--from', snap);
+    assert.equal(r.status, 1); assert.match(r.stderr, /holds 1 change\(s\) not exported yet.*--discard-pending/);
+    // a git holding the branch lock: moving the branch fails, so nothing changes
+    const lock = path.join(repo, 'refs/heads/main.lock'); fs.writeFileSync(lock, '');
+    r = cli(root, cfg, 'restore', '--from', snap, '--discard-pending');
+    assert.equal(r.status, 1); assert.match(r.stderr, /nothing restored/);
+    fs.rmSync(lock);
+    assert.equal(git(repo, 'rev-parse', 'main'), tip, 'the branch did not move');
+    assert.ok(fs.readFileSync(db).equals(dbBytes), 'the db is the same file');
+    assert.match(cli(root, cfg, 'status').stdout, /pending changes: 1/);
+    assert.equal(git(repo, 'for-each-ref', 'refs/board-store/'), '', 'no kept ref left behind');
+    r = cli(root, cfg, 'export'); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /exported 1 change/);
+    // with the lock gone and --discard-pending, the restore goes through and keeps the old db
+    inStore(root, cfg, () => commitFiles(root, [{ rel: 'data/links.yaml', content: '[   ]\n' }], 'test: dropped on purpose'));
+    r = cli(root, cfg, 'restore', '--from', snap, '--discard-pending');
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(fs.readdirSync(path.dirname(db)).some((f) => /^board\.db\.before-restore-/.test(f)), 'the old db is kept');
+    assert.equal(cli(root, cfg, 'export').status, 0);
+    assert.equal(cli(root, cfg, 'compare', '--export').status, 0);
   } finally { cleanup(); }
 });
 

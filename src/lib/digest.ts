@@ -151,31 +151,32 @@ export function digestText(root: string, sinceIso: string): string {
 export const LAST_RUN_FILE = 'data/digest/.last-run';
 
 /** dasks-digest: append changes since the last run to data/digest/YYYY-MM-DD.md and commit. */
-export function runDigest(root: string, now = new Date(), beforeWrite?: () => void): { file: string; count: number; skipped: boolean } {
+export function runDigest(root: string, now = new Date(), afterCheck?: () => void): { file: string; count: number; skipped: boolean } {
   // Walking the history takes a while and the history it reads never changes: do it before
   // taking the repo lock, so writers are not held up. Under the lock, check no other digest ran meanwhile.
   const lastFile = path.join(root, LAST_RUN_FILE);
   const readLast = () => (boardFiles.existsSync(lastFile) ? boardFiles.readFileSync(lastFile, 'utf8').trim() : '');
-  const last = readLast();
+  const day = isoLocal(now).slice(0, 10);
+  const rel = `data/digest/${day}.md`;
+  const abs = path.join(root, rel);
+  // What this run bases its write on, read at its start (null = absent): in sqlite mode the write checks that neither
+  // file moved since, so a run that another one overtook gives up whenever it got overtaken.
+  const lastRaw = boardFiles.existsSync(lastFile) ? boardFiles.readFileSync(lastFile) : null;
+  const prevRaw = boardFiles.existsSync(abs) ? boardFiles.readFileSync(abs, 'utf8') : null;
+  const last = lastRaw ? lastRaw.toString('utf8').trim() : '';
   const since = last ? { rev: last } : { iso: new Date(now.getTime() - 24 * 3600_000).toISOString() };
   const { lines, head } = collectChanges(root, since);
   return withRepoLock(root, () => {
-    if (readLast() !== last) return { file: `data/digest/${isoLocal(now).slice(0, 10)}.md`, count: 0, skipped: true };
-    const day = isoLocal(now).slice(0, 10);
-    const rel = `data/digest/${day}.md`;
-    const abs = path.join(root, rel);
-    // what this run bases its write on (null = absent): the sqlite store's write checks neither moved meanwhile
-    const lastRaw = boardFiles.existsSync(lastFile) ? boardFiles.readFileSync(lastFile) : null;
-    const prevRaw = boardFiles.existsSync(abs) ? boardFiles.readFileSync(abs, 'utf8') : null;
-    const prev = prevRaw ?? `# Dasks digest ${day}\n`;
+    if (readLast() !== last) return { file: rel, count: 0, skipped: true };
+    afterCheck?.(); // tests: another run lands here
+    const prev = (boardFiles.existsSync(abs) ? boardFiles.readFileSync(abs, 'utf8') : null) ?? `# Dasks digest ${day}\n`;
     const attention = stuckDigest(root, now);
     const previousAttention = prev.slice(prev.lastIndexOf('\nStuck:') + 1).trim();
     if (!lines.length && (process.env.DASKS_STUCK_DIGEST_REFRESH !== '1' || previousAttention === attention.trim())) return { file: rel, count: 0, skipped: true };
     const header = `${isoLocal(now).slice(0, 16).replace('T', ' ')} — ${lines.length} change(s) since ${last ? last.slice(0, 8) : since.iso}`;
     const content = prev.replace(/\s*$/, '\n\n') + formatDigest(lines, header) + '\n' + attention;
-    beforeWrite?.(); // tests: another run lands here
     // sqlite store: withRepoLock does not serialize processes, so the write itself checks that neither file moved since
-    // it was read; a run that lost the race gives up, as the check above does in git mode.
+    // this run's start; a run that lost the race gives up, as the check above does in git mode.
     const sqlite = boardFiles.storeHead(root) !== null;
     const expect: Record<string, Buffer | string | null> = sqlite ? { [rel]: prevRaw, [LAST_RUN_FILE]: lastRaw } : {};
     try { commitFiles(root, [{ rel, content }, { rel: LAST_RUN_FILE, content: head + '\n' }], `digest: ${lines.length} change(s) -> ${rel}`, expect); }
