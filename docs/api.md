@@ -22,6 +22,7 @@ carry `Authorization: Bearer <token>` (see [auth.md](auth.md)). The MCP server a
 | `GET /api/merge-ok?card=&sha=` | `{ok: true}` only when you approved a merge of that card at exactly that head |
 | `GET /api/views`, `/api/ideas`, `/api/lessons` | project pages, ideas for later, lessons |
 | `GET /api/tasks/<id>/review-runs` | the recorded cross-model reviews of the card, one row per pass |
+| `GET /api/tasks/<id>/live` | the card's live window: the running agent's newest `steps`, changed `files`, `diff`, `phase`, `ended` ([runner.md](runner.md#live-window)); empty (`run_id: null`) when nothing was sent |
 | `GET /api/fleet`, `/api/whoami` | runners' heartbeats; who your token says you are ([fleet.md](fleet.md)) |
 | `GET /api/captain`, `/api/captain/chat?since=N` | the captain lease, harness chain and merge settings; the captain chat ([captain.md](captain.md)) |
 | `GET /api/backup` | the data backup: remote, branch, last good push, failures in a row, `state` (`off`, `never`, `ok`, `failing`) ([upgrade.md](upgrade.md#backup-and-restore)) |
@@ -42,6 +43,7 @@ carry `Authorization: Bearer <token>` (see [auth.md](auth.md)). The MCP server a
 | `POST /api/tasks/<id>/spec/review\|block\|unblock` | review the spec text, block it for Spec, lift a block |
 | `POST /api/tasks/<id>/messages` | send a card message |
 | `POST /api/tasks/<id>/review-runs` | record one cross-model review pass, 1 or 2 (`pass`, `head`, `reviewer`, `impl`, `verdict`, `open`, `answer`, …); the board adds the sender's family and the card's builders |
+| `POST /api/tasks/<id>/live` | the runner's live window update (`run_id`, `phase`, `steps`, `files`, `diff`, `ended`); redacted and capped, kept in memory only; SSE `event: live` tells open pages |
 | `POST /api/nodes/<id>` | edit a goal, milestone or the north star (`title`, `title_ko`, `title_en`, `why`, …); a goal also takes `profile` ([cards.md](cards.md#project-profile)) and `version_target`, a milestone of that goal or empty ([versions.md](versions.md)) |
 | `POST /api/fleet/heartbeat` | a runner's heartbeat |
 | `POST /api/backup/now` | push the data repo to `backup.remote` now; 200 with the status, 502 when the push failed, 409 when no remote is set |

@@ -52,6 +52,7 @@ import { appendDecision, CHOICES, type Decision, decisionRequest, entryId, findD
 import { mergeOkAt, SHA40_RE } from './lib/merge-ok.ts';
 import { assertSpecSize, parseSpecPut, parseVersionParam, readSpec, SPEC_MAX_BODY, writeSpec } from './lib/specs.ts';
 import { appendReviewRun, parseReviewRun, readReviewRuns, REVIEW_RUN_MAX_BODY } from './lib/review-runs.ts';
+import { LiveStore } from './lib/live-window.ts';
 import { cardsWithMessages, moveCursor, readCursor, startText } from './lib/start.ts';
 import { blockSpec, committedSpecIndex, headSha, reviewSpec, type SpecIndex, unblockSpec } from './lib/spec-state.ts';
 import { DS_FILE_RE, MIME, STATIC } from './lib/server-static.ts';
@@ -180,6 +181,8 @@ let version = 1;
 /** Changes with every start: a client that sees a new boot id after reconnecting reloads (it may have missed changes). */
 const BOOT = randomBytes(4).toString('hex');
 const clients = new Set<http.ServerResponse>();
+/** Live windows of running cards (src/lib/live-window.ts): memory only. */
+const liveWindows = new LiveStore();
 const MAX_LISTENERS = 128;
 
 /** Full and incremental reloads since start (the startup load is not counted); reported on /api/health. */
@@ -1102,6 +1105,14 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
       if (!board.tasks.some((t) => t.id === id)) return send(res, 404, { error: 'not found' });
       return send(res, 200, readSpec(ROOT, id, version));
     }
+    // A card's live window (memory only, src/lib/live-window.ts): the running agent's latest steps and worktree diff.
+    const lg = /^\/api\/tasks\/([^/]+)\/live$/.exec(p);
+    if (lg) {
+      const id = safeDecode(lg[1]);
+      if (!isTaskId(id)) return send(res, 400, { error: 'bad task id' });
+      if (!board.tasks.some((t) => t.id === id)) return send(res, 404, { error: 'not found' });
+      return send(res, 200, liveWindows.get(id));
+    }
     // Review run records: every stored pass in append order, answers included.
     const rg = /^\/api\/tasks\/([^/]+)\/review-runs$/.exec(p);
     if (rg) {
@@ -1235,6 +1246,18 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
       const row = parseReviewRun(body);
       if (!board.tasks.some((t) => t.id === id)) return send(res, 404, { error: 'not found' });
       return send(res, 201, { card: id, row: appendReviewRun(ROOT, id, row, actor, new Date(), { families: cfg.families, claimedBy: board.tasks.find((t) => t.id === id)?.claimed_by, machine: tokenMachine.get(req) ?? '' }) });
+    }
+    // POST /api/tasks/:id/live: the runner's live window update (agent token, like every agent write); SSE `live` tells
+    // open pages to read it. Nothing is written to data/.
+    const lw = req.method === 'POST' ? /^\/api\/tasks\/([^/]+)\/live$/.exec(p) : null;
+    if (lw) {
+      const id = safeDecode(lw[1]);
+      if (!isTaskId(id)) return send(res, 400, { error: 'bad task id' });
+      if (!rawActor(req)) return send(res, 400, { error: 'a live update must name its writer (X-Dasks-Actor)' });
+      if (!board.tasks.some((t) => t.id === id)) return send(res, 404, { error: 'not found' });
+      const w = liveWindows.update(id, body, actor);
+      for (const c of clients) c.write(`event: live\ndata: ${JSON.stringify({ card: id })}\n\n`);
+      return send(res, 200, w);
     }
     // Check items: POST …/items/seed {expected_version?} and POST …/items/<n> {state, result?,
     // evidence?, host?, expected_version?}. Shape 400 → task 404 → store 500 → item 404 → version 409. Never touches the task.

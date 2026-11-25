@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Live window: while the runner builds, reviews or fixes a card, it posts the agent's newest steps and the worktree's
+  diff since the run started to `POST /api/tasks/<card>/live` (agent token), and `GET /api/tasks/<card>/live` reads
+  them back. Both sides redact secrets; sensitive and config files show no content; steps, files and diff bytes are
+  capped, and the board keeps it in memory only, never in `data/`. `DASKS_RUNNER_LIVE_MS` sets the interval (`0` = off).
+  See docs/runner.md.
+
 ## 1.1.1 — 2026-11-16
 
 - Rethink cards: while a rethink card is open (not done, not cancelled), the card it replaces no longer asks you for a

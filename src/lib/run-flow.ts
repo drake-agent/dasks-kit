@@ -20,6 +20,7 @@ import { SPEC_RETRIES, type SpecPicked } from './runner.ts';
 import { fileRethink, limitNote } from './rethink.ts';
 import { lockTouches, prFilesRoute, SHA_RE } from './touches-actual.ts';
 import { claimWarnings } from './codemap/overlap.ts';
+import { livePusher } from './live-push.ts';
 import type { MapView } from './codemap/map.ts';
 
 export class BoardError extends Error {
@@ -53,6 +54,8 @@ export interface FlowEnv {
   rethinks?: number;
   /** The code map of a clone (null = none yet): a claimed card one import from a doing card gets a warning. */
   codemap?: (repo: string) => MapView | null;
+  /** How often a build, review or fix phase posts the card's live window (ms; unset or 0 = never). */
+  liveMs?: number;
 }
 
 const TOOL_NAME: Record<Tool, string> = { claude: 'Claude', codex: 'Codex' };
@@ -268,7 +271,10 @@ async function phase(env: FlowEnv, card: string, r: RunRecord, cfg: RunnerConfig
     onKept: (idle) => env.log(`${card}: past ${cfg.timeout_min} min and still writing (last change ${Math.floor(idle)} min ago): kept until ${cfg.idle_min} min without a change or ${cfg.max_min} min in all`),
   });
   env.track(card, agent);
+  // The card's live window (src/lib/live-push.ts): not for spec runs, which change no worktree.
+  const live = r.kind !== 'spec' && env.liveMs ? livePusher({ api: env.api, card, runId: r.run_id || r.job, phase: r.phase, dir: r.dir, base: r.start_sha || 'HEAD', logFile, intervalMs: env.liveMs }) : null;
   const res = await agent.done;
+  await live?.stop();
   env.track(card, null);
   return { ...res, text: agentText(res.raw) };
 }
