@@ -109,9 +109,9 @@ test('bad input exits 2 with a reason', { timeout: 30_000 }, () => {
   }
 });
 
-// Review pass 1 (Codex sol): R1 a path with a space or Korean name ran nothing and exited 0; R2 `todo: ''` failed the
-// run; R3 the recorded time left out module load and after hooks.
-test('R1: from a folder named with a space and Korean, a failing test still runs and exits 1', { timeout: 60_000 }, () => {
+// A path with a space or a Korean name must still run its tests; `todo: ''` must not fail the
+// run; a file's recorded time includes module load and after hooks.
+test('from a folder named with a space and Korean, a failing test still runs and exits 1', { timeout: 60_000 }, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'test run 리뷰 '));
   try {
     fs.mkdirSync(path.join(dir, 'scripts'));
@@ -126,7 +126,7 @@ test('R1: from a folder named with a space and Korean, a failing test still runs
   }
 });
 
-test("R2: a failing test marked todo: '' does not fail the run", { timeout: 60_000 }, () => {
+test("a failing test marked todo: '' does not fail the run", { timeout: 60_000 }, () => {
   const { dir, write } = rig();
   try {
     write('todo.test.mjs', `test('todo', { todo: '' }, () => { throw new Error('expected todo'); });\ntest('ok', () => {});`);
@@ -137,7 +137,7 @@ test("R2: a failing test marked todo: '' does not fail the run", { timeout: 60_0
   }
 });
 
-// Review pass 1 (Codex sol, dasks-kit PR 24): P1 a todo test whose late async error fails its file still exited 0.
+// A late uncaught error in a todo test still fails the file.
 test('P1: a late uncaught error after a failing todo test fails the run, as node --test does', { timeout: 60_000 }, () => {
   const { dir, write } = rig();
   try {
@@ -149,7 +149,7 @@ test('P1: a late uncaught error after a failing todo test fails the run, as node
   }
 });
 
-test('R3: a file time counts its load and after hooks, not only its test bodies', { timeout: 60_000 }, () => {
+test('a file time counts its load and after hooks, not only its test bodies', { timeout: 60_000 }, () => {
   const { dir, write } = rig();
   try {
     write('slow.test.mjs', `import { after } from 'node:test';\nawait new Promise((r) => setTimeout(r, 1200));\nafter(() => new Promise((r) => setTimeout(r, 800)));\ntest('quick', () => {});`);

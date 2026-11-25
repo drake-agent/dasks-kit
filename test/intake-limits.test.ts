@@ -167,11 +167,11 @@ test('a done or cancelled task with the same title → no 409', async () => {
 
 test('near-duplicate: titles with no a-z0-9 (fallback slug "task") match by normalized title only, not by the t-task id', async () => {
   // Every title with no Latin letters or digits gets the slug "task"; the id rule refused each new one as a repeat of t-task.
-  const b = await board([todo('beta.t-task-4', { title: '사주 용어 정리' })], { todo_limit: 100 });
+  const b = await board([todo('beta.t-task-4', { title: '용어집 정리' })], { todo_limit: 100 });
   try {
-    const other = await b.call('POST', '/api/tasks', post('명리 해석 카드'));
+    const other = await b.call('POST', '/api/tasks', post('번역 검토 카드'));
     assert.equal(other.status, 201, JSON.stringify(other.json));
-    const same = await b.call('POST', '/api/tasks', post('사주  용어 정리!'));
+    const same = await b.call('POST', '/api/tasks', post('용어집  정리!'));
     assert.equal(same.status, 409, JSON.stringify(same.json));
     assert.equal(same.json.rule, 'near-duplicate');
     assert.equal(same.json.existing, 'beta.t-task-4');
