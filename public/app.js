@@ -1707,6 +1707,8 @@ function connect() {
     const was = seen || (S.data ? { boot: d.boot, version: S.data.version } : null);
     if (!was || d.boot !== was.boot || d.version !== was.version) reloadSoon();
     seen = d;
+    // A live update does not move the board version: read the open card's live window again, it may have changed.
+    if (S.selected && S.data && D.task(S.selected)) fillLive(S.selected);
   });
   es.addEventListener('change', (e) => { try { seen = JSON.parse(e.data); } catch { /* no payload */ } reloadSoon(); });
   es.addEventListener('live', (e) => { let d = {}; try { d = JSON.parse(e.data); } catch { /* no payload */ } if (d.card && d.card === S.selected) fillLive(d.card); });

@@ -10,8 +10,9 @@ const APP = fs.readFileSync(path.join(ROOT, 'public/app.js'), 'utf8');
 const DICT_SRC = fs.readFileSync(path.join(ROOT, 'public/i18n.js'), 'utf8');
 const NOW = Date.parse('2026-10-23T12:00:00+09:00');
 
-/** app.js in a sandbox, page language ko. */
+/** app.js in a sandbox, page language ko; `fetched` lists every fetch URL, `sources` every EventSource. */
 function loadApp() {
+  const fetched: string[] = [], sources: any[] = [];
   const el = (): any => new Proxy({ dataset: {}, style: {}, classList: { add() {}, remove() {}, toggle() {}, contains: () => false } }, {
     get(t: any, k) { if (k in t) return t[k]; if (k === 'querySelectorAll') return () => []; if (k === 'querySelector' || k === 'closest') return () => null; return typeof k === 'string' && /^(add|remove|set|get|focus|blur|scroll|contains|matches|append)/.test(k) ? () => null : undefined; },
     set(t, k, v) { t[k] = v; return true; },
@@ -22,15 +23,17 @@ function loadApp() {
     location: { pathname: '/', search: '?lang=ko', hash: '', href: 'http://x/' }, history: { ['replace' + 'State']() {} },
     localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
     CSS: { escape: (s: string) => s }, URLSearchParams, URL, console,
-    fetch: () => new Promise(() => {}), EventSource: class {}, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, requestAnimationFrame: () => 0,
+    fetch: (u: string) => { fetched.push(String(u)); return new Promise(() => {}); },
+    EventSource: class { on: Record<string, (e: any) => void> = {}; constructor() { sources.push(this); } addEventListener(k: string, f: (e: any) => void) { this.on[k] = f; } },
+    setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, requestAnimationFrame: () => 0,
     getComputedStyle: () => ({ transitionDuration: '0s', transitionDelay: '0s' }),
     Date: Object.assign(function (...a: any[]) { return a.length ? new (Date as any)(...a) : new Date(NOW); }, { now: () => NOW, parse: Date.parse, UTC: Date.UTC }),
   };
   ctx.globalThis = ctx;
   vm.createContext(ctx);
   vm.runInContext(DICT_SRC, ctx);
-  vm.runInContext(`${APP}\n;globalThis.__live = liveHtml;`, ctx);
-  return { liveHtml: ctx.__live as (v: unknown) => string, DICT: vm.runInContext('DICT', ctx) };
+  vm.runInContext(`${APP}\n;globalThis.__live = liveHtml; globalThis.__connect = connect; globalThis.__S = S;`, ctx);
+  return { liveHtml: ctx.__live as (v: unknown) => string, DICT: vm.runInContext('DICT', ctx), connect: ctx.__connect as () => void, S: ctx.__S, fetched, sources };
 }
 
 const WIN = {
@@ -67,4 +70,18 @@ test('every live string exists in both languages', () => {
   const keys = (l: string) => Object.keys(DICT[l]).filter((k) => k.startsWith('qv.live')).sort();
   assert.deepEqual(keys('ko'), keys('en'));
   assert.equal(keys('en').length, 7);
+});
+
+test('a reconnect reads the open card live window again (a live update does not move the board version)', () => {
+  const { connect, S, fetched, sources } = loadApp();
+  S.data = { version: 3, tasks: [{ id: 'beta.t-a', goal: 'beta', status: 'doing' }], goals: [] };
+  S.selected = 'beta.t-a';
+  connect();
+  const es = sources.at(-1);
+  es.on.hello({ data: JSON.stringify({ boot: 'b1', version: 3 }) });
+  assert.ok(fetched.includes('/api/tasks/beta.t-a/live'), fetched.join(' '));
+  fetched.length = 0;
+  S.selected = 'beta';
+  es.on.hello({ data: JSON.stringify({ boot: 'b1', version: 3 }) });
+  assert.ok(!fetched.some((u) => u.endsWith('/live')), 'a goal panel reads no live window');
 });
