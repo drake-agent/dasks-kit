@@ -173,7 +173,8 @@ test('ETag: W/"<boot>-<version>", 304 on If-None-Match, a write gives a new tag'
 
 test('/api/board: one reply per data version for a short window, gzip and plain alike; a write builds a new one', async () => {
   // Every open page refetches the board on each change: a burst of reads is served one built reply (same `now`).
-  const reads = await Promise.all([{ 'Accept-Encoding': 'gzip' }, {}, { 'Accept-Encoding': 'GZIP;q=1' }, { 'Accept-Encoding': 'gzip' }].map((h) => raw('/api/board', h)));
+  const heads: Record<string, string>[] = [{ 'Accept-Encoding': 'gzip' }, {}, { 'Accept-Encoding': 'GZIP;q=1' }, { 'Accept-Encoding': 'gzip' }];
+  const reads = await Promise.all(heads.map((h) => raw('/api/board', h)));
   for (const r of reads) assert.equal(r.status, 200);
   assert.deepEqual(reads.map((r) => r.headers['content-encoding'] ?? ''), ['gzip', '', 'gzip', 'gzip']);
   const bodies = reads.map((r) => JSON.stringify(json(r)));
