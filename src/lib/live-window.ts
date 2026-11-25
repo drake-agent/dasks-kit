@@ -27,15 +27,30 @@ export interface LiveWindow {
 
 export const emptyWindow = (card: string): LiveWindow => ({ card, run_id: null, actor: null, phase: null, updated_at: null, ended: false, steps: [], files: [], diff: '', diff_truncated: false });
 
-/** One line, control characters dropped, redacted, then cut to max characters. */
+// Secrets passed as command-line flags, which the shared redactor does not know: `-a <pw>` (redis-cli), `-p<pw>` (mysql),
+// `--password x` / `--token=x` and the like, `-u user:pass` (curl). The value is replaced, the flag kept.
+const FLAG_VALUE = /(^|\s)(-a|--(?:[Pp]assword|passwd|pass|pwd|token|auth-token|access-token|api-?key|apikey|secret|client-secret|private-key))(=|\s+)("[^"]*"|'[^']*'|\S+)/g;
+const P_JOINED = /(^|\s)-p(?=[^\s-])\S+/g;
+const USER_PASS = /(^|\s)(-u|--user)(=|\s+)([^\s:]+):\S+/g;
+export function redactFlags(s: string, mark = '<redacted>'): string {
+  return s.replace(FLAG_VALUE, (_m, pre, flag, sep) => `${pre}${flag}${sep}${mark}`).replace(P_JOINED, (_m, pre) => `${pre}-p${mark}`)
+    .replace(USER_PASS, (_m, pre, flag, sep, user) => `${pre}${flag}${sep}${user}:${mark}`);
+}
+
+/** One line, control characters dropped, redacted (secret flags included), then cut to max characters. */
 export function cleanText(v: string, max: number): string {
-  const flat = redact(v.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim());
+  const flat = redact(redactFlags(v.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim()));
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
-// Files whose content is never shown, only their name: env files, key stores, configuration formats, and names that say
-// secret, token, password or credential.
-const SENSITIVE = /(?:^|\/)(?:\.env(?:\.[^/]*)?|\.npmrc|\.netrc|\.pypirc|\.htpasswd|id_(?:rsa|dsa|ecdsa|ed25519)[^/]*|[^/]*(?:secret|credential|password|passwd|token|private)[^/]*)$|\.(?:ya?ml|toml|ini|conf|cfg|properties|plist|pem|key|p12|pfx|jks|keystore|crt|cer)$/i;
+// Files whose content is never shown, only their name: env files, credential and key files, cluster and registry logins,
+// configuration formats, and names that say secret, token, password or credential.
+const SENSITIVE = new RegExp([
+  String.raw`(?:^|/)(?:\.env[^/]*|[^/]*\.envrc|\.npmrc|\.netrc|_netrc|\.pypirc|\.pgpass|\.git-credentials|\.htpasswd|\.s3cfg|\.boto|\.dockercfg|kubeconfig[^/]*|id_[^/]*)$`,
+  String.raw`(?:^|/)(?:\.docker/config\.json|\.kube/config|\.aws/(?:credentials|config)|\.ssh/[^/]+|\.gnupg/[^/]+)$`,
+  String.raw`(?:^|/)[^/]*(?:secret|credential|password|passwd|token|private|apikey|api_key)[^/]*$`,
+  String.raw`\.(?:ya?ml|toml|ini|conf|cfg|properties|plist|json5|pem|key|p8|p12|pfx|jks|keystore|crt|cer|der|kdbx|asc|gpg|ovpn|mobileprovision)$`,
+].join('|'), 'i');
 export const isSensitivePath = (p: string): boolean => SENSITIVE.test(p.trim());
 
 /** A unified diff made safe to show: a file section whose old or new name is sensitive keeps only its header line, text
@@ -46,9 +61,12 @@ export function sanitizeDiff(raw: string): { diff: string; truncated: boolean } 
   const parts = text.split(/^(?=diff --git )/m).filter((s) => s.startsWith('diff --git '));
   const safe = parts.map((sec) => {
     const head = sec.slice(0, sec.indexOf('\n') < 0 ? sec.length : sec.indexOf('\n'));
-    const m = /^diff --git "?a\/(.+?)"? "?b\/(.+?)"?$/.exec(head);
-    const names = [m?.[1], m?.[2], ...[...sec.matchAll(/^(?:rename (?:from|to)|[-+]{3} [ab]\/) ?(.+)$/gm)].map((x) => x[1])];
-    if (!m || names.some((n) => n && isSensitivePath(n))) return `${redact(head)}\n[diff omitted: sensitive file]\n`;
+    // a/ and b/ are optional: a repo may set diff.noprefix.
+    const m = /^diff --git "?(?:a\/)?(.+?)"? "?(?:b\/)?(.+?)"?$/.exec(head);
+    const names = [m?.[1], m?.[2], ...[...sec.matchAll(/^(?:rename (?:from|to) |copy (?:from|to) |[-+]{3} (?:[ab]\/)?)(.+)$/gm)].map((x) => x[1].split('\t')[0])];
+    // A new, renamed or copied file holding env-style KEY=value lines is a secrets file whatever its name.
+    const envLike = /^(?:new file mode|rename from|copy from)/m.test(sec) && /^\+\s*(?:export\s+)?[A-Z][A-Z0-9_]*=\S/m.test(sec);
+    if (!m || envLike || names.some((n) => n && isSensitivePath(n))) return `${redact(head)}\n[diff omitted: sensitive file]\n`;
     return redact(sec);
   }).join('').replace(/\n$/, '');
   if (Buffer.byteLength(safe, 'utf8') <= MAX_DIFF_BYTES) return { diff: safe, truncated: false };

@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { livePusher, stepsOf } from '../src/lib/live-push.ts';
+import { livePusher, stepsOf, worktreeSnapshot } from '../src/lib/live-push.ts';
 
 const KEY = 'ghp_' + 'Z9y8X7w6V5u4T3s2R1q0P9o8N7m6';
 
@@ -34,6 +34,49 @@ test('stepsOf: tool calls and text from stream-json, plain lines as notes, other
     { kind: 'tool', text: 'Bash: Run the tests' }, { kind: 'tool', text: 'Edit: src/a.ts' }, { kind: 'note', text: 'Now the docs.' }, { kind: 'note', text: 'codex says hi' },
   ]);
   assert.equal(stepsOf([toolUse('Bash', { command: `export TOKEN=${KEY}` })])[0].text.includes(KEY), false);
+  // Secret flags in a plain log line or a tool command never leave the runner.
+  const flags = stepsOf(['redis-cli -a fixtureRedisOnly ping', toolUse('Bash', { command: 'mysql -pfixtureMysqlPw -e "select 1"' }).trim()]);
+  assert.ok(!JSON.stringify(flags).includes('fixtureRedisOnly') && !JSON.stringify(flags).includes('fixtureMysqlPw'), JSON.stringify(flags));
+});
+
+test('worktreeSnapshot: a renamed env-style file and diff.noprefix', async () => {
+  const e = setup();
+  try {
+    fs.writeFileSync(path.join(e.dir, 'vars.txt'), 'DB_PASS=fixtureRenamedPw\nDB_HOST=x\nDB_USER=y\n');
+    e.g('add', '-A'); e.g('commit', '-qm', 'vars');
+    const base = e.g('rev-parse', 'HEAD');
+    e.g('mv', 'vars.txt', 'notes.md');
+    fs.appendFileSync(path.join(e.dir, 'notes.md'), 'DB_PORT=1\n');
+    fs.appendFileSync(path.join(e.dir, 'a.ts'), 'shown line\n');
+    e.g('config', 'diff.noprefix', 'true');
+    const snap = (await worktreeSnapshot(e.dir, base))!;
+    assert.ok(!snap.diff.includes('fixtureRenamedPw'), snap.diff);
+    assert.match(snap.diff, /^diff --git a\/notes\.md b\/notes\.md$|^diff --git a\/vars\.txt b\/notes\.md$/m);
+    assert.match(snap.diff, /^\+shown line$/m, 'noprefix config: an ordinary file is still shown');
+  } finally { e.cleanup(); }
+});
+
+test('pusher: one POST at a time, each waited for briefly; stop() is bounded on a board that never answers', async () => {
+  const e = setup();
+  try {
+    let calls = 0;
+    const hang = async () => { calls++; return new Promise(() => {}); };
+    const p = livePusher({ api: hang, card: 'shared.t-live', runId: 'r', phase: 'building', dir: e.dir, base: e.base, logFile: e.logFile, intervalMs: 60_000, postWaitMs: 100, stopWaitMs: 300 });
+    fs.appendFileSync(e.logFile, 'one\n');
+    const t0 = Date.now();
+    assert.equal(await p.tick(), false);
+    assert.ok(Date.now() - t0 < 2_000, 'the caller waited only briefly');
+    // The git snapshot may outlast the 100 ms wait on a busy machine: let the first POST start before the next tick.
+    for (let i = 0; i < 200 && !calls; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(calls, 1);
+    fs.appendFileSync(e.logFile, 'two\n');
+    assert.equal(await p.tick(), false);
+    assert.equal(calls, 1, 'no second POST while the first is unanswered');
+    const t1 = Date.now();
+    assert.equal(await p.stop(), false);
+    assert.ok(Date.now() - t1 < 2_000, 'stop() did not wait for the board');
+    assert.equal(calls, 1);
+  } finally { e.cleanup(); }
 });
 
 test('pusher: posts new steps and the sanitized diff since base (committed, uncommitted, untracked), then the ended state', async () => {

@@ -68,6 +68,35 @@ test('store: secrets are redacted in steps, paths and diffs; sensitive and heade
   assert.ok(!ren.includes('plain-value'), ren);
 });
 
+test('sanitizeDiff: credential files by name, env-style new or renamed files, and noprefix headers', () => {
+  for (const f of ['.pgpass', 'home/.netrc', '.npmrc', '.pypirc', '.git-credentials', '.htpasswd', 'deploy/kubeconfig', '.docker/config.json', '.kube/config',
+    '.aws/credentials', '.ssh/id_ed25519', 'id_rsa', 'certs/site.pem', 'a.p12', 'tls.key', 'local.envrc', '.env.production']) {
+    assert.doesNotMatch(sanitizeDiff(diffOf(f, 'pw-old-value-1')).diff, /pw-old-value-1/, f);
+  }
+  // A secrets file renamed to an innocent name, and a new file of KEY=value lines, show no content.
+  const renamed = 'diff --git a/notes.txt b/later.txt\nsimilarity index 80%\nrename from notes.txt\nrename to later.txt\n@@ -1 +1,2 @@\n DB_PASS=hunter2\n+API_HOST=xyz-plain\n';
+  assert.doesNotMatch(sanitizeDiff(renamed).diff, /hunter2|xyz-plain/);
+  const added = 'diff --git a/seed.txt b/seed.txt\nnew file mode 100644\n--- /dev/null\n+++ b/seed.txt\n@@ -0,0 +1 @@\n+DB_PASS=plainpw\n';
+  assert.doesNotMatch(sanitizeDiff(added).diff, /plainpw/);
+  // An ordinary new code file still shows.
+  assert.match(sanitizeDiff('diff --git a/a.ts b/a.ts\nnew file mode 100644\n--- /dev/null\n+++ b/a.ts\n@@ -0,0 +1 @@\n+const x = 1;\n').diff, /^\+const x = 1;$/m);
+  // diff.noprefix: headers without a/ b/ are read, not hidden; a sensitive one still is.
+  const np = (f: string, l: string) => `diff --git ${f} ${f}\n--- ${f}\n+++ ${f}\n@@ -1 +1 @@\n+${l}\n`;
+  assert.match(sanitizeDiff(np('src/a.ts', 'shown')).diff, /^\+shown$/m);
+  assert.doesNotMatch(sanitizeDiff(np('.pgpass', 'hidden-pw')).diff, /hidden-pw/);
+});
+
+test('steps: secret command-line flags are redacted, ordinary flags kept', () => {
+  const s = new LiveStore();
+  const texts = ['Bash: redis-cli -a fixtureRedisOnly ping', 'Bash: mysql -uroot -pfixtureMysqlPw db', 'Bash: tool --password fixturePw1 --token=fixtureTok2',
+    'Bash: curl -u bob:fixtureCurlPw https://x.test', "Bash: app --api-key 'fixture key3'", 'Bash: git add -A src && mkdir -p out'];
+  const w = s.update(CARD, { run_id: 'r', steps: texts.map((text) => ({ text })) }, 'runner@m');
+  const all = w.steps.map((x) => x.text).join('\n');
+  for (const leak of ['fixtureRedisOnly', 'fixtureMysqlPw', 'fixturePw1', 'fixtureTok2', 'fixtureCurlPw', 'fixture key3']) assert.ok(!all.includes(leak), leak);
+  assert.match(all, /curl -u bob:<redacted>/);
+  assert.match(all, /git add -A src && mkdir -p out/);
+});
+
 test('store: bad bodies are refused with 400', () => {
   const s = new LiveStore();
   for (const body of [null, [], {}, { run_id: 'bad id!' }, { run_id: 'r', extra: 1 }, { run_id: 'r', phase: 'dancing' }, { run_id: 'r', steps: 'x' },

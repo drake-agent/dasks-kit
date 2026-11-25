@@ -211,11 +211,15 @@ and posts them to `POST /api/tasks/<card>/live` with its agent token. When the p
 more, marked ended, and the panel keeps showing it.
 
 - **Nothing secret leaves the machine.** The runner redacts every step and the diff before it sends them, and the board
-  does it again before it keeps them. A file whose name says env, key, secret, token, password or credential, or that
-  is a config format (`.yaml`, `.toml`, `.ini`, `.plist`, …), shows only its header line, never its content.
+  does it again before it keeps them, secret command-line flags included (`-a`, `-p<pw>`, `--password`, `--token`,
+  `-u user:pass`, …). A file whose name says env, key, secret, token, password or credential, a credential file
+  (`.pgpass`, `.netrc`, `.git-credentials`, kubeconfig, `.docker/config.json`, keys and certificates, …), a config
+  format (`.yaml`, `.toml`, `.ini`, `.plist`, …), and a new or renamed file of `KEY=value` lines show only their header
+  line, never their content. A rename is judged by both names.
 - **Bounded.** The board keeps the newest 40 steps of 240 characters, 30 files and 16 KB of diff per card, for at most
   64 cards, in memory only: nothing goes to `data/`, nothing is committed, and a board restart empties it.
-- **Never in the way.** A board error is skipped, a board without the route turns it off for that phase, and nothing
+- **Never in the way.** One post at a time, each waited for at most 5 s, and the end of a phase waits at most 5 s for
+  the last one. A board error is skipped, a board without the route turns it off for that phase, and nothing
   decides anything from it. `DASKS_RUNNER_LIVE_MS` sets the interval; `0` turns it off.
 
 ## Turn it on
