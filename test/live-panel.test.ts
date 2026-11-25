@@ -11,7 +11,7 @@ const DICT_SRC = fs.readFileSync(path.join(ROOT, 'public/i18n.js'), 'utf8');
 const NOW = Date.parse('2026-10-23T12:00:00+09:00');
 
 /** app.js in a sandbox, page language ko; `fetched` lists every fetch URL, `sources` every EventSource. */
-function loadApp() {
+function loadApp(answer: (u: string) => Promise<unknown> = () => new Promise(() => {})) {
   const fetched: string[] = [], sources: any[] = [];
   const el = (): any => new Proxy({ dataset: {}, style: {}, classList: { add() {}, remove() {}, toggle() {}, contains: () => false } }, {
     get(t: any, k) { if (k in t) return t[k]; if (k === 'querySelectorAll') return () => []; if (k === 'querySelector' || k === 'closest') return () => null; return typeof k === 'string' && /^(add|remove|set|get|focus|blur|scroll|contains|matches|append)/.test(k) ? () => null : undefined; },
@@ -23,7 +23,7 @@ function loadApp() {
     location: { pathname: '/', search: '?lang=ko', hash: '', href: 'http://x/' }, history: { ['replace' + 'State']() {} },
     localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
     CSS: { escape: (s: string) => s }, URLSearchParams, URL, console,
-    fetch: (u: string) => { fetched.push(String(u)); return new Promise(() => {}); },
+    fetch: (u: string) => { fetched.push(String(u)); return answer(String(u)); },
     EventSource: class { on: Record<string, (e: any) => void> = {}; constructor() { sources.push(this); } addEventListener(k: string, f: (e: any) => void) { this.on[k] = f; } },
     setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, requestAnimationFrame: () => 0,
     getComputedStyle: () => ({ transitionDuration: '0s', transitionDelay: '0s' }),
@@ -32,8 +32,8 @@ function loadApp() {
   ctx.globalThis = ctx;
   vm.createContext(ctx);
   vm.runInContext(DICT_SRC, ctx);
-  vm.runInContext(`${APP}\n;globalThis.__live = liveHtml; globalThis.__connect = connect; globalThis.__S = S;`, ctx);
-  return { liveHtml: ctx.__live as (v: unknown) => string, DICT: vm.runInContext('DICT', ctx), connect: ctx.__connect as () => void, S: ctx.__S, fetched, sources };
+  vm.runInContext(`${APP}\n;globalThis.__live = liveHtml; globalThis.__connect = connect; globalThis.__S = S; globalThis.__fill = fillLive; globalThis.__LIVES = LIVES;`, ctx);
+  return { liveHtml: ctx.__live as (v: unknown) => string, DICT: vm.runInContext('DICT', ctx), connect: ctx.__connect as () => void, S: ctx.__S, fetched, sources, fillLive: ctx.__fill as (id: string) => Promise<void>, LIVES: ctx.__LIVES as Map<string, any> };
 }
 
 const WIN = {
@@ -84,4 +84,23 @@ test('a reconnect reads the open card live window again (a live update does not 
   S.selected = 'beta';
   es.on.hello({ data: JSON.stringify({ boot: 'b1', version: 3 }) });
   assert.ok(!fetched.some((u) => u.endsWith('/live')), 'a goal panel reads no live window');
+});
+
+test('a slower, older read never paints over a newer one', async () => {
+  const waits: ((v: unknown) => void)[] = [];
+  const reply = (body: unknown) => ({ ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => body });
+  const { fillLive, LIVES } = loadApp((u) => new Promise((r) => { if (u.endsWith('/live')) waits.push(r); }));
+  const older = fillLive('beta.t-a');   // e.g. the read after a reconnect
+  const newer = fillLive('beta.t-a');   // the read after a live event
+  waits[1](reply({ ...WIN, seq: 9, phase: 'reviewing', ended: true }));
+  await newer;
+  waits[0](reply({ ...WIN, seq: 5, phase: 'building' }));
+  await older;
+  assert.equal(LIVES.get('beta.t-a').seq, 9);
+  assert.equal(LIVES.get('beta.t-a').ended, true);
+  // A new run after the shown one ended is taken even with a lower seq (another machine's clock).
+  const next = fillLive('beta.t-a');
+  waits[2](reply({ ...WIN, run_id: 'r2', seq: 3 }));
+  await next;
+  assert.equal(LIVES.get('beta.t-a').run_id, 'r2');
 });

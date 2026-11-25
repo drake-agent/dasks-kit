@@ -1120,6 +1120,10 @@ function liveHtml(v) {
 /** Read the card's live window and redraw only its slot (an open file list stays open). */
 async function fillLive(id) {
   let v; try { v = await api(`/api/tasks/${encodeURIComponent(id)}/live`); } catch { return; }
+  // Two reads can cross (a reconnect and a live event): an answer older than the one shown is dropped, by the board's
+  // own ordering rule (seq; a new run once the shown one ended).
+  const cur = LIVES.get(id);
+  if (cur && (Number(v?.seq) || 0) < (Number(cur.seq) || 0) && !(cur.ended && cur.run_id !== v?.run_id)) return;
   LIVES.set(id, v);
   const el = document.querySelector(`#panel [data-live="${CSS.escape(id)}"]`);
   if (!el) return;
