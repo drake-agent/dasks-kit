@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.0 — 2026-11-25
 
 - Optional SQLite board store: with `store.mode` `sqlite` in `config.json` the board keeps its `data/` files as rows of
   one SQLite file (`node:sqlite`, no new dependency), so a write is one transaction instead of a lock, a journal and a
