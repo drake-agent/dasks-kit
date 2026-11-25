@@ -36,6 +36,14 @@
   dropped). See docs/cards.md.
 - Code map: Swift access-level imports (`public import X`, `package import X`, `internal`, `fileprivate`, `private`) are
   read as the same edge as `import X`.
+- Secret scan: a gitleaks run that exits 0 is clean only when it prints its `N commits scanned` summary and no error
+  line. gitleaks also exits 0 when its own `git log` fails (an `ERR [git]` line), for example for a base the clone does
+  not have; the runner then pushed a branch nothing had scanned. Now the runner's push, its saved-work push and
+  `dask submit` refuse to push in that case. A count of 0 (a delete-only commit) is still clean. See docs/runner.md.
+- Secret scan: merge commits are scanned by their first-parent diff (`--diff-merges=first-parent`), so a secret added
+  only while merging is caught; plain `git log -p` shows no patch for a merge.
+- `dasks ci`: every ssh call to another Mac sends keepalives and ends after `DASKS_CI_REMOTE_SEC` seconds (default 900),
+  so a host that hangs fails that step instead of holding the command for hours. See docs/ci-runners.md.
 
 ## 1.1.1 — 2026-11-16
 

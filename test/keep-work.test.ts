@@ -29,7 +29,8 @@ function world() {
     return g(cwd, 'rev-parse', 'HEAD');
   };
   const input = (over: Partial<SaveInput> = {}): SaveInput => ({ repo, dir, branch: BRANCH, base: BASE, card: CARD, machine: 'box', reason: 'timeout: card timeout', gitleaks: path.join(tmp, 'gitleaks'), ...over });
-  fs.writeFileSync(path.join(tmp, 'gitleaks'), '#!/bin/bash\nexit 0\n', { mode: 0o755 });
+  // Like the real one, a clean run says how many commits it read (an exit 0 without it is not a clean scan).
+  fs.writeFileSync(path.join(tmp, 'gitleaks'), '#!/bin/bash\necho "INF 1 commits scanned." >&2\nexit 0\n', { mode: 0o755 });
   // the card worktree, as the run sets it up
   const worktree = () => g(repo, 'worktree', 'add', '-q', '-b', BRANCH, dir, BASE);
   const onOrigin = () => { const r = spawnSync('git', ['rev-parse', '-q', '--verify', `refs/heads/${BRANCH}`], { cwd: bare, encoding: 'utf8' }); return r.status === 0 ? r.stdout.trim() : ''; };
@@ -130,6 +131,26 @@ test('saveWork: staged, changed and new paths all go in; a second run names the 
     assert.ok(fs.existsSync(path.join(w.dir, 'new.txt')));
     assert.match(await saveWork(w.input()), new RegExp(`^Work saved: branch ${BRANCH} on origin @ ${tip.slice(0, 7)}\\.`));
     assert.equal(w.onOrigin(), tip);
+  } finally { w.done(); }
+});
+
+test('saveWork: a gitleaks exit 0 that scanned nothing (its git log failed) is not clean: nothing is pushed', async () => {
+  const w = world();
+  try {
+    w.worktree();
+    fs.writeFileSync(path.join(w.dir, 'new.txt'), 'n');
+    const noscan = path.join(w.tmp, 'gitleaks-noscan');
+    fs.writeFileSync(noscan, '#!/bin/bash\necho "ERR [git] fatal: bad revision" >&2\necho "INF 0 commits scanned." >&2\nexit 0\n', { mode: 0o755 });
+    assert.match(await saveWork(w.input({ gitleaks: noscan })), /^Work not pushed: gitleaks flagged the new commits \(or failed\)/);
+    assert.equal(w.onOrigin(), '', 'nothing left this Mac');
+    const silent = path.join(w.tmp, 'gitleaks-silent');
+    fs.writeFileSync(silent, '#!/bin/bash\nexit 0\n', { mode: 0o755 });
+    assert.match(await saveWork(w.input({ gitleaks: silent })), /^Work not pushed: gitleaks flagged/, 'no scan count at all is no scan either');
+    assert.equal(w.onOrigin(), '');
+    // A clean run that counts 0 commits (a delete-only commit adds no line to scan) is still clean.
+    const zero = path.join(w.tmp, 'gitleaks-zero');
+    fs.writeFileSync(zero, '#!/bin/bash\necho "INF 0 commits scanned." >&2\nexit 0\n', { mode: 0o755 });
+    assert.match(await saveWork(w.input({ gitleaks: zero })), /^Work saved: /);
   } finally { w.done(); }
 });
 
@@ -270,5 +291,23 @@ test('saveWork with the real gitleaks: a token in an uncommitted file is caught 
     assert.equal(w.onOrigin(), '');
     fs.writeFileSync(path.join(w.dir, 'conf.txt'), 'harmless\n');
     assert.match(await saveWork(w.input({ gitleaks: realGitleaks })), /^Work saved: /);
+  } finally { w.done(); }
+});
+
+test('saveWork with the real gitleaks: a token added only in a merge commit is caught (merges are scanned by their first-parent diff)', { skip: !realGitleaks && 'gitleaks is not installed' }, async () => {
+  const w = world();
+  try {
+    w.worktree();
+    const id = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid'];
+    w.g(w.dir, 'checkout', '-q', '-b', 'side');
+    fs.writeFileSync(path.join(w.dir, 'side.txt'), 'side\n'); w.g(w.dir, 'add', 'side.txt'); w.g(w.dir, ...id, 'commit', '-qm', 'side');
+    w.g(w.dir, 'checkout', '-q', BRANCH);
+    fs.writeFileSync(path.join(w.dir, 'mine.txt'), 'mine\n'); w.g(w.dir, 'add', 'mine.txt'); w.g(w.dir, ...id, 'commit', '-qm', 'mine');
+    w.g(w.dir, 'merge', '-q', '--no-ff', '--no-commit', 'side');
+    const token = 'ghp_' + 'aB3dE6gH9kL2nP5qR8tU1wX4zC7fJ0mS3vY6';
+    fs.writeFileSync(path.join(w.dir, 'conf.txt'), `github_token = "${token}"\n`); w.g(w.dir, 'add', 'conf.txt');
+    w.g(w.dir, ...id, 'commit', '-qm', 'merge side');
+    assert.match(await saveWork(w.input({ gitleaks: realGitleaks })), /gitleaks flagged/);
+    assert.equal(w.onOrigin(), '', 'nothing left this Mac');
   } finally { w.done(); }
 });
