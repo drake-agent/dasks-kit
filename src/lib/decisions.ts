@@ -78,7 +78,7 @@ function body(e: Record<string, unknown>): string {
 const sign = (key: Buffer, e: Record<string, unknown>) => createHmac('sha256', key).update(body(e)).digest('hex');
 
 function readText(file: string): string {
-  try { return fs.readFileSync(file, 'utf8'); } catch (e: any) { if (e.code === 'ENOENT') return ''; throw e; }
+  try { return fs.readFileSync(file, 'utf8'); } catch (e: any) { if (e.code === 'ENOENT') return ''; throw e; } // not-board: the gitignored ledger
 }
 
 function parseLedgerEntries(text: string): Decision[] {
@@ -110,7 +110,7 @@ export function appendDecision(file: string, key: Buffer, input: DecisionInput, 
 }
 
 function appendEntries(file: string, key: Buffer, inputs: DecisionInput[], now: Date, headFile?: string): Decision[] {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.mkdirSync(path.dirname(file), { recursive: true }); // not-board: the gitignored ledger
   const text = readText(file);
   if (text && !text.endsWith('\n')) throw new Error(`${file}: last line is incomplete; run bin/verify-decisions.ts before writing more`);
   const lines = text.split('\n').filter(Boolean);
@@ -130,7 +130,7 @@ function appendEntries(file: string, key: Buffer, inputs: DecisionInput[], now: 
     out.push(e);
     last = JSON.stringify(e);
   }
-  const fd = fs.openSync(file, 'a', 0o600);
+  const fd = fs.openSync(file, 'a', 0o600); // not-board: the gitignored ledger
   try {
     const buf = Buffer.from(out.map((e) => JSON.stringify(e) + '\n').join(''), 'utf8');
     for (let off = 0; off < buf.length;) {
@@ -181,7 +181,7 @@ export const WITNESS_REL = 'data/decisions.witness.json';
 // A witness names the checkout (its real path) whose ledger it vouches for: the ledger is gitignored and lives only in the
 // live board's checkout, so other clones, worktrees and CI (which carry the tracked witness) must not compare against it.
 // The path alone, not the host name: renaming the Mac must not lapse the protection.
-const here = (root: string) => { let r = root; try { r = fs.realpathSync(root); } catch { /* as given */ } return { root: r }; };
+const here = (root: string) => { let r = root; try { r = fs.realpathSync(root); } catch { /* as given */ } return { root: r }; }; // not-board: the checkout root
 export const witnessContent = (seq: number, lastLine: string, root: string) => JSON.stringify({ v: 1, seq, last: sha256(lastLine), ...here(root) }) + '\n';
 /** seq of a witness written for this checkout; null when unreadable; 'other' when it is another checkout's. */
 const parseWitness = (text: string, root: string): number | null | 'other' => {

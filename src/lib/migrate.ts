@@ -7,6 +7,7 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import YAML from 'yaml';
 import { commitFiles, git, gitCommonDir, withRepoLock } from './write.ts';
+import * as boardFiles from './board-files.ts';
 
 export const SCHEMA_REL = 'data/schema.json';
 
@@ -33,16 +34,16 @@ export const MIGRATIONS: Migration[] = [
 export function dropTaskFields(root: string, keys: string[]): { rel: string; content: string }[] {
   const out: { rel: string; content: string }[] = [];
   const walk = (rel: string) => {
-    for (const e of fs.readdirSync(path.join(root, rel), { withFileTypes: true })) {
+    for (const e of boardFiles.readdirSync(path.join(root, rel), { withFileTypes: true })) {
       const r = `${rel}/${e.name}`;
       if (e.isDirectory()) walk(r);
       else if (e.name.endsWith('.md')) {
-        const next = withoutKeys(fs.readFileSync(path.join(root, r), 'utf8'), keys);
+        const next = withoutKeys(boardFiles.readFileSync(path.join(root, r), 'utf8'), keys);
         if (next !== null) out.push({ rel: r, content: next });
       }
     }
   };
-  if (fs.existsSync(path.join(root, 'data/tasks'))) walk('data/tasks');
+  if (boardFiles.existsSync(path.join(root, 'data/tasks'))) walk('data/tasks');
   return out;
 }
 
@@ -74,7 +75,7 @@ export const schemaContent = (v: number) => JSON.stringify({ schema: v }) + '\n'
 /** The board's schema version: 0 without the file. An unreadable file throws: guessing could migrate a board twice. */
 export function boardSchema(root: string): number {
   let text: string;
-  try { text = fs.readFileSync(path.join(root, SCHEMA_REL), 'utf8'); } catch (e: any) { if (e.code === 'ENOENT') return 0; throw e; }
+  try { text = boardFiles.readFileSync(path.join(root, SCHEMA_REL), 'utf8'); } catch (e: any) { if (e.code === 'ENOENT') return 0; throw e; }
   let v: unknown;
   try { v = JSON.parse(text)?.schema; } catch { v = undefined; }
   if (!Number.isInteger(v) || (v as number) < 1) throw new Error(`${SCHEMA_REL} is unreadable (want {"schema": <version>}); fix it by hand from git history`);
@@ -93,7 +94,7 @@ export function migrateBoard(root: string, now = new Date()): MigrateResult {
   if (from === SCHEMA_VERSION) return { from, to: from, backup: '', applied: [] };
   return withRepoLock(root, () => {
     const dir = path.join(gitCommonDir(root), 'dasks-backups');
-    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true }); // not-board: the backup folder in .git
     const backup = path.join(dir, `${now.toISOString().replace(/[:.]/g, '-')}-schema-${from}.bundle`);
     // Every ref and all history: `git clone <bundle>` gives the board back as it was before the first step.
     git(root, ['bundle', 'create', '-q', backup, '--all']);

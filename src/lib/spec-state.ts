@@ -14,6 +14,7 @@ import { blockNoteError } from './check.ts';
 import { currentSpecVersion, isoNow, readSpecUnlocked, sectionOf, SECTIONS, specPaths, type SpecView } from './specs.ts';
 import { cardDeps, cardRepo, cardSize, cardTouches, field } from './card-fields.ts';
 import { sameExceptAutoOk } from '../../public/user-ask.js';
+import * as boardFiles from './board-files.ts';
 
 // ---------- families ----------
 
@@ -58,7 +59,7 @@ export function currentSpec(root: string, id: string): SpecView | null {
 interface SpecSource { version: number; meta: () => { sha256?: string; by?: string }; text: () => string; textKey?: string }
 function workingSpec(root: string, id: string): SpecSource {
   const v = currentSpecVersion(root, id); const p = specPaths(id);
-  return { version: v, meta: () => JSON.parse(fs.readFileSync(path.join(root, p.meta(v)), 'utf8')), text: () => fs.readFileSync(path.join(root, p.text(v)), 'utf8') };
+  return { version: v, meta: () => JSON.parse(boardFiles.readFileSync(path.join(root, p.meta(v)), 'utf8')), text: () => boardFiles.readFileSync(path.join(root, p.text(v)), 'utf8') };
 }
 const derived = new Map<string, { key: string; state: SpecState }>();
 /** The stored field, else blocked, else derived from the spec (cached by the version's hash, not its number: a
@@ -99,16 +100,16 @@ export function headSha(root: string): string {
   try {
     const common = gitCommonDir(root);
     const dotgit = path.join(root, '.git');
-    const own = fs.statSync(dotgit).isFile() ? path.resolve(root, /^gitdir:\s*(.+)$/m.exec(fs.readFileSync(dotgit, 'utf8'))![1].trim()) : dotgit;
-    let v = fs.readFileSync(path.join(own, 'HEAD'), 'utf8').trim();
+    const own = fs.statSync(dotgit).isFile() ? path.resolve(root, /^gitdir:\s*(.+)$/m.exec(fs.readFileSync(dotgit, 'utf8'))![1].trim()) : dotgit; // not-board: git refs
+    let v = fs.readFileSync(path.join(own, 'HEAD'), 'utf8').trim(); // not-board: git refs
     for (let hop = 0; hop < 8; hop++) {
       if (OID_RE.test(v)) return v;
       const ref = /^ref:\s*(.+)$/.exec(v)?.[1];
       if (!ref) break;
       let next: string | undefined;
-      try { next = fs.readFileSync(path.join(common, ref), 'utf8').trim(); } catch { /* packed */ }
+      try { next = fs.readFileSync(path.join(common, ref), 'utf8').trim(); } catch { /* packed */ } // not-board: git refs
       if (next === undefined) {
-        let packed = ''; try { packed = fs.readFileSync(path.join(common, 'packed-refs'), 'utf8'); } catch { /* none */ }
+        let packed = ''; try { packed = fs.readFileSync(path.join(common, 'packed-refs'), 'utf8'); } catch { /* none */ } // not-board: git refs
         next = packed.split('\n').find((l) => l.endsWith(' ' + ref))?.split(' ')[0];
       }
       if (next === undefined) break;
@@ -217,7 +218,7 @@ export function claimsRelPath(id: string): string {
 }
 /** The stored history; null for a task without one (its first claim seeds it). */
 export function readClaimHistory(root: string, id: string): ClaimHistory | null {
-  try { const h = JSON.parse(fs.readFileSync(path.join(root, claimsRelPath(id)), 'utf8')); return { partial: !!h.partial, who: Array.isArray(h.who) ? h.who.map(String) : [] }; }
+  try { const h = JSON.parse(boardFiles.readFileSync(path.join(root, claimsRelPath(id)), 'utf8')); return { partial: !!h.partial, who: Array.isArray(h.who) ? h.who.map(String) : [] }; }
   catch (e: any) { if (e.code === 'ENOENT') return null; throw new HttpError(500, `claim history of ${id} is unreadable: ${e.message}`); }
 }
 const historyContent = (h: ClaimHistory) => JSON.stringify(h, null, 1) + '\n';

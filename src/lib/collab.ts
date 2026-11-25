@@ -1,8 +1,8 @@
 // Shared rules for many writers on one card: the "## Context" block (what/why/do/rec/after, any language), the
 // review/blocked-on-user context rule, claim holders and the activity log.
-import fs from 'node:fs';
 import path from 'node:path';
 import { type Task, TASK_ID_RE } from './schema.ts';
+import * as boardFiles from './board-files.ts';
 
 // ---------- context block ----------
 // API field -> body label. The UI (public/app.js ctxOf) reads the same labels.
@@ -110,7 +110,7 @@ export function activityRelPath(id: string): string {
 
 export function readActivity(root: string, id: string, limit = MAX_ACTIVITY): Activity[] {
   let text = '';
-  try { text = fs.readFileSync(path.join(root, activityRelPath(id)), 'utf8'); } catch { return []; }
+  try { text = boardFiles.readFileSync(path.join(root, activityRelPath(id)), 'utf8'); } catch { return []; }
   const out: Activity[] = [];
   for (const l of text.split('\n')) { if (!l.trim()) continue; try { out.push(JSON.parse(l)); } catch { /* skip bad line */ } }
   return out.slice(-limit);

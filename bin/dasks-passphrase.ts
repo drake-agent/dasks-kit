@@ -54,12 +54,12 @@ if (pass.length > MAX) { console.error(`use at most ${MAX} characters; nothing c
 
 const file = passphraseFile();
 const dir = path.dirname(file);
-fs.mkdirSync(dir, { recursive: true, mode: strict ? 0o755 : 0o700 });
+fs.mkdirSync(dir, { recursive: true, mode: strict ? 0o755 : 0o700 }); // not-board: secrets dir
 const tmp = `${file}.${process.pid}.tmp`;
 // Default: 0600, this account only. Strict: 0640, group = the server account's group, owned by root.
-fs.writeFileSync(tmp, hashPassphrase(pass) + '\n', { mode: strict ? 0o640 : 0o600 });
+fs.writeFileSync(tmp, hashPassphrase(pass) + '\n', { mode: strict ? 0o640 : 0o600 }); // not-board: secrets dir
 if (strict) fs.chownSync(tmp, 0, serverGid);
-fs.renameSync(tmp, file);
+fs.renameSync(tmp, file); // not-board: secrets dir
 if (strict) {
   const gids = execFileSync('id', ['-G', String(serverUid)], { encoding: 'utf8' }).trim().split(/\s+/).map(Number);
   const why = writableByUs(file, serverUid, gids);

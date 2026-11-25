@@ -1,5 +1,4 @@
 // State-change digest from git history: only status changes, grouped by app, one line each.
-import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import YAML from 'yaml';
@@ -8,6 +7,7 @@ import { loadConfig } from './config.ts';
 import { stuckReport, STUCK_REASONS } from './stuck.ts';
 import { replacedOnBoard } from './rethink.ts';
 import { commitFiles, git, GIT_BOUND, isoLocal, withRepoLock } from './write.ts';
+import * as boardFiles from './board-files.ts';
 
 export interface DigestLine { app: string; ts: string; text: string }
 
@@ -153,7 +153,7 @@ export function runDigest(root: string, now = new Date()): { file: string; count
   // Walking the history takes a while and the history it reads never changes: do it before
   // taking the repo lock, so writers are not held up. Under the lock, check no other digest ran meanwhile.
   const lastFile = path.join(root, LAST_RUN_FILE);
-  const readLast = () => (fs.existsSync(lastFile) ? fs.readFileSync(lastFile, 'utf8').trim() : '');
+  const readLast = () => (boardFiles.existsSync(lastFile) ? boardFiles.readFileSync(lastFile, 'utf8').trim() : '');
   const last = readLast();
   const since = last ? { rev: last } : { iso: new Date(now.getTime() - 24 * 3600_000).toISOString() };
   const { lines, head } = collectChanges(root, since);
@@ -162,7 +162,7 @@ export function runDigest(root: string, now = new Date()): { file: string; count
     const day = isoLocal(now).slice(0, 10);
     const rel = `data/digest/${day}.md`;
     const abs = path.join(root, rel);
-    const prev = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : `# Dasks digest ${day}\n`;
+    const prev = boardFiles.existsSync(abs) ? boardFiles.readFileSync(abs, 'utf8') : `# Dasks digest ${day}\n`;
     const attention = stuckDigest(root, now);
     const previousAttention = prev.slice(prev.lastIndexOf('\nStuck:') + 1).trim();
     if (!lines.length && (process.env.DASKS_STUCK_DIGEST_REFRESH !== '1' || previousAttention === attention.trim())) return { file: rel, count: 0, skipped: true };

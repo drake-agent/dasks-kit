@@ -161,7 +161,7 @@ export const configFile = (root: string) => process.env.DASKS_CONFIG || path.joi
 export function loadConfig(root: string): Config {
   const file = configFile(root);
   let user: any = {};
-  try { user = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e: any) { if (e.code !== 'ENOENT') throw new Error(`config ${file}: ${e.message}`); }
+  try { user = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e: any) { if (e.code !== 'ENOENT') throw new Error(`config ${file}: ${e.message}`); } // not-board: config.json
   const cfg: Config = {
     ...DEFAULT_CONFIG, ...user,
     server: { ...DEFAULT_CONFIG.server, ...(user.server ?? {}) },

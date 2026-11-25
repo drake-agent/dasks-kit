@@ -23,6 +23,7 @@ import { holderSeenAt } from './lease.ts';
 import { normTouchesValue, SHA_RE } from './touches-actual.ts';
 import { cleanProfileInput } from './profile.ts';
 import { launchGateOf, versionTarget } from './version-mode.ts';
+import * as boardFiles from './board-files.ts';
 
 export class HttpError extends Error {
   status: number;
@@ -58,16 +59,16 @@ const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(
 export function breakIfOwner(target: string, isAbandoned: () => boolean): boolean {
   const breaker = `${target}.dasks-break`;
   for (let i = 0; ; i++) {
-    try { fs.mkdirSync(breaker); break; } catch (e: any) {
+    try { fs.mkdirSync(breaker); break; } catch (e: any) { // not-board: lock folder
       if (e.code !== 'EEXIST') return false;
-      try { if (Date.now() - fs.statSync(breaker).mtimeMs > 30_000) { fs.rmSync(breaker, { recursive: true, force: true }); continue; } } catch { continue; }
+      try { if (Date.now() - fs.statSync(breaker).mtimeMs > 30_000) { fs.rmSync(breaker, { recursive: true, force: true }); continue; } } catch { continue; } // not-board: lock folder
       if (i > 100) return false;
       sleep(20);
     }
   }
   try {
     if (!isAbandoned()) return false;
-    fs.rmSync(target, { recursive: true, force: true });
+    fs.rmSync(target, { recursive: true, force: true }); // not-board: lock folder
     return true;
   } finally { try { fs.rmdirSync(breaker); } catch { /* gone */ } }
 }
@@ -86,8 +87,8 @@ export function gate(root: string, id: string, actor: string, warnings: string[]
     warnings?.push(`not enforced yet (gates: warn): ${e.message}`);
     try {
       const f = path.join(root, 'run', 'gate-warnings.jsonl');
-      fs.mkdirSync(path.dirname(f), { recursive: true });
-      fs.appendFileSync(f, JSON.stringify({ at: new Date().toISOString(), id, actor, from: e.data.from ?? null, to: e.data.to ?? null, reason: e.message }) + '\n');
+      fs.mkdirSync(path.dirname(f), { recursive: true }); // not-board: run/ log
+      fs.appendFileSync(f, JSON.stringify({ at: new Date().toISOString(), id, actor, from: e.data.from ?? null, to: e.data.to ?? null, reason: e.message }) + '\n'); // not-board: run/ log
     } catch { /* the log is best effort; the write itself must not fail on it */ }
   }
 }
@@ -100,7 +101,7 @@ export function withRepoLock<T>(root: string, fn: () => T, timeoutMs = 15000): T
   return withDirLock(lock, () => {
     // First thing after taking the lock, before anything is read: put back an earlier write that could not be rolled
     // back (its journal is still here). If that fails (git busy), nothing is written now: 503, try again.
-    if (outer && fs.existsSync(journalPath(root))) {
+    if (outer && fs.existsSync(journalPath(root))) { // not-board: git journal
       try { const r = recoverJournal(root); if (r) console.error(`recovery: ${r}`); }
       catch (e: any) { throw new HttpError(503, `an earlier unfinished write could not be undone yet (${String(e.message).split('\n')[0]}); try again`, { retry_after: 2 }); }
     }
@@ -114,7 +115,7 @@ export function withRepoLock<T>(root: string, fn: () => T, timeoutMs = 15000): T
 export function clearStaleIndexLock(root: string, maxAgeMs = 30_000): boolean {
   let idx = '';
   try { idx = path.resolve(root, git(root, ['rev-parse', '--git-path', 'index.lock']).trim()); } catch { return false; }
-  try { if (Date.now() - fs.statSync(idx).mtimeMs > maxAgeMs) { fs.rmSync(idx, { force: true }); console.error(`recovery: removed a stale ${idx}`); return true; } } catch { /* none */ }
+  try { if (Date.now() - fs.statSync(idx).mtimeMs > maxAgeMs) { fs.rmSync(idx, { force: true }); console.error(`recovery: removed a stale ${idx}`); return true; } } catch { /* none */ } // not-board: .git
   return false;
 }
 
@@ -122,11 +123,11 @@ export function clearStaleIndexLock(root: string, maxAgeMs = 30_000): boolean {
 export function gitCommonDir(root: string): string {
   const dotgit = path.join(root, '.git');
   try {
-    if (fs.statSync(dotgit).isFile()) {
-      const m = /^gitdir:\s*(.+)$/m.exec(fs.readFileSync(dotgit, 'utf8'));
+    if (fs.statSync(dotgit).isFile()) { // not-board: .git
+      const m = /^gitdir:\s*(.+)$/m.exec(fs.readFileSync(dotgit, 'utf8')); // not-board: .git
       if (m) {
         const gd = path.resolve(root, m[1].trim());
-        try { return path.resolve(gd, fs.readFileSync(path.join(gd, 'commondir'), 'utf8').trim()); } catch { return gd; }
+        try { return path.resolve(gd, fs.readFileSync(path.join(gd, 'commondir'), 'utf8').trim()); } catch { return gd; } // not-board: .git
       }
     }
   } catch { /* no .git yet: fall through */ }
@@ -177,21 +178,21 @@ export function withDirLock<T>(lock: string, fn: () => T, timeoutMs = 15000): T 
     held.set(lock, depth + 1);
     try { return fn(); } finally { held.set(lock, held.get(lock)! - 1); }
   }
-  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  fs.mkdirSync(path.dirname(lock), { recursive: true }); // not-board: lock folder
   const owner = path.join(lock, 'owner');
   const start = Date.now();
   for (;;) {
-    try { fs.mkdirSync(lock); fs.writeFileSync(owner, ownerLine()); break; } catch (e: any) {
+    try { fs.mkdirSync(lock); fs.writeFileSync(owner, ownerLine()); break; } catch (e: any) { // not-board: lock folder
       if (e.code !== 'EEXIST') throw e;
       try {
-        const age = Date.now() - fs.statSync(lock).mtimeMs;
-        let raw = ''; try { raw = fs.readFileSync(owner, 'utf8'); } catch { /* being created */ }
+        const age = Date.now() - fs.statSync(lock).mtimeMs; // not-board: lock folder
+        let raw = ''; try { raw = fs.readFileSync(owner, 'utf8'); } catch { /* being created */ } // not-board: lock folder
         const o = parseOwner(raw);
         // Reclaim only when the owner is verifiably gone, or the lock never got an owner (crash during creation).
         // Re-verified under a breaker mutex so a successor's fresh lock is never removed.
         const abandoned = () => {
-          let now = ''; try { now = fs.readFileSync(owner, 'utf8'); } catch { /* none */ }
-          let a = 0; try { a = Date.now() - fs.statSync(lock).mtimeMs; } catch { return false; }
+          let now = ''; try { now = fs.readFileSync(owner, 'utf8'); } catch { /* none */ } // not-board: lock folder
+          let a = 0; try { a = Date.now() - fs.statSync(lock).mtimeMs; } catch { return false; } // not-board: lock folder
           const c = parseOwner(now);
           return now.trim() === raw.trim() && (ownerGone(c, lock) || (c.pid === 0 && a > 5000) || pidReused(c, a));
         };
@@ -204,7 +205,7 @@ export function withDirLock<T>(lock: string, fn: () => T, timeoutMs = 15000): T 
   held.set(lock, 1);
   try { return fn(); } finally {
     held.delete(lock);
-    try { if (parseOwner(fs.readFileSync(owner, 'utf8')).pid === process.pid) fs.rmSync(lock, { recursive: true, force: true }); } catch { /* already gone */ }
+    try { if (parseOwner(fs.readFileSync(owner, 'utf8')).pid === process.pid) fs.rmSync(lock, { recursive: true, force: true }); } catch { /* already gone */ } // not-board: lock folder
   }
 }
 
@@ -213,7 +214,7 @@ export function withDirLock<T>(lock: string, fn: () => T, timeoutMs = 15000): T 
 const blobId = (content: string | Buffer): string => { const b = Buffer.isBuffer(content) ? content : Buffer.from(content); return createHash('sha1').update(`blob ${b.length}\0`).update(b).digest('hex'); };
 /** A timed-out lookup is not "no HEAD": it throws, so no caller undoes a write it cannot see. */
 const hasHead = (root: string) => { try { git(root, ['rev-parse', '-q', '--verify', 'HEAD']); return true; } catch (e: any) { if (e?.code === 'ETIMEDOUT') throw e; return false; } };
-const realRoot = (root: string) => { try { return fs.realpathSync(root); } catch { return path.resolve(root); } };
+const realRoot = (root: string) => { try { return fs.realpathSync(root); } catch { return path.resolve(root); } }; // not-board: the checkout root
 
 /** Put the files of this checkout's unfinished write back to HEAD (copy of what was found kept in the git dir).
  *  Caller holds the repo lock. Returns a log line, or '' when there was nothing to do. */
@@ -221,7 +222,7 @@ export function recoverJournal(root: string): string {
   const journal = journalPath(root);
   let txn: { rels?: string[]; message?: string; root?: string; head?: string; written?: Record<string, string> } | null = null;
   let text: string;
-  try { text = fs.readFileSync(journal, 'utf8'); } catch (e: any) { if (e.code === 'ENOENT') return ''; throw e; }
+  try { text = fs.readFileSync(journal, 'utf8'); } catch (e: any) { if (e.code === 'ENOENT') return ''; throw e; } // not-board: git journal
   try {
     txn = JSON.parse(text);
     if (!txn || typeof txn !== 'object' || Array.isArray(txn) || !Array.isArray(txn.rels)) throw new Error('not a write journal');
@@ -229,7 +230,7 @@ export function recoverJournal(root: string): string {
     // It names files a write left half done; without it nobody knows which. Kept, never deleted: writes stop until a
     // human has looked (corruptJournals, `dasks check`).
     const aside = `${journal}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`;
-    fs.renameSync(journal, aside);
+    fs.renameSync(journal, aside); // not-board: git journal
     return `the write journal is unreadable (${String(e.message).split('\n')[0].slice(0, 120)}): kept as ${aside}; writes are stopped until it is resolved (dasks check)`;
   }
   if (txn?.root && txn.root !== realRoot(root)) return `journal belongs to ${txn.root}, not this checkout: left alone`;
@@ -242,7 +243,7 @@ export function recoverJournal(root: string): string {
     const landed = writeLanded(root, txn.head, rels, txn.written);
     if (landed === null) throw new Error('git could not tell whether that write was committed; the journal stays');
     if (landed) {
-      fs.rmSync(journal, { force: true });
+      fs.rmSync(journal, { force: true }); // not-board: git journal
       return `a finished write left its journal ("${String(txn.message ?? '').slice(0, 80)}"): already committed, nothing undone`;
     }
   }
@@ -250,20 +251,20 @@ export function recoverJournal(root: string): string {
   const before: Record<string, string | null> | undefined = (txn as any)?.before;
   for (const rel of rels) {
     const abs = path.join(root, rel);
-    if (fs.existsSync(abs)) { fs.mkdirSync(path.dirname(path.join(keep, rel)), { recursive: true }); fs.copyFileSync(abs, path.join(keep, rel)); }
+    if (fs.existsSync(abs)) { fs.mkdirSync(path.dirname(path.join(keep, rel)), { recursive: true }); fs.copyFileSync(abs, path.join(keep, rel)); } // not-board: git journal
     // Index back to HEAD (git errors propagate: the journal then stays and the next lock taker tries again).
     if (hasHead(root)) git(root, ['reset', '-q', '--', rel]);
     if (before && Object.hasOwn(before, rel)) {
       // Exactly what was there before the write (including someone's unstaged edit), or nothing.
-      if (before[rel] === null) fs.rmSync(abs, { force: true }); else atomicWrite(abs, Buffer.from(before[rel]!, 'base64'));
+      if (before[rel] === null) fs.rmSync(abs, { force: true }); else atomicWrite(abs, Buffer.from(before[rel]!, 'base64')); // not-board: git journal
     } else {
       // No before-image for this path (only a damaged journal lacks one): HEAD is the safe state.
       let inHead = true;
       try { git(root, ['cat-file', '-e', `HEAD:${rel}`]); } catch { inHead = false; }
-      if (inHead) git(root, ['checkout', '-q', 'HEAD', '--', rel]); else fs.rmSync(abs, { force: true });
+      if (inHead) git(root, ['checkout', '-q', 'HEAD', '--', rel]); else fs.rmSync(abs, { force: true }); // not-board: git journal
     }
   }
-  fs.rmSync(journal, { force: true });
+  fs.rmSync(journal, { force: true }); // not-board: git journal
   return rels.length ? `undid an unfinished write ("${String(txn?.message ?? '').slice(0, 80)}"): ${rels.join(', ')}; the files as found are in ${keep}` : '';
 }
 
@@ -285,7 +286,7 @@ function writeLanded(root: string, head: string, rels: string[], written: Record
 /** Unreadable write journals kept aside by recoverJournal (absolute paths). While one is there, no write runs. */
 export function corruptJournals(root: string): string[] {
   const j = journalPath(root), dir = path.dirname(j), base = path.basename(j) + '.corrupt-';
-  try { return fs.readdirSync(dir).filter((f) => f.startsWith(base)).sort().map((f) => path.join(dir, f)); } catch { return []; }
+  try { return fs.readdirSync(dir).filter((f) => f.startsWith(base)).sort().map((f) => path.join(dir, f)); } catch { return []; } // not-board: git journal
 }
 /** What a human does about a kept journal (shared by the write refusal, /api/health and `dasks check`). */
 export function corruptJournalHelp(root: string, kept: string[]): string {
@@ -308,10 +309,10 @@ export function recoverRepo(root: string): string[] {
       if (r) done.push(r);
       const dirty = git(root, ['status', '--porcelain', '--', 'data']).split('\n').filter(Boolean);
       if (dirty.length) done.push(`uncommitted data not written by the server (left alone): ${dirty.slice(0, 10).join(' | ')}`);
-      const walk = (d: string) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const walk = (d: string) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { // not-board: git recovery
         const f = path.join(d, e.name);
         if (e.isDirectory()) walk(f);
-        else if (/^\..+\.\d+\.[0-9a-f]{12}\.tmp$/.test(e.name) && Date.now() - fs.statSync(f).mtimeMs > 60_000) { fs.rmSync(f, { force: true }); done.push(`removed temp file ${path.relative(root, f)}`); }
+        else if (/^\..+\.\d+\.[0-9a-f]{12}\.tmp$/.test(e.name) && Date.now() - fs.statSync(f).mtimeMs > 60_000) { fs.rmSync(f, { force: true }); done.push(`removed temp file ${path.relative(root, f)}`); } // not-board: git recovery
       } };
       try { walk(path.join(root, 'data')); } catch { /* no data dir */ }
     }, 30_000);
@@ -345,14 +346,14 @@ export const committedSinceReload = new Set<string>();
 export function isOwnEcho(root: string, rel: string): boolean {
   const h = lastCommitted.files.get(rel);
   if (!h) return false;
-  try { return createHash('sha1').update(fs.readFileSync(path.join(root, rel))).digest('hex') === h; } catch { return false; }
+  try { return createHash('sha1').update(boardFiles.readFileSync(path.join(root, rel))).digest('hex') === h; } catch { return false; }
 }
 
 /** The files of the write in progress, so a restart after a crash mid-write knows exactly which paths were ours. */
 /** Per worktree (git's own dir for this checkout, not the shared one): recovery must only ever touch this checkout. */
 export const journalPath = (root: string) => {
   const dotgit = path.join(root, '.git');
-  try { if (fs.statSync(dotgit).isDirectory()) return path.join(dotgit, 'dasks-txn.json'); } catch { /* worktree or no repo */ }
+  try { if (fs.statSync(dotgit).isDirectory()) return path.join(dotgit, 'dasks-txn.json'); } catch { /* worktree or no repo */ } // not-board: git journal
   try { return path.resolve(root, git(root, ['rev-parse', '--git-path', 'dasks-txn.json']).trim()); } catch { return path.join(dotgit, 'dasks-txn.json'); }
 };
 
@@ -367,7 +368,7 @@ function crashPoint(point: 'before-commit' | 'after-commit'): void {
 export function commitFiles(root: string, files: { rel: string; content: string }[], message: string, expect: Record<string, Buffer | string> = {}): string {
   const backups = files.map((f) => {
     const abs = safeAbs(root, f.rel);
-    return { ...f, abs, old: fs.existsSync(abs) ? fs.readFileSync(abs) : null };
+    return { ...f, abs, old: fs.existsSync(abs) ? fs.readFileSync(abs) : null }; // not-board: git store write
   });
   const rels = backups.map((f) => f.rel);
   for (const f of backups) if (Object.hasOwn(expect, f.rel) && !(f.old && f.old.equals(Buffer.from(expect[f.rel]))))
@@ -378,7 +379,7 @@ export function commitFiles(root: string, files: { rel: string; content: string 
   let committed = false;
   const journal = journalPath(root);
   // (A journal left by an earlier failed rollback was already undone when the repo lock was taken, before any read.)
-  if (fs.existsSync(journal)) throw new HttpError(503, 'an earlier unfinished write is still being undone; try again', { retry_after: 2 });
+  if (fs.existsSync(journal)) throw new HttpError(503, 'an earlier unfinished write is still being undone; try again', { retry_after: 2 }); // not-board: git store write
   const kept = corruptJournals(root);
   if (kept.length) throw new HttpError(503, corruptJournalHelp(root, kept), { rule: 'corrupt-journal' });
   let consistent = false; // committed, or fully rolled back
@@ -417,7 +418,7 @@ export function commitFiles(root: string, files: { rel: string; content: string 
     if (!committed && !e.undecided) {
       try {
         for (const f of backups) {
-          if (f.old === null) { try { fs.unlinkSync(f.abs); } catch (u: any) { if (u.code !== 'ENOENT') throw u; } } else atomicWrite(f.abs, f.old);
+          if (f.old === null) { try { fs.unlinkSync(f.abs); } catch (u: any) { if (u.code !== 'ENOENT') throw u; } } else atomicWrite(f.abs, f.old); // not-board: git store write
         }
         if (hasHead(root)) git(root, ['reset', '-q', '--', ...rels]); // index back to HEAD (it was clean for these paths)
         consistent = true; // files and index put back; otherwise the journal stays for recovery
@@ -431,20 +432,20 @@ export function commitFiles(root: string, files: { rel: string; content: string 
   } finally {
     // Committed or fully rolled back: consistent again. Otherwise the journal stays, and the next write (or a restart)
     // puts those files back to HEAD before anything else happens.
-    if (consistent) try { fs.rmSync(journal, { force: true }); } catch { /* gone */ }
+    if (consistent) try { fs.rmSync(journal, { force: true }); } catch { /* gone */ } // not-board: git store write
   }
   try { return git(root, ['rev-parse', 'HEAD']).trim(); } catch { return ''; }
 }
 
 /** Resolve a repo-relative path and make sure it (and every existing ancestor, symlinks resolved) stays inside data/. */
 function safeAbs(root: string, rel: string): string {
-  const dataReal = fs.realpathSync(path.resolve(root, 'data'));
+  const dataReal = fs.realpathSync(path.resolve(root, 'data')); // not-board: git store write
   const abs = path.resolve(root, rel);
   if (!abs.startsWith(path.resolve(root, 'data') + path.sep)) throw new HttpError(400, 'path outside data/');
-  try { if (fs.lstatSync(abs).isSymbolicLink()) throw new HttpError(400, 'refusing to write through a symlink'); } catch (e) { if (e instanceof HttpError) throw e; }
+  try { if (fs.lstatSync(abs).isSymbolicLink()) throw new HttpError(400, 'refusing to write through a symlink'); } catch (e) { if (e instanceof HttpError) throw e; } // not-board: git store write
   let dir = path.dirname(abs);
-  while (!fs.existsSync(dir)) dir = path.dirname(dir);
-  const real = fs.realpathSync(dir);
+  while (!fs.existsSync(dir)) dir = path.dirname(dir); // not-board: git store write
+  const real = fs.realpathSync(dir); // not-board: git store write
   if (real !== dataReal && !real.startsWith(dataReal + path.sep)) throw new HttpError(400, 'path escapes data/ via a symlink');
   return abs;
 }
@@ -454,25 +455,25 @@ function safeAbs(root: string, rel: string): string {
  *  itself can be lost). */
 export function atomicWrite(abs: string, content: string | Buffer): void {
   const dir = path.dirname(abs);
-  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(dir, { recursive: true }); // not-board: git store write
   const tmp = path.join(dir, `.${path.basename(abs)}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`);
   let fd = -1;
   try {
-    fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o644);
-    fs.writeFileSync(fd, content);
+    fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o644); // not-board: git store write
+    fs.writeFileSync(fd, content); // not-board: git store write
     fs.fsyncSync(fd);
     fs.closeSync(fd); fd = -1;
-    fs.renameSync(tmp, abs);
+    fs.renameSync(tmp, abs); // not-board: git store write
     fsyncDir(dir);
   } catch (e) {
     if (fd >= 0) try { fs.closeSync(fd); } catch { /* closed */ }
-    try { fs.unlinkSync(tmp); } catch { /* none */ }
+    try { fs.unlinkSync(tmp); } catch { /* none */ } // not-board: git store write
     throw e;
   }
 }
 
 export function fsyncDir(dir: string): void {
-  const fd = fs.openSync(dir, fs.constants.O_RDONLY);
+  const fd = fs.openSync(dir, fs.constants.O_RDONLY); // not-board: git store write
   try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 
@@ -605,7 +606,7 @@ function readTaskRaw(root: string, id: string): { task: Task; raw: Buffer } {
   const rel = taskRelPath(id);
   const abs = path.join(root, rel);
   let buf: Buffer;
-  try { buf = fs.readFileSync(abs); } catch { throw new HttpError(404, `no task "${id}"`); }
+  try { buf = boardFiles.readFileSync(abs); } catch { throw new HttpError(404, `no task "${id}"`); }
   try { return { task: taskFromParsed(parseFrontmatter(buf.toString('utf8')), rel, buf.length), raw: buf }; }
   catch (e: any) { throw new HttpError(409, `task file is unparseable: ${e.message}`); }
 }
@@ -658,7 +659,7 @@ function compactNotes(root: string, t: Task): { rel: string; content: string } |
   while (k < max) { k++; t.body = build(k); if (size() <= WRITE_LIMIT) break; }
   if (!k) { t.body = orig; return null; }
   let prev = '';
-  try { prev = fs.readFileSync(path.join(root, rel), 'utf8'); } catch { prev = `# ${t.id}: older notes\n`; }
+  try { prev = boardFiles.readFileSync(path.join(root, rel), 'utf8'); } catch { prev = `# ${t.id}: older notes\n`; }
   return { rel, content: prev.replace(/\s*$/, '\n') + notes.slice(0, k).map((i) => lines[i]).join('\n') + '\n' };
 }
 
@@ -1035,7 +1036,7 @@ export const intakeLimit = (cfg: IntakeConfig, goal: string): number => (Object.
 /** Every task of one goal as its files are now (under the lock); unparseable files are skipped. */
 function goalTasks(root: string, goal: string): Task[] {
   let names: string[] = [];
-  try { names = fs.readdirSync(path.join(root, 'data', 'tasks', goal)); } catch { return []; }
+  try { names = boardFiles.readdirSync(path.join(root, 'data', 'tasks', goal)); } catch { return []; }
   const out: Task[] = [];
   for (const n of names) {
     if (!n.endsWith('.md')) continue;
@@ -1079,7 +1080,7 @@ function findReplay(root: string, base: string, explicit: boolean, goal: string,
   const key = bodyKey(body);
   for (let n = 1; ; n++) {
     const id = n === 1 ? base : `${base}-${n}`;
-    if (!fs.existsSync(path.join(root, taskRelPath(id)))) return null;
+    if (!boardFiles.existsSync(path.join(root, taskRelPath(id)))) return null;
     let t: Task | null = null;
     try { t = readTask(root, id); } catch { /* unparseable: never a replay target */ }
     if (t && t.goal === goal && t.title === title && bodyKey(t.body ?? '') === key) {
@@ -1125,8 +1126,8 @@ export function createTaskOrIdea(root: string, input: NewTask, actor: string, no
       const hit = findReplay(root, id, !!explicit, goal, title, body, now);
       if (hit) { copts.replayed = true; return hit; }
     }
-    if (!explicit) { let n = 2; const base = id; while (fs.existsSync(path.join(root, taskRelPath(id)))) id = `${base}-${n++}`; }
-    else if (fs.existsSync(path.join(root, taskRelPath(id)))) throw new HttpError(409, `task "${id}" already exists`);
+    if (!explicit) { let n = 2; const base = id; while (boardFiles.existsSync(path.join(root, taskRelPath(id)))) id = `${base}-${n++}`; }
+    else if (boardFiles.existsSync(path.join(root, taskRelPath(id)))) throw new HttpError(409, `task "${id}" already exists`);
     const ts = isoLocal(now);
     const t: any = {
       id, title, goal,
@@ -1208,7 +1209,7 @@ export function updateNode(root: string, id: string, patch: Record<string, unkno
     else throw new HttpError(400, `bad node id "${id}" (tasks use /api/tasks/:id)`);
     const abs = safeAbs(root, rel);
     let doc: YAML.Document;
-    try { doc = YAML.parseDocument(fs.readFileSync(abs, 'utf8')); } catch { throw new HttpError(404, `no node "${id}"`); }
+    try { doc = YAML.parseDocument(boardFiles.readFileSync(abs, 'utf8')); } catch { throw new HttpError(404, `no node "${id}"`); }
     let target: YAML.YAMLMap;
     if (kind === 'milestone') {
       const ms = doc.get('milestones') as YAML.YAMLSeq | undefined;
@@ -1280,7 +1281,7 @@ export function updateNode(root: string, id: string, patch: Record<string, unkno
     }
     const content = doc.toString({ lineWidth: 0 });
     // Nothing really changed (same values sent again): no empty commit.
-    if (!changed.length || content === fs.readFileSync(abs, 'utf8')) return;
+    if (!changed.length || content === boardFiles.readFileSync(abs, 'utf8')) return;
     commitFiles(root, [{ rel, content }], `${actor}: ${id} ${oneLine(changed.join(', '), 100)}`);
   });
 }

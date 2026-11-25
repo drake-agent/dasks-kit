@@ -64,6 +64,7 @@ import { assertTouchesFree, repoKey } from './lib/claim-guard.ts';
 import { migrateBoard, SchemaTooNew, SCHEMA_VERSION } from './lib/migrate.ts';
 import { nodeProblem } from './lib/node-floor.ts';
 import { type Body, parseAnswer, parseCardAction, parseChat, parseLease, parseLeaseCheck, parseNodePatch, parseOutcomeOrFail, parseResetAttempts, parseTaskPatch, versionOf } from './lib/bodies.ts';
+import * as boardFiles from './lib/board-files.ts';
 
 const ROOT = boardRoot();
 const NODE_PROBLEM = nodeProblem(process.versions.node);
@@ -92,7 +93,7 @@ if (!isLoopback(cfg.server.listen) && !cfg.server.tls && !cfg.server.allow_plain
 /** Certificate and key when server.tls is set: every listener is HTTPS then (loopback too). Read once, at start. */
 const TLS = (() => {
   if (!cfg.server.tls) return null;
-  try { return { cert: fs.readFileSync(expandHome(cfg.server.tls.cert)), key: fs.readFileSync(expandHome(cfg.server.tls.key)) }; }
+  try { return { cert: fs.readFileSync(expandHome(cfg.server.tls.cert)), key: fs.readFileSync(expandHome(cfg.server.tls.key)) }; } // not-board: TLS files
   catch (e: any) { console.error(`refusing to start: server.tls: ${e.code === 'ENOENT' ? `no file ${e.path}` : e.message}`); process.exit(1); }
 })();
 const SCHEME = TLS ? 'https' : 'http';
@@ -232,7 +233,7 @@ function armReload(delay: number) {
   if (reloadTimer) clearTimeout(reloadTimer); else reloadArmedAt = Date.now();
   reloadTimer = setTimeout(() => {
     reloadTimer = null;
-    if (RELOAD_GATE && fs.existsSync(RELOAD_GATE)) return armReload(50);
+    if (RELOAD_GATE && fs.existsSync(RELOAD_GATE)) return armReload(50); // not-board: reload gate
     const files = pending; pending = new Set();
     // The watcher also reports our own writes, already reloaded: skip that echo only when every reported file is one this
     // server just committed. Anything else (a hand edit, another process's commit) reloads.
@@ -584,11 +585,11 @@ function noteTokenUse(id: string) {
   const f = path.join(ROOT, 'run', 'agent-token-usage.json');
   try {
     let old: Record<string, string> = {};
-    try { const j = JSON.parse(fs.readFileSync(f, 'utf8')); if (j && typeof j === 'object' && !Array.isArray(j)) old = j; } catch { /* none yet */ }
-    fs.mkdirSync(path.dirname(f), { recursive: true });
+    try { const j = JSON.parse(fs.readFileSync(f, 'utf8')); if (j && typeof j === 'object' && !Array.isArray(j)) old = j; } catch { /* none yet */ } // not-board: run/ state
+    fs.mkdirSync(path.dirname(f), { recursive: true }); // not-board: run/ state
     const tmp = `${f}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ ...old, ...Object.fromEntries(tokenUsed) }, null, 1) + '\n');
-    fs.renameSync(tmp, f);
+    fs.writeFileSync(tmp, JSON.stringify({ ...old, ...Object.fromEntries(tokenUsed) }, null, 1) + '\n'); // not-board: run/ state
+    fs.renameSync(tmp, f); // not-board: run/ state
   } catch { console.error('auth: token usage log failed'); }
 }
 /** The path as logged: decoded, token-shaped text and the sent bearer value (or its secret part) masked, capped. A token
@@ -614,8 +615,8 @@ function authWarn(line: Record<string, string>) {
   console.error(`auth: ${line.reason} ${line.actor} ${line.method} ${line.path}`);
   try {
     const f = path.join(ROOT, 'run', 'auth-warnings.jsonl');
-    fs.mkdirSync(path.dirname(f), { recursive: true });
-    fs.appendFileSync(f, JSON.stringify(line) + '\n');
+    fs.mkdirSync(path.dirname(f), { recursive: true }); // not-board: run/ state
+    fs.appendFileSync(f, JSON.stringify(line) + '\n'); // not-board: run/ state
     capFile(f, AUTH_WARNINGS_MAX_BYTES, AUTH_WARNINGS_KEEP_BYTES);
   } catch { console.error('auth: warning log failed'); }
 }
@@ -649,7 +650,7 @@ function taskOrThrow(id: string): void {
  *  head or the witness file changes, and at least once a minute. */
 let verifiedCache: { key: string; entries: Decision[] | null } | null = null;
 function verifiedLedger(fresh = false): Decision[] | null {
-  if (!fs.existsSync(LEDGER)) return [];
+  if (!fs.existsSync(LEDGER)) return []; // not-board: the gitignored ledger
   const k = [statKey(LEDGER), statKey(ledgerHead()), statKey(path.join(ROOT, WITNESS_REL)), Math.floor(Date.now() / 60_000)].join('|');
   if (fresh || verifiedCache?.key !== k) {
     const key = humanSecrets()?.ledgerKey;
@@ -658,7 +659,7 @@ function verifiedLedger(fresh = false): Decision[] | null {
   return verifiedCache.entries;
 }
 
-const statKey = (f: string) => { try { const s = fs.statSync(f); return `${s.mtimeMs}:${s.size}`; } catch { return 'none'; } };
+const statKey = (f: string) => { try { const s = boardFiles.statSync(f); return `${s.mtimeMs}:${s.size}`; } catch { return 'none'; } };
 /** src/lib/park.ts: a machine's blocked-on-user write without a real decision goes back to the card's owner. Called under the repo
  *  lock; changes `fields` and returns the note to append (or the note unchanged). */
 function unparkWrite(id: string, fields: Record<string, unknown>, actor: string, note: string | undefined, text: string, opts: { context?: unknown; warnings?: string[] }, sweep = false): string | undefined {
@@ -920,7 +921,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
     if (STATIC[p]) {
       const file = path.join(PUBLIC, STATIC[p]);
       try {
-        const data = fs.readFileSync(file);
+        const data = fs.readFileSync(file); // not-board: UI files
         res.writeHead(200, { 'Content-Type': MIME[file.split('.').pop()!] || 'application/octet-stream', 'Cache-Control': 'no-cache', ...SECURITY_HEADERS });
         return res.end(req.method === 'HEAD' ? undefined : data);
       } catch { return send(res, 404, { error: 'not found' }); }
@@ -929,7 +930,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
     if (ds && !ds[1].includes('..')) {
       const file = path.join(PUBLIC, 'ds', ds[1]);
       try {
-        const data = fs.readFileSync(file);
+        const data = fs.readFileSync(file); // not-board: UI files
         // Fonts never change under the same name (a font file changes only with a new kit version): a day.
         const cache = file.endsWith('.woff2') ? 'public, max-age=86400' : 'no-cache';
         res.writeHead(200, { 'Content-Type': MIME[file.split('.').pop()!], 'Cache-Control': cache, ...SECURITY_HEADERS });
@@ -941,7 +942,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
       const projects = projectIds(board);
       if (!projects.includes(pp[1])) return send(res, 404, `no project "${pp[1]}" — try ${projects.map((a) => `/p/${a}`).join(' ')}\n`, 'text/plain; charset=utf-8');
       try {
-        const data = fs.readFileSync(path.join(PUBLIC, 'index.html'));
+        const data = fs.readFileSync(path.join(PUBLIC, 'index.html')); // not-board: UI files
         res.writeHead(200, { 'Content-Type': MIME.html, 'Cache-Control': 'no-cache', ...SECURITY_HEADERS });
         return res.end(req.method === 'HEAD' ? undefined : data);
       } catch { return send(res, 404, { error: 'not found' }); }
@@ -1471,7 +1472,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
           const cur = readTask(ROOT, id);
           if (cur.run_id === job_end.trim()) {
             const marker = jobEndRel(id, cur.run_id!, Number(cur.attempt));
-            if (runOutcome(ROOT, cur) || fs.existsSync(path.join(ROOT, marker))) {
+            if (runOutcome(ROOT, cur) || boardFiles.existsSync(path.join(ROOT, marker))) {
               // The run's job end already moved the card (its outcome, or an earlier close): a replayed close keeps the status.
               delete fields.status; opts.context = undefined;
               opts.warnings!.push('status kept: this run\'s outcome or an earlier close already moved the card');

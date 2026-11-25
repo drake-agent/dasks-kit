@@ -9,13 +9,13 @@
 // every actor that ever claimed the card with theirs (builders, builder_families, from the claim history), and the
 // machine whose token sent it (reviewer_machine; '' = not a fleet machine token, i.e. the board's own Mac). Declared
 // `reviewer` and `impl` are the reviewer's own words; `dask captain-merge` trusts only the board's fields.
-import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { HttpError, commitFiles, withRepoLock } from './write.ts';
 import { TASK_ID_RE, isTaskId } from './schema.ts';
 import { isoNow } from './specs.ts';
 import { familyOf, readClaimHistory } from './spec-state.ts';
+import * as boardFiles from './board-files.ts';
 
 /** Review passes per card (one card, one PR): pass 1 reads the whole change, pass 2 re-checks its findings and the fixes. */
 export const REVIEW_PASSES = 2;
@@ -105,7 +105,7 @@ export function parseReviewRun(body: Record<string, unknown>): ReviewRow {
  *  before it is a 500 naming its line number. */
 function readLines(root: string, id: string): { rows: ReviewRow[]; lines: string[] } {
   let raw: string;
-  try { raw = fs.readFileSync(path.join(root, reviewRunPath(id)), 'utf8'); } catch (e: any) { if (e.code === 'ENOENT') return { rows: [], lines: [] }; throw e; }
+  try { raw = boardFiles.readFileSync(path.join(root, reviewRunPath(id)), 'utf8'); } catch (e: any) { if (e.code === 'ENOENT') return { rows: [], lines: [] }; throw e; }
   const all = raw.split('\n');
   const nonBlank = all.map((l, i) => ({ l, n: i + 1 })).filter((x) => x.l.trim() !== '');
   const rows: ReviewRow[] = [], lines: string[] = [];
