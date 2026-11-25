@@ -809,6 +809,7 @@ function renderPanel() {
   if (!p.hidden && p.dataset.id === id && p.dataset.mode === mode && ((p.contains(document.activeElement) && document.activeElement.matches('input,textarea,select')) || [...p.querySelectorAll('form')].some(formDirty))) return;
   if (n.kind === 'task') {
     showPanel(mode === 'full' ? fullPanel(n.obj) : quickPanel(n.obj), id, mode); fillActivity(id, mode === 'quick' ? QV_ACTS : 0);
+    if (mode === 'quick') fillLive(id);
     return;
   }
   if (n.kind === 'milestone') return showPanel(milestonePanel(n.obj), id);
@@ -966,6 +967,7 @@ function quickPanel(x) {
     ${specBlockHtml(x)}
     ${ctx ? `<div class="qv-glance" data-qv="glance">${ctx}</div>` : ''}
     ${qvFacts(x)}
+    <div data-live="${esc(x.id)}">${liveHtml(LIVES.get(x.id))}</div>
     ${x.pr_summary ? sec('prsum', t('kv.prsum'), `<p class="qv-text">${esc(x.pr_summary)}</p>`) : ''}
     ${next ? sec('next', t('qv.next'), `<div class="qv-text">${qvLines(next.text)}</div>`) : ''}
     ${sec('activity', t('qv.activity'), `<div class="activity" data-activity="${esc(x.id)}">${ACTS.has(x.id) ? actsHtml(ACTS.get(x.id), QV_ACTS) : `<p class="empty">${esc(t('loading'))}</p>`}</div>`)}
@@ -1095,6 +1097,35 @@ async function fillActivity(id, n = 0) {
     if (!el.isConnected) return;
     el.innerHTML = actsHtml(acts, n);
   } catch (e) { el.innerHTML = `<p class="empty">${esc(e.message)}</p>`; }
+}
+
+// ---------- live window (GET /api/tasks/:id/live; SSE `live` says it changed) ----------
+const LIVES = new Map(); // task id -> its last live window
+/** What the runner's agent is doing now and its diff so far; '' when the card has no live data. */
+function liveHtml(v) {
+  if (!v || !v.run_id) return '';
+  const state = v.ended ? t('qv.live.ended') : v.phase ? t(`qv.live.p.${v.phase}`) : '';
+  const steps = (v.steps || []).slice(-8).reverse();
+  const diff = (v.diff || '').split('\n').map((l) => {
+    const k = /^\+(?!\+\+ )/.test(l) ? 'add' : /^-(?!-- )/.test(l) ? 'del' : /^@@/.test(l) ? 'hunk' : '';
+    return `<span${k ? ` class="lv-${k}"` : ''}>${esc(l)}</span>`;
+  }).join('\n');
+  return `<section class="qv-sec lv" data-qv="live"><h3>${esc(t('qv.live'))}${state ? ` <span class="chip${v.ended ? '' : ' claim'}">${esc(state)}</span>` : ''}${v.updated_at ? ` <span class="lv-when">${esc(agoText(v.updated_at))}</span>` : ''}</h3>
+    ${steps.length ? `<ol class="acts">${steps.map((s) => `<li><span class="when">${esc(String(s.at || '').slice(11, 16))}</span>${esc(s.text)}</li>`).join('')}</ol>` : ''}
+    ${(v.files || []).length ? `<details class="lv-files"><summary>${esc(t('qv.live.files', { n: v.files.length }))}</summary>
+      <ul>${v.files.map((f) => `<li><span class="mono">${esc(f.status)} ${esc(f.path)}</span> <span class="lv-add">+${Number(f.added) || 0}</span> <span class="lv-del">-${Number(f.deleted) || 0}</span></li>`).join('')}</ul>
+      ${v.diff ? `<pre class="lv-diff">${diff}</pre>` : ''}${v.diff_truncated ? `<p class="empty">${esc(t('qv.live.cut'))}</p>` : ''}</details>` : ''}
+  </section>`;
+}
+/** Read the card's live window and redraw only its slot (an open file list stays open). */
+async function fillLive(id) {
+  let v; try { v = await api(`/api/tasks/${encodeURIComponent(id)}/live`); } catch { return; }
+  LIVES.set(id, v);
+  const el = document.querySelector(`#panel [data-live="${CSS.escape(id)}"]`);
+  if (!el) return;
+  const open = el.querySelector('details')?.open;
+  el.innerHTML = liveHtml(v);
+  if (open) el.querySelector('details')?.setAttribute('open', '');
 }
 
 // ---------- Context block: the "## Context" section of the task body, "Label: text" lines in any language ----------
@@ -1678,6 +1709,7 @@ function connect() {
     seen = d;
   });
   es.addEventListener('change', (e) => { try { seen = JSON.parse(e.data); } catch { /* no payload */ } reloadSoon(); });
+  es.addEventListener('live', (e) => { let d = {}; try { d = JSON.parse(e.data); } catch { /* no payload */ } if (d.card && d.card === S.selected) fillLive(d.card); });
   es.onerror = () => {
     $('#live').classList.remove('on');
     // The browser retries on its own, except after an error answer (e.g. 503): then open a new stream ourselves.

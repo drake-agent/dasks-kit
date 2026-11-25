@@ -7,6 +7,9 @@
   them back. Both sides redact secrets; sensitive and config files show no content; steps, files and diff bytes are
   capped, and the board keeps it in memory only, never in `data/`. `DASKS_RUNNER_LIVE_MS` sets the interval (`0` = off).
   See docs/runner.md.
+- Card panel: a "Live" section shows a running card's newest steps, its phase, and the changed files with a coloured
+  diff (folded); it updates on the board's `live` event and keeps the last state after the run. A card without live
+  data shows nothing new.
 
 ## 1.1.1 — 2026-11-16
 

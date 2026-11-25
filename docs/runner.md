@@ -211,6 +211,8 @@ and posts them to `POST /api/tasks/<card>/live` with its agent token. When the p
 more, marked ended, and the panel keeps showing it. Each update carries an increasing `seq`; the board ignores one that
 arrives after a newer one, so a slow update of an earlier phase never replaces a later state.
 
+<img alt="A card panel's live window: the newest steps, then the changed files and their diff" src="assets/live-window.jpg" width="480">
+
 - **Nothing secret leaves the machine.** The runner redacts every step and the diff before it sends them, and the board
   does it again before it keeps them, secret command-line flags included (`-a`, `-p<pw>`, `--password`, `--token`,
   `-u user:pass`, …). A file whose name says env, key, secret, token, password or credential, a credential file

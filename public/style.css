@@ -965,3 +965,15 @@ button.fold-btn[aria-expanded="true"] { background: var(--ds-color-bg-surface-su
   .tick-card, .tick-acts, .tick-more { min-height: 44px; }
   .tick-acts { justify-content: flex-end; border-top: 1px solid var(--line-subtle); }
 }
+/* Live window in the card panel (app.js liveHtml) */
+.lv h3 { display: flex; align-items: center; gap: var(--ds-space-2); }
+.lv-when { color: var(--faint); font-size: var(--ds-type-caption-size); font-weight: normal; }
+.lv .acts li { overflow-wrap: anywhere; }
+.lv-files summary { cursor: pointer; font-size: var(--ds-type-label-size); color: var(--muted); margin-top: var(--ds-space-2); }
+.lv-files ul { list-style: none; margin: var(--ds-space-2) 0; padding: 0; font-size: var(--ds-type-label-size); }
+.lv-files li { overflow-wrap: anywhere; }
+.lv-add { color: var(--ds-color-status-success-text); }
+.lv-del { color: var(--ds-color-status-danger-text); }
+.lv-hunk { color: var(--faint); }
+.lv-diff { margin: 0; padding: var(--ds-space-2); max-height: 280px; overflow: auto; font-family: var(--mono); font-size: var(--ds-type-caption-size);
+  background: var(--ds-color-bg-surface-raised); border: 1px solid var(--line-subtle); border-radius: var(--ds-radius-sm); white-space: pre; }
