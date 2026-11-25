@@ -1256,7 +1256,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
       if (!rawActor(req)) return send(res, 400, { error: 'a live update must name its writer (X-Dasks-Actor)' });
       if (!board.tasks.some((t) => t.id === id)) return send(res, 404, { error: 'not found' });
       const w = liveWindows.update(id, body, actor);
-      for (const c of clients) c.write(`event: live\ndata: ${JSON.stringify({ card: id })}\n\n`);
+      if (!w.stale) for (const c of clients) c.write(`event: live\ndata: ${JSON.stringify({ card: id })}\n\n`);
       return send(res, 200, w);
     }
     // Check items: POST …/items/seed {expected_version?} and POST …/items/<n> {state, result?,

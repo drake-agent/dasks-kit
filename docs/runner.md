@@ -208,7 +208,8 @@ While a build, review or fix runs, the card's panel on the board shows what the 
 changed so far. Every 15 s the runner reads the new lines of the phase's log (a Claude tool call or text, a Codex output
 line) and the worktree's changes since the run started (committed or not; untracked files are listed without content),
 and posts them to `POST /api/tasks/<card>/live` with its agent token. When the phase ends it posts the last state once
-more, marked ended, and the panel keeps showing it.
+more, marked ended, and the panel keeps showing it. Each update carries an increasing `seq`; the board ignores one that
+arrives after a newer one, so a slow update of an earlier phase never replaces a later state.
 
 - **Nothing secret leaves the machine.** The runner redacts every step and the diff before it sends them, and the board
   does it again before it keeps them, secret command-line flags included (`-a`, `-p<pw>`, `--password`, `--token`,

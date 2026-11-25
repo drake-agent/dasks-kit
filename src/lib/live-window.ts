@@ -20,12 +20,14 @@ export interface LiveStep { at: string; kind: (typeof STEP_KINDS)[number]; text:
 export interface LiveFile { path: string; status: (typeof FILE_STATUSES)[number]; added: number; deleted: number }
 export interface LiveWindow {
   card: string; run_id: string | null; actor: string | null; phase: string | null; updated_at: string | null;
+  /** The runner's ordering number of the update shown (0 = none): an update with a lower one arrived late. */
+  seq: number;
   /** true once the runner said the agent stopped: the window then shows its last state. */
   ended: boolean;
   steps: LiveStep[]; files: LiveFile[]; diff: string; diff_truncated: boolean;
 }
 
-export const emptyWindow = (card: string): LiveWindow => ({ card, run_id: null, actor: null, phase: null, updated_at: null, ended: false, steps: [], files: [], diff: '', diff_truncated: false });
+export const emptyWindow = (card: string): LiveWindow => ({ card, run_id: null, actor: null, phase: null, updated_at: null, seq: 0, ended: false, steps: [], files: [], diff: '', diff_truncated: false });
 
 // Secrets passed as command-line flags, which the shared redactor does not know: `-a <pw>` (redis-cli), `-p<pw>` (mysql),
 // `--password x` / `--token=x` and the like, `-u user:pass` (curl). The value is replaced, the flag kept.
@@ -108,7 +110,7 @@ function parseFiles(v: unknown): LiveFile[] {
   });
 }
 
-const KEYS = new Set(['run_id', 'phase', 'steps', 'files', 'diff', 'ended']);
+const KEYS = new Set(['run_id', 'seq', 'phase', 'steps', 'files', 'diff', 'ended']);
 
 /** The live windows of this server process, at most maxCards of them. */
 export class LiveStore {
@@ -118,13 +120,18 @@ export class LiveStore {
 
   get(card: string): LiveWindow { return this.windows.get(card) ?? emptyWindow(card); }
 
-  /** POST body {run_id, phase?, steps?, files?, diff?, ended?}: steps are added (the newest MAX_STEPS kept), files and
-   *  diff replace what was there, and a new run_id starts the window over. */
-  update(card: string, body: unknown, actor: string, now = new Date()): LiveWindow {
+  /** POST body {run_id, seq, phase?, steps?, files?, diff?, ended?}: steps are added (the newest MAX_STEPS kept), files
+   *  and diff replace what was there, and a new run_id starts the window over. `seq` orders the runner's updates (its
+   *  clock in ms, made strictly increasing): one not newer than the window's arrived late and is ignored (`stale: true` in
+   *  the answer, nothing changes), so a slow update of an earlier phase never replaces a later one or reopens an ended
+   *  window. A new run is taken whatever its seq once the shown run has ended (another machine's clock may be behind). */
+  update(card: string, body: unknown, actor: string, now = new Date()): LiveWindow & { stale?: true } {
     if (!isObj(body)) throw bad('body must be a JSON object');
     const extra = Object.keys(body).filter((k) => !KEYS.has(k));
     if (extra.length) throw bad(`unknown field(s): ${extra.join(', ')}`);
     if (typeof body.run_id !== 'string' || !/^[A-Za-z0-9._:-]{1,80}$/.test(body.run_id)) throw bad('run_id must be 1-80 letters, digits or ._:-');
+    if (!Number.isSafeInteger(body.seq) || (body.seq as number) < 1) throw bad('seq must be a whole number >= 1');
+    const seq = body.seq as number;
     if (body.phase !== undefined && !(PHASES as readonly unknown[]).includes(body.phase)) throw bad(`phase must be ${PHASES.join(' | ')}`);
     if (body.ended !== undefined && typeof body.ended !== 'boolean') throw bad('ended must be true or false');
     if (body.diff !== undefined && typeof body.diff !== 'string') throw bad('diff must be a string');
@@ -134,9 +141,10 @@ export class LiveStore {
     const diff = typeof body.diff === 'string' ? sanitizeDiff(body.diff) : null;
 
     const old = this.windows.get(card);
+    if (old && seq <= old.seq && !(old.ended && old.run_id !== body.run_id)) return { ...old, stale: true };
     const prev = old && old.run_id === body.run_id ? old : emptyWindow(card);
     const next: LiveWindow = {
-      card, run_id: body.run_id, actor, phase: (body.phase as string | undefined) ?? prev.phase, updated_at: at, ended: body.ended === true,
+      card, run_id: body.run_id, actor, seq, phase: (body.phase as string | undefined) ?? prev.phase, updated_at: at, ended: body.ended === true,
       steps: [...prev.steps, ...steps].slice(-MAX_STEPS), files: files ?? prev.files,
       diff: diff ? diff.diff : prev.diff, diff_truncated: diff ? diff.truncated : prev.diff_truncated,
     };

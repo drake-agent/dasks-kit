@@ -79,6 +79,11 @@ export async function worktreeSnapshot(dir: string, base: string): Promise<{ fil
   return { files: list, diff: diff === null ? '' : sanitizeDiff(diff).diff };
 }
 
+/** Every live update's ordering number: this process's clock in ms, made strictly increasing across all its pushers, so a
+ *  later phase of a run always outranks an earlier one (the board drops an update that arrives after a newer one). */
+let lastSeq = 0;
+export const nextSeq = (): number => (lastSeq = Math.max(lastSeq + 1, Date.now()));
+
 export interface LivePusher { tick(): Promise<boolean>; stop(): Promise<boolean> }
 
 /** Starts posting at once (one tick per interval) until stop(), which posts the last state with ended: true. */
@@ -115,8 +120,8 @@ export function livePusher(o: LivePushOptions): LivePusher {
     if (off) return false;
     const steps = stepsOf(newLines());
     const wt = await worktreeSnapshot(o.dir, o.base);
-    const body = { run_id: o.runId, phase: o.phase, ...(steps.length ? { steps } : {}), ...(wt ?? {}), ...(ended ? { ended } : {}) };
-    const key = JSON.stringify({ ...body, steps: undefined });
+    const body = { run_id: o.runId, seq: nextSeq(), phase: o.phase, ...(steps.length ? { steps } : {}), ...(wt ?? {}), ...(ended ? { ended } : {}) };
+    const key = JSON.stringify({ ...body, seq: undefined, steps: undefined });
     if (!ended && !steps.length && key === last) return false;
     return o.api('POST', route, body).then(() => { last = key; return true; }, (e: any) => { if (e?.status === 404) off = true; return false; });
   }

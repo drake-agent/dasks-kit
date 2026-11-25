@@ -106,6 +106,13 @@ test('pusher: posts new steps and the sanitized diff since base (committed, unco
     assert.equal(e.calls.at(-1)!.body.ended, true);
     assert.equal(await p.stop(), false, 'stop sends once');
     assert.equal(e.calls.length, 3);
+    const seqs = e.calls.map((c) => c.body.seq);
+    assert.ok(seqs.every((x, i) => Number.isSafeInteger(x) && (i === 0 || x > seqs[i - 1])), `increasing seq: ${seqs}`);
+    // The next phase's pusher (same run) always outranks every update of this one, so a late one is dropped by the board.
+    const next = livePusher({ api: e.api, card: 'shared.t-live', runId: 'run-1', phase: 'reviewing', dir: e.dir, base: e.base, logFile: e.logFile, intervalMs: 60_000 });
+    fs.appendFileSync(e.logFile, 'review step\n');
+    assert.equal(await next.stop(), true);
+    assert.ok(e.calls.at(-1)!.body.seq > seqs.at(-1)!);
   } finally { e.cleanup(); }
 });
 
