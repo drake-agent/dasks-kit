@@ -6,7 +6,8 @@
   spec); the first version stays at 1,500. The spec writer prompt and the `spec-writer` skill say so. See docs/specs.md.
 - Specs: a spec versions folder that cannot be read (a permission error, a file in its place) answers 503 with
   `Retry-After`, never "no spec yet" (404, version 0), and a `PUT /spec` on it stores nothing, so a second version 1 is
-  never written over a stored spec.
+  never written over a stored spec. `GET /api/asks` and `/asks.md` still answer 200: such a card is listed under
+  `unavailable` with the reason, and every other card's decision is served.
 - Touches from the real PR: a PR file whose name holds glob characters (`app/[id]/page.tsx`, `[slug].ts`) now holds
   that one file. It used to be read as a pattern cut at `[`, so it held its whole folder (or, at the repo root, was
   dropped). See docs/cards.md.
