@@ -107,7 +107,7 @@ async function main(argv: string[]) {
     if (!marked(d.todo) && !marked(d.skip)) failed = true;
   });
   // Any summary counts, a file's too: a late uncaught error in a file fails that file's summary while the run's own
-  // summary can still say success (review pass 1, P1); `node --test` exits 1 then.
+  // summary can still say success; `node --test` exits 1 then.
   stream.on('test:summary', (d: any) => {
     if (d.success === false) failed = true;
   });

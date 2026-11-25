@@ -480,7 +480,7 @@ test('captain-merge in hands-off mode: no merge OK is read or asked for; a clean
   } finally { await s.stop(); cleanup(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('captain-merge: hands-off turned off during the checks means no merge without an OK (review R1)', async () => {
+test('captain-merge: hands-off turned off during the checks means no merge without an OK', async () => {
   const card = 'beta.t-flip';
   const { root, cleanup } = tempRepo([task({ id: card, title: 'Flip', status: 'review', pr: PR } as any)]);
   claimedCards(root, [card]);
