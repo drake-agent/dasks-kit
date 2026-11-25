@@ -69,6 +69,9 @@ export interface Config {
   captain: CaptainConfig;
   /** Push the data repo's commits to a remote the owner provides (src/lib/backup.ts); remote "" = off. */
   backup: BackupConfig;
+  /** Where the board's data/ files live (docs/storage.md): git = the data repo (default), sqlite = rows of one SQLite
+   *  file at sqlite_path ("" = <Dasks home>/store/board.db; ~ expanded), filled once by `bin/board-store.ts import`. */
+  store: { mode: 'git' | 'sqlite'; sqlite_path: string };
   /** The daily summary (src/lib/summary.ts): written once a day at `at` (HH:MM, this Mac's time zone). */
   summary: SummaryConfig;
   /** The review triage page (src/lib/triage.ts): a card in review with no activity for stale_days is stale. */
@@ -144,6 +147,7 @@ export const DEFAULT_CONFIG: Config = {
   fleet: DEFAULT_FLEET,
   captain: DEFAULT_CAPTAIN,
   backup: DEFAULT_BACKUP,
+  store: { mode: 'git', sqlite_path: '' },
   summary: DEFAULT_SUMMARY,
   review: DEFAULT_REVIEW,
 };
@@ -154,6 +158,9 @@ export function expandHome(p: string): string {
 
 /** The board data repo: DASKS_ROOT, else <Dasks home>/data (where install.sh puts it). */
 export const boardRoot = (): string => process.env.DASKS_ROOT || path.join(dasksHome(), 'data');
+
+/** The SQLite store file of a board (config store.sqlite_path, else <Dasks home>/store/board.db). */
+export const storeDbPath = (cfg: Pick<Config, 'store'>): string => (cfg.store.sqlite_path ? path.resolve(expandHome(cfg.store.sqlite_path)) : path.join(dasksHome(), 'store', 'board.db'));
 
 /** The config.json path of a board root. */
 export const configFile = (root: string) => process.env.DASKS_CONFIG || path.join(root, 'config.json');
@@ -171,6 +178,7 @@ export function loadConfig(root: string): Config {
     fleet: { ...DEFAULT_FLEET, ...(user.fleet ?? {}) },
     captain: { ...DEFAULT_CAPTAIN, ...(user.captain ?? {}) },
     backup: { ...DEFAULT_BACKUP, ...(user.backup ?? {}) },
+    store: { ...DEFAULT_CONFIG.store, ...(user.store ?? {}) },
     summary: { ...DEFAULT_SUMMARY, ...(user.summary ?? {}) },
     review: { ...DEFAULT_REVIEW, ...(user.review ?? {}) },
   };
@@ -189,6 +197,8 @@ export function loadConfig(root: string): Config {
 }
 
 function validateConfig(cfg: Config): void {
+  if (cfg.store.mode !== 'git' && cfg.store.mode !== 'sqlite') throw new Error('config: store.mode must be "git" or "sqlite"');
+  if (typeof cfg.store.sqlite_path !== 'string') throw new Error('config: store.sqlite_path must be a file path ("" = the default)');
   for (const k of ['doing_hours', 'review_hours', 'ready_idle_hours', 'missing_hours', 'top_n'] as const)
     if (!(Number.isFinite(cfg.stuck[k]) && cfg.stuck[k] > 0) || (k === 'top_n' && !Number.isInteger(cfg.stuck[k]))) throw new Error(`config: stuck.${k} must be positive${k === 'top_n' ? ' integer' : ''}`);
   for (const e of projectsConfigErrors(cfg.projects)) throw new Error(`config: ${e}`);

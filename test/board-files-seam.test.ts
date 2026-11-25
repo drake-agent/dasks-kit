@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ALLOWED = new Set(['src/lib/board-files.ts']);
+const ALLOWED = new Set(['src/lib/board-files.ts', 'src/lib/board-sqlite.ts']);
 /** A board data path literal: 'data', "data/…", `data/…`. data/decisions/ is gitignored, not a board file. */
 const DATA_PATH = /['"`]data(?:['"`]|\/(?!decisions\b))/;
 const FS_CALL = /\bfs\.(readFileSync|readdirSync|existsSync|statSync|lstatSync|realpathSync|writeFileSync|appendFileSync|rmSync|unlinkSync|renameSync|mkdirSync|openSync|copyFileSync)\b/;

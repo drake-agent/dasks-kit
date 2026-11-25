@@ -24,6 +24,7 @@ import { normTouchesValue, SHA_RE } from './touches-actual.ts';
 import { cleanProfileInput } from './profile.ts';
 import { launchGateOf, versionTarget } from './version-mode.ts';
 import * as boardFiles from './board-files.ts';
+import * as sqliteStore from './board-sqlite.ts';
 
 export class HttpError extends Error {
   status: number;
@@ -96,6 +97,9 @@ export function gate(root: string, id: string, actor: string, warnings: string[]
  *  owner is gone: the pid is dead, it is from an earlier boot (pids are reused after a reboot), its pid now belongs to a
  *  later process, or it is this very process without holding it. */
 export function withRepoLock<T>(root: string, fn: () => T, timeoutMs = 15000): T {
+  // sqlite store (docs/storage.md): one server process and every write one synchronous transaction, so no lock folder,
+  // journal or recovery; nesting stays allowed as before.
+  if (boardFiles.storeHead(root) !== null) return fn();
   const lock = path.join(gitCommonDir(root), 'dasks.lock');
   const outer = !held.has(lock);
   return withDirLock(lock, () => {
@@ -285,6 +289,7 @@ function writeLanded(root: string, head: string, rels: string[], written: Record
 
 /** Unreadable write journals kept aside by recoverJournal (absolute paths). While one is there, no write runs. */
 export function corruptJournals(root: string): string[] {
+  if (boardFiles.storeHead(root) !== null) return []; // sqlite store: no git write journal (one left from git mode is not this store's)
   const j = journalPath(root), dir = path.dirname(j), base = path.basename(j) + '.corrupt-';
   try { return fs.readdirSync(dir).filter((f) => f.startsWith(base)).sort().map((f) => path.join(dir, f)); } catch { return []; } // not-board: git journal
 }
@@ -366,6 +371,7 @@ function crashPoint(point: 'before-commit' | 'after-commit'): void {
  *  hand commit landed meanwhile), nothing is written: 409. */
 /** Atomically write files and commit exactly those paths. Rolls back on any failure before the commit lands. */
 export function commitFiles(root: string, files: { rel: string; content: string }[], message: string, expect: Record<string, Buffer | string> = {}): string {
+  if (boardFiles.storeHead(root) !== null) return commitToStore(root, files, message, expect);
   const backups = files.map((f) => {
     const abs = safeAbs(root, f.rel);
     return { ...f, abs, old: fs.existsSync(abs) ? fs.readFileSync(abs) : null }; // not-board: git store write
@@ -435,6 +441,19 @@ export function commitFiles(root: string, files: { rel: string; content: string 
     if (consistent) try { fs.rmSync(journal, { force: true }); } catch { /* gone */ } // not-board: git store write
   }
   try { return git(root, ['rev-parse', 'HEAD']).trim(); } catch { return ''; }
+}
+
+/** commitFiles in sqlite mode: the same path rule (under data/, not the ledger), one store transaction and the same
+ *  reload bookkeeping; no git, journal or lock files. Returns `sqlite:<seq>`. */
+function commitToStore(root: string, files: { rel: string; content: string }[], message: string, expect: Record<string, Buffer | string>): string {
+  for (const f of files) if (f.rel.split('/').some((s) => s === '..' || s === '.' || s === '') || sqliteStore.relOf(path.join(root, f.rel)) !== f.rel || f.rel === 'data')
+    throw new HttpError(400, 'path outside data/');
+  let seq: number;
+  try { seq = sqliteStore.commit(files, message, expect); }
+  catch (e) { if (e instanceof sqliteStore.StoreConflict) throw new HttpError(409, e.message); throw new HttpError(503, `store write failed: ${(e as Error).message}`, { retry_after: 2 }); }
+  lastCommitted = { files: new Map(files.map((f) => [f.rel, createHash('sha1').update(f.content).digest('hex')])), at: Date.now() };
+  for (const rel of lastCommitted.files.keys()) committedSinceReload.add(rel);
+  return `sqlite:${seq}`;
 }
 
 /** Resolve a repo-relative path and make sure it (and every existing ancestor, symlinks resolved) stays inside data/. */

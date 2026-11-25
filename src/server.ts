@@ -65,11 +65,13 @@ import { migrateBoard, SchemaTooNew, SCHEMA_VERSION } from './lib/migrate.ts';
 import { nodeProblem } from './lib/node-floor.ts';
 import { type Body, parseAnswer, parseCardAction, parseChat, parseLease, parseLeaseCheck, parseNodePatch, parseOutcomeOrFail, parseResetAttempts, parseTaskPatch, versionOf } from './lib/bodies.ts';
 import * as boardFiles from './lib/board-files.ts';
+import { openBoardStore } from './lib/board-store-open.ts';
 
 const ROOT = boardRoot();
 const NODE_PROBLEM = nodeProblem(process.versions.node);
 if (NODE_PROBLEM) console.error(`warning: ${NODE_PROBLEM}`);
 const cfg = loadConfig(ROOT);
+const STORE_MODE = openBoardStore(ROOT, cfg); // git or sqlite (docs/storage.md)
 {
   const i = process.argv.indexOf('--listen');
   const listen = i > 0 ? process.argv[i + 1] : process.env.DASKS_LISTEN;
@@ -131,7 +133,7 @@ const LEDGER = ledgerPath(ROOT);
 // ---------- board cache + live reload ----------
 // A crash between writing a file and committing it leaves staged paths, stray temp files or a stale index.lock that would
 // make every later write fail: tidy that up (and say so loudly) before serving.
-for (const line of recoverRepo(ROOT)) console.error(`recovery: ${line}`);
+if (STORE_MODE === 'git') for (const line of recoverRepo(ROOT)) console.error(`recovery: ${line}`);
 /** '' = the board's files follow this kit's schema. A board newer than the kit is not served at all. */
 let schemaProblem = '';
 try {
@@ -244,7 +246,7 @@ function armReload(delay: number) {
 }
 // A full reload every 10 minutes too: a lost file event must not leave a card stale until the next restart.
 setInterval(reload, 10 * 60_000).unref();
-try {
+if (STORE_MODE === 'git') try { // sqlite: nothing edits the store by hand; writes reload themselves
   fs.watch(path.join(ROOT, 'data'), { recursive: true }, (_e, f) => {
     if (f && (String(f).endsWith('.tmp') || String(f).includes('/.') || String(f).startsWith(`decisions${path.sep}`))) return;
     scheduleReload(f ? String(f) : null);

@@ -97,6 +97,7 @@ const OID_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
  *  Follows symbolic ref chains (HEAD → refs/heads/alias → refs/heads/main), loose then packed; anything it can't
  *  resolve to an object id falls back to `git rev-parse HEAD`. */
 export function headSha(root: string): string {
+  const store = boardFiles.storeHead(root); if (store !== null) return store; // sqlite store: its newest change
   try {
     const common = gitCommonDir(root);
     const dotgit = path.join(root, '.git');
@@ -126,6 +127,8 @@ export class MissingObjectError extends Error {}
 function catBlobs(root: string, ids: string[]): Map<string, Buffer> {
   const out = new Map<string, Buffer>();
   if (!ids.length) return out;
+  // sqlite store: an id is `s<seq>:<rel>` (committedTree), read from the store as it is now
+  if (boardFiles.storeHead(root) !== null) { for (const id of ids) out.set(id, boardFiles.readFileSync(path.join(root, id.slice(id.indexOf(':') + 1)))); return out; }
   const buf = runGit(root, ['cat-file', '--batch'], Buffer.from(ids.join('\n') + '\n'));
   let i = 0;
   while (i < buf.length) {
@@ -139,6 +142,15 @@ function catBlobs(root: string, ids: string[]): Map<string, Buffer> {
   return out;
 }
 
+/** Task and spec files of commit `head` with their blob ids. sqlite store: the store's files, id `s<seq>:<rel>` (the
+ *  change that last wrote the file names its bytes, as a blob id does). */
+function committedTree(root: string, head: string): { oid: string; p: string }[] {
+  if (boardFiles.storeHead(root) !== null) return [...boardFiles.storeList('data/tasks'), ...boardFiles.storeList('data/specs')].map((f) => ({ oid: `s${f.seq}:${f.rel}`, p: f.rel }));
+  return runGit(root, ['ls-tree', '-r', '-z', '--full-tree', head, '--', 'data/tasks', 'data/specs']).toString('utf8').split('\0').flatMap((e) => {
+    const tab = e.indexOf('\t'); return tab < 0 ? [] : [{ oid: e.slice(0, tab).split(' ')[2], p: e.slice(tab + 1) }];
+  });
+}
+
 // Per task, keyed by the blob ids it was built from: a rebuild re-reads only tasks and specs that changed.
 const factsCache = new Map<string, { key: string; facts: SpecFacts }>();
 /** Spec facts for every task, read from one pinned commit only, never working files or loadBoard objects. A write of another process that is not committed
@@ -147,12 +159,10 @@ const factsCache = new Map<string, { key: string; facts: SpecFacts }>();
 export function committedSpecIndex(root: string, head = headSha(root)): SpecIndex {
   const facts = new Map<string, SpecFacts>();
   if (!head) throw new Error('HEAD does not resolve to a commit');
-  const tree = runGit(root, ['ls-tree', '-r', '-z', '--full-tree', head, '--', 'data/tasks', 'data/specs']).toString('utf8').split('\0');
+  const tree = committedTree(root, head);
   const taskBlob = new Map<string, string>();                       // id → blob of data/tasks/<g>/<slug>.md
   const specs = new Map<string, { v: number; meta: string; text: string }>(); // id → current version's blobs
-  for (const e of tree) {
-    const tab = e.indexOf('\t'); if (tab < 0) continue;
-    const oid = e.slice(0, tab).split(' ')[2]; const p = e.slice(tab + 1);
+  for (const { oid, p } of tree) {
     let m = /^data\/tasks\/([a-z][a-z0-9]{0,23})\/(t-[a-z0-9-]+)\.md$/.exec(p);
     if (m) { taskBlob.set(`${m[1]}.${m[2]}`, oid); continue; }
     m = /^data\/specs\/([a-z][a-z0-9]{0,23})\/(t-[a-z0-9-]+)\/versions\/([1-9]\d{0,8})\.(json|md)$/.exec(p);
