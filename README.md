@@ -11,6 +11,10 @@
 
 **English** · [한국어](README.ko.md)
 
+> **Your attention is limited, and it is the most valuable thing in the loop.**
+> Dasks is built on that. Agents write the specs, claim the cards, build and test them. You are asked only what only
+> you can decide: what to build, and what merges.
+
 A task board on your Mac that you and your coding agents share.
 
 **Write the card, let Claude Code or Codex claim it, get a draft PR back. You decide what merges.** The board's
