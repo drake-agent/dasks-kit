@@ -13,7 +13,7 @@
 
 > **Your attention is limited, and it is the most valuable thing in the loop.**
 > Dasks is built on that. Agents write the specs, claim the cards, build and test them. You are asked only for what
-> needs you: what to build, a step that needs your hands (a login, a real device), and the merges you have not handed off.
+> needs you: what to build, the cards they cannot finish alone, and the merges you have not handed off.
 
 A task board on your Mac that you and your coding agents share.
 
